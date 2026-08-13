@@ -27,7 +27,8 @@ Segments may be labels like: language, built-ins, intl402, staging
 or paths relative to test262/test (e.g. built-ins/Array).
 ES editions may be labels like: ES5, ES6, ES2016, ..., ES2025, ESNext
 or bare values like `5`, `6`, `2016`, or `next`.
-APIs.
+Tests are classified by the newest edition required by their Test262
+front-matter `features` list.
 */
 
 use std::cell::RefCell;
@@ -238,10 +239,10 @@ fn select_files_to_run(
       continue;
     }
     if !es_versions.is_empty() {
-      let editions = file_edition_labels(&file);
+      let edition = file_required_edition_label(&file);
       if !es_versions
         .iter()
-        .any(|allowed| editions.iter().any(|edition| edition == allowed))
+        .any(|allowed| Some(allowed) == edition.as_ref())
       {
         continue;
       }
@@ -639,7 +640,7 @@ struct RunnerOptions {
   /// Exclude tests whose path contains one of these exact path segments.
   #[arg(long = "anti-segment", value_name = "SEGMENT", value_delimiter = ',')]
   anti_segments: Vec<String>,
-  /// Include only tests whose inferred ES edition matches one of these values.
+  /// Include only tests whose newest Test262 feature edition matches one of these values.
   #[arg(
     long = "es-version",
     alias = "edition",
@@ -1803,6 +1804,21 @@ fn feature_edition_labels(features: Option<&[String]>) -> Vec<String> {
     .collect()
 }
 
+/// Returns the newest edition required by a Test262 feature list.
+///
+/// A test tagged with both `class` (ES6) and `async-iteration` (ES2018)
+/// requires ES2018. Selecting it for ES6 merely because one of its features
+/// originated in ES6 mixes later syntax and semantics into the ES6 corpus.
+fn required_edition_label(features: Option<&[String]>) -> Option<String> {
+  features
+    .unwrap_or_default()
+    .iter()
+    .map(|feature| feature_edition(feature).unwrap_or(99))
+    .max()
+    .and_then(edition_label)
+    .map(str::to_string)
+}
+
 /// Returns the normalized ES version for a given input string.
 fn normalize_es_version(input: &str) -> Option<String> {
   let raw = input.trim();
@@ -1898,6 +1914,14 @@ fn file_edition_labels(file: &Path) -> Vec<String> {
   };
   let features = test262_fyi_features(&source);
   feature_edition_labels(Some(&features))
+}
+
+/// Returns the edition required to run a test, using its complete Test262 YAML
+/// feature list rather than the narrower test262.fyi reporting parser.
+fn file_required_edition_label(file: &Path) -> Option<String> {
+  let source = fs::read_to_string(file).ok()?;
+  let meta = parse_meta(&source)?;
+  required_edition_label(meta.features.as_deref())
 }
 
 /// Parse Test262 metadata YAML into `Meta`
@@ -3722,6 +3746,32 @@ var ok = 1;
   }
 
   #[test]
+  fn selection_uses_the_newest_required_feature_edition() {
+    assert_eq!(
+      required_edition_label(Some(&["class".to_string(), "async-iteration".to_string()])),
+      Some("ES2018".to_string())
+    );
+    assert_eq!(
+      required_edition_label(Some(&[
+        "class".to_string(),
+        "class-fields-public".to_string()
+      ])),
+      Some("ES2022".to_string())
+    );
+    assert_eq!(
+      required_edition_label(Some(&["class".to_string(), "Temporal".to_string()])),
+      Some("ESNext".to_string())
+    );
+    assert_eq!(
+      required_edition_label(Some(&[
+        "class".to_string(),
+        "future-test262-feature".to_string()
+      ])),
+      Some("ESNext".to_string())
+    );
+  }
+
+  #[test]
   fn fyi_edition_scores_are_cumulative() {
     let additions = HashMap::from([
       (
@@ -3791,6 +3841,8 @@ var ok = 1;
     let root = temp_dir("select-es-version");
     let _guard = TempDirGuard(root.clone());
     let es5_file = root.join("language/comments/es5.js");
+    let mixed_file = root.join("language/expressions/mixed.js");
+    let multiline_file = root.join("language/expressions/multiline.js");
     let es2024_file = root.join("language/expressions/es2024.js");
     let builtin_file = root.join("built-ins/Array/push.js");
 
@@ -3801,6 +3853,28 @@ var ok = 1;
 features: [caller]
 ---*/
 var ok = 1;
+"#
+      ),
+    );
+    write_file(
+      &mixed_file,
+      denko::js!(
+        r#"/*---
+features: [class, async-iteration]
+---*/
+class C {}
+"#
+      ),
+    );
+    write_file(
+      &multiline_file,
+      denko::js!(
+        r#"/*---
+features:
+  - class
+  - class-fields-public
+---*/
+class C {}
 "#
       ),
     );
@@ -3817,7 +3891,13 @@ const ok = 1;
     write_file(&builtin_file, denko::js!("const ok = 1;\n"));
 
     let selected = select_files_to_run(
-      vec![builtin_file, es2024_file, es5_file.clone()],
+      vec![
+        builtin_file,
+        es2024_file,
+        mixed_file.clone(),
+        multiline_file.clone(),
+        es5_file.clone(),
+      ],
       &[],
       &[],
       &[],
@@ -3826,6 +3906,26 @@ const ok = 1;
     );
 
     assert_eq!(selected, vec![es5_file]);
+
+    let selected = select_files_to_run(
+      vec![mixed_file.clone(), multiline_file.clone()],
+      &[],
+      &[],
+      &[],
+      &["ES2018".to_string()],
+      None,
+    );
+    assert_eq!(selected, vec![mixed_file]);
+
+    let selected = select_files_to_run(
+      vec![multiline_file.clone()],
+      &[],
+      &[],
+      &[],
+      &["ES2022".to_string()],
+      None,
+    );
+    assert_eq!(selected, vec![multiline_file]);
   }
 
   #[test]
@@ -3981,9 +4081,19 @@ const ok = 1;
       .array_prototype
       .expect("minimal intrinsics should install Array.prototype");
     let array_props = Rc::new(RefCell::new(ObjectData::new()));
-    array_props
-      .borrow_mut()
-      .set_prototype_value(array_proto);
+    {
+      let mut props = array_props.borrow_mut();
+      props.set_prototype_value(array_proto);
+      props.properties.insert(
+        PropertyKey::String("length".to_string().into()),
+        PropertyDescriptor::Data {
+          value: Value::Number(2.0),
+          writable: true,
+          enumerable: false,
+          configurable: false,
+        },
+      );
+    }
     let array = Value::Array(
       Rc::new(RefCell::new(denko::value::ArrayData::from(vec![
         Some(Value::Number(1.0)),
