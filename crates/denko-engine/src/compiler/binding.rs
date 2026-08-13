@@ -382,8 +382,6 @@ impl super::Compiler {
     self.emit(Op::LoadLocal, LINE);
     self.emit_byte(self.slot_to_u8(value_slot)?, LINE);
     self.emit(Op::SetProperty, LINE);
-    let slot = self.alloc_ic_slot()?;
-    self.emit_byte(slot, LINE);
     self.emit(Op::Discard, LINE);
     Ok(())
   }
@@ -416,7 +414,7 @@ impl super::Compiler {
         self.emit(Op::LoadLocal, LINE);
         self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
         self.emit(Op::Undefined, LINE);
-        // Use CompareJump: cond_type 6 = StrictEq, jump if true
+        // Use CompareJump: cond_type 6 = StrictEq, jump if false.
         self.emit_with_payload(Op::CompareJump, 6, LINE);
         let skip_default = self.current_ip();
         self.emit_byte(0, LINE);
@@ -477,8 +475,6 @@ impl super::Compiler {
     self.emit_get_global_name("Symbol");
     self.emit_constant(Value::String("iterator".to_string().into()), LINE);
     self.emit(Op::GetProperty, LINE);
-    let iterator_ic = self.alloc_ic_slot()?;
-    self.emit_byte(iterator_ic, LINE);
     self.emit(Op::GetProperty, LINE);
     self.emit(Op::CallBuiltin, LINE);
     self.emit_byte(0, LINE);
@@ -550,7 +546,7 @@ impl super::Compiler {
             self.emit(Op::LoadLocal, LINE);
             self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
             self.emit(Op::Undefined, LINE);
-            // Use CompareJump: cond_type 6 = StrictEq, jump if true
+            // Use CompareJump: cond_type 6 = StrictEq, jump if false.
             self.emit_with_payload(Op::CompareJump, 6, LINE);
             let skip_default = self.current_ip();
             self.emit_byte(0, LINE);
@@ -630,7 +626,7 @@ impl super::Compiler {
         self.emit(Op::LoadLocal, LINE);
         self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
         self.emit(Op::Undefined, LINE);
-        // Use CompareJump: cond_type 6 = StrictEq, jump if true
+        // Use CompareJump: cond_type 6 = StrictEq, jump if false.
         self.emit_with_payload(Op::CompareJump, 6, LINE);
         let skip_default = self.current_ip();
         self.emit_byte(0, LINE);
@@ -665,8 +661,6 @@ impl super::Compiler {
         self.emit_get_global_name("Symbol");
         self.emit_constant(Value::String("iterator".to_string().into()), LINE);
         self.emit(Op::GetProperty, LINE);
-        let iterator_ic = self.alloc_ic_slot()?;
-        self.emit_byte(iterator_ic, LINE);
         self.emit(Op::GetProperty, LINE);
         self.emit(Op::CallBuiltin, LINE);
         self.emit_byte(0, LINE);

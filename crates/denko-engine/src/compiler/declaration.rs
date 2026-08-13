@@ -383,7 +383,7 @@ impl Compiler {
             self.emit(Op::LoadLocal, LINE);
             self.emit_byte(self.slot_to_u8(discr_slot)?, LINE);
             self.compile_expr_oast(test)?;
-            // Use CompareJump: cond_type 6 = StrictEq, jump if false (negated)
+            // Use CompareJump: cond_type 6 = StrictEq, jump if false.
             self.emit_with_payload(Op::CompareJump, 6, LINE);
             let skip_jump = self.current_ip();
             self.emit_byte(0, LINE);
@@ -763,8 +763,6 @@ impl Compiler {
           self.emit_get_global_name("Symbol");
           self.emit_constant(Value::String("iterator".to_string().into()), LINE);
           self.emit(Op::GetProperty, LINE);
-          let symbol_iterator_slot = self.alloc_ic_slot()?;
-          self.emit_byte(symbol_iterator_slot, LINE);
           self.emit(Op::GetProperty, LINE);
           self.emit(Op::CallBuiltin, LINE);
           self.emit_byte(0, LINE);
@@ -812,16 +810,12 @@ impl Compiler {
         self.emit(Op::Copy, LINE);
         self.emit_constant(Value::String("done".to_string().into()), LINE);
         self.emit(Op::GetProperty, LINE);
-        let done_slot = self.alloc_ic_slot()?;
-        self.emit_byte(done_slot, LINE);
         self.emit(Op::JumpIfTrue, LINE);
         let exit_jump = self.current_ip() - 1;
         self.emit_byte(0, LINE);
         self.emit_byte(0, LINE);
         self.emit_constant(Value::String("value".to_string().into()), LINE);
         self.emit(Op::GetProperty, LINE);
-        let value_slot = self.alloc_ic_slot()?;
-        self.emit_byte(value_slot, LINE);
 
         match &f.left {
           oast::ForStatementLeft::VariableDeclaration(v) => {
@@ -1040,7 +1034,7 @@ impl Compiler {
         self.emit_byte(self.slot_to_u8(keys_slot)?, LINE);
         self.emit_constant(Value::String("length".to_string().into()), LINE);
         self.emit(Op::GetProperty, LINE);
-        // Use CompareJump: cond_type 2 = Lt, jump if true
+        // Use CompareJump: cond_type 2 = Lt, jump if false.
         self.emit_with_payload(Op::CompareJump, 2, LINE);
         let exit_jump = self.current_ip();
         self.emit_byte(0, LINE);
@@ -1641,7 +1635,7 @@ impl Compiler {
         self.emit(Op::LoadLocal, LINE);
         self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
         self.emit(Op::Undefined, LINE);
-        // Use CompareJump: cond_type 6 = StrictEq, jump if true
+        // Use CompareJump: cond_type 6 = StrictEq, jump if false.
         self.emit_with_payload(Op::CompareJump, 6, LINE);
         let skip_jump = self.current_ip();
         self.emit_byte(0, LINE);
@@ -1689,7 +1683,7 @@ impl Compiler {
       self.emit(Op::LoadLocal, LINE);
       self.emit_byte(self.slot_to_u8(idx)?, LINE);
       self.emit(Op::Undefined, LINE);
-      // Use CompareJump: cond_type 6 = StrictEq, jump if true
+      // Use CompareJump: cond_type 6 = StrictEq, jump if false.
       self.emit_with_payload(Op::CompareJump, 6, LINE);
       let skip_jump = self.current_ip();
       self.emit_byte(0, LINE);
@@ -2016,7 +2010,6 @@ impl Compiler {
           iterator_close_stack: Vec::new(),
           label_patches: Vec::new(),
           current_module: self.current_module.clone(),
-          next_ic_slot: 0,
           pending_operand_bytes: 0,
           allow_new_target: true,
           allow_super: true,
@@ -2033,8 +2026,6 @@ impl Compiler {
         inner.emit_u16(inner.global_index_to_u16(global_idx)?, LINE);
         inner.emit_constant(Value::String("from".to_string().into()), LINE);
         inner.emit(Op::GetProperty, LINE);
-        let from_slot = inner.alloc_ic_slot()?;
-        inner.emit_byte(from_slot, LINE);
         inner.emit(Op::LoadLocal, LINE);
         inner.emit_byte(0, LINE);
         inner.emit(Op::SuperConstruct, LINE);
@@ -2071,7 +2062,6 @@ impl Compiler {
           is_class_constructor: true,
           is_async: false,
           is_generator: false,
-          ic_table: Vec::new(),
         }
       } else {
         let mut inner = Compiler::new(Arc::clone(&self.source_text));
@@ -2112,7 +2102,6 @@ impl Compiler {
           is_class_constructor: true,
           is_async: false,
           is_generator: false,
-          ic_table: Vec::new(),
         }
       }
     };
@@ -2333,7 +2322,6 @@ impl Compiler {
       iterator_close_stack: Vec::new(),
       label_patches: Vec::new(),
       current_module: self.current_module.clone(),
-      next_ic_slot: 0,
       pending_operand_bytes: 0,
       allow_new_target: true,
       allow_super,
@@ -2476,7 +2464,6 @@ impl Compiler {
         is_class_constructor: false,
         is_async: func.r#async,
         is_generator: func.generator,
-        ic_table: Vec::new(),
       },
       _env_len,
     ))
@@ -2602,7 +2589,6 @@ impl Compiler {
       iterator_close_stack: Vec::new(),
       label_patches: Vec::new(),
       current_module: self.current_module.clone(),
-      next_ic_slot: 0,
       pending_operand_bytes: 0,
       allow_new_target: self.allow_new_target,
       allow_super: self.allow_super,
@@ -2760,7 +2746,6 @@ impl Compiler {
         is_class_constructor: false,
         is_async: func.r#async,
         is_generator: false,
-        ic_table: Vec::new(),
       },
       _env_len,
     ))

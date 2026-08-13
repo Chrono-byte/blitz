@@ -52,7 +52,6 @@ pub(crate) fn install_object_intrinsics(
           .unwrap_or(Value::Null);
         let mut instance = ObjectData::new();
         instance.set_prototype_value(proto);
-        vm.clear_property_get_ic_cache();
         Ok(Value::Object(Rc::new(RefCell::new(instance))))
       }
       _ => vm.to_object_value(value),

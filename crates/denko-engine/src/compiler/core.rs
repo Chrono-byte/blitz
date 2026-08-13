@@ -95,8 +95,6 @@ pub struct Compiler {
   pub label_patches: Vec<LabelPatchState>,
   /// Optional module context when compiling a module
   pub current_module: Option<ModuleContext>,
-  /// Monotonic inline-cache slot allocator for the current chunk.
-  pub next_ic_slot: u16,
   /// Number of operand bytes already emitted into the last instruction's payload.
   /// This lets the emit()/emit_byte() caller pattern pack subsequent operand
   /// bytes into the single 24-bit payload of the instruction word.
@@ -295,7 +293,6 @@ impl Compiler {
       iterator_close_stack: Vec::new(),
       label_patches: Vec::new(),
       current_module: None,
-      next_ic_slot: 0,
       pending_operand_bytes: 0,
       allow_new_target,
       allow_super,
@@ -507,19 +504,6 @@ impl Compiler {
           })
         }),
     }
-  }
-
-  /// Allocates a new inline cache slot for the current compilation chunk.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the maximum number of inline cache sites has been exceeded.
-  pub fn alloc_ic_slot(&mut self) -> Result<u8, CompilerError> {
-    let slot = u8::try_from(self.next_ic_slot).map_err(|_| {
-      CompilerError::from("too many inline-cache sites in one bytecode chunk (maximum 256)")
-    })?;
-    self.next_ic_slot += 1;
-    Ok(slot)
   }
 
   /// Resolves a local variable by name, returning its slot index if found.
@@ -1045,8 +1029,6 @@ impl Compiler {
     self.emit(Op::LoadLocal, LINE);
     self.emit_byte(u8::try_from(home_slot).expect("home_slot fits in u8"), LINE);
     self.emit(Op::SetProperty, LINE);
-    let slot = self.alloc_ic_slot()?;
-    self.emit_byte(slot, LINE);
     self.emit(Op::Discard, LINE);
     Ok(())
   }

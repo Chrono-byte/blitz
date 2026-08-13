@@ -117,8 +117,6 @@ impl super::Compiler {
         self.emit_byte(self.slot_to_u8(receiver)?, LINE);
         self.emit_constant(Value::String(member.property.name.to_string().into()), LINE);
         self.emit(Op::GetProperty, LINE);
-        let slot = self.alloc_ic_slot()?;
-        self.emit_byte(slot, LINE);
         Some(receiver)
       }
       oast::Expression::ComputedMemberExpression(member)
@@ -251,8 +249,6 @@ impl super::Compiler {
           this.emit(Op::Copy, LINE);
           this.emit_constant(Value::String(m.property.name.to_string().into()), LINE);
           this.emit(Op::GetProperty, LINE);
-          let slot = this.alloc_ic_slot()?;
-          this.emit_byte(slot, LINE);
           Ok(())
         })?;
       } else {
@@ -266,8 +262,6 @@ impl super::Compiler {
         self.emit_byte(self.slot_to_u8(receiver_slot)?, LINE);
         self.emit_constant(Value::String(m.property.name.to_string().into()), LINE);
         self.emit(Op::GetProperty, LINE);
-        let slot = self.alloc_ic_slot()?;
-        self.emit_byte(slot, LINE);
       }
 
       let arg_count = self.compile_call_arguments(&c.arguments)?;
@@ -391,8 +385,6 @@ impl super::Compiler {
     self.emit(Op::BuildArray, LINE);
     self.emit_byte(self.checked_arg_count(t.quasi.quasis.len())?, LINE);
     self.emit(Op::SetProperty, LINE);
-    let slot = self.alloc_ic_slot()?;
-    self.emit_byte(slot, LINE);
     self.emit(Op::Discard, LINE);
     let mut arg_count = 1usize;
     for sub in &t.quasi.expressions {

@@ -35,15 +35,6 @@ impl Vm {
     }
   }
 
-  /// Clear the property get inline cache.
-  ///
-  /// This is a blunt invalidation used when allocating fresh objects whose
-  /// addresses may be recycled by `Rc`. It avoids stale cache hits across
-  /// distinct allocations that happen to reuse the same pointer value.
-  pub(crate) fn clear_property_get_ic_cache(&mut self) {
-    self.caches.property_get.clear();
-  }
-
   // -----------------------------------------------------------------------
   // Construction & public helpers
   // -----------------------------------------------------------------------

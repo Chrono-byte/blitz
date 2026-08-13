@@ -19,16 +19,6 @@
 //! - Jump instructions: bits 8-31 contain i24 signed offset
 //! - RISC CompareJump: cond(3) | rs1(4) | rs2(4) | signed offset(13)
 //!
-//! # Hotpatching
-//!
-//! The [`Chunk`] type provides helpers for runtime bytecode modification:
-//! - [`Chunk::hotwire_jump_to_next`] - Convert jump to no-op
-//! - [`Chunk::hotwire_make_unconditional`] - Make conditional jump unconditional
-//! - [`Chunk::hotwire_redirect`] - Change jump target
-//!
-//! Safety: Hotpatching requires exclusive access to the bytecode. Callers must
-//! ensure no concurrent execution while modifying chunks.
-//!
 //! # Example
 //!
 //! ```
@@ -64,38 +54,6 @@ pub struct UpvalueSpec {
   pub immutable: bool,
   /// Whether writes in non-strict mode should be silently ignored.
   pub sloppy_immutable_silent: bool,
-}
-
-/// Serialized inline-cache metadata associated with a bytecode chunk.
-#[derive(Clone, Debug)]
-pub struct ICEntry {
-  /// Cache validity key; its interpretation is selected by `ic_type`.
-  pub key: u64,
-
-  /// Cached result metadata; its interpretation is selected by `ic_type`.
-  pub value: u64,
-
-  /// Generation stamp for this IC entry, used for invalidation bookkeeping.
-  pub generation: u32,
-
-  /// IC type: 0=Property, 1=Global, 2=Call
-  pub ic_type: u8,
-
-  /// Reserved for future use (profiling, optimization hints)
-  pub reserved: u8,
-}
-
-impl ICEntry {
-  /// Creates a new invalid IC entry
-  pub fn new_invalid() -> Self {
-    Self {
-      key: 0,
-      value: 0,
-      generation: 0,
-      ic_type: 0,
-      reserved: 0,
-    }
-  }
 }
 
 /// Version marker carried by every bytecode chunk.
@@ -350,8 +308,6 @@ pub struct FunctionProto {
   pub is_async: bool,
   /// Whether this function was declared as a generator (`function*`).
   pub is_generator: bool,
-  /// Optional serialized inline-cache metadata associated with this function.
-  pub ic_table: Vec<ICEntry>,
 }
 
 impl Chunk {
@@ -745,110 +701,6 @@ impl Chunk {
     }
     usize::try_from(target).ok()
   }
-
-  /// Patch the relative offset of a RISC branch without changing its operands.
-  fn write_branch_offset(
-    &mut self,
-    ip: usize,
-    offset: i32,
-  ) -> bool {
-    let Some(word) = self.code.get(ip).copied() else {
-      return false;
-    };
-    let Some(op) = Op::from_byte(opcode_from_instr(word)) else {
-      return false;
-    };
-    let patched = match op {
-      Op::CompareJump => {
-        let (condition, left, right, _) = decode_compare_jump(word);
-        let Ok(offset) = i16::try_from(offset) else {
-          return false;
-        };
-        encode_compare_jump(condition, left, right, offset)
-      }
-      Op::JumpIfFalse | Op::JumpIfTrue | Op::JumpIfNullish => {
-        encode_risc_cond_jump(op, decode_rd(word), offset)
-      }
-      Op::Jump => {
-        if !(-(1 << 23)..(1 << 23)).contains(&offset) {
-          return false;
-        }
-        Some(op as u32 | (((offset as u32) & 0x00FF_FFFF) << 8))
-      }
-      _ => None,
-    };
-    let Some(patched) = patched else {
-      return false;
-    };
-    self.code[ip] = patched;
-    true
-  }
-
-  /// Hotwire the jump at `ip` so it jumps to the following instruction (i.e. becomes a no-op jump).
-  /// Returns the original `Op` if successful, or `None` on error.
-  pub fn hotwire_jump_to_next(
-    &mut self,
-    ip: usize,
-  ) -> Option<Op> {
-    let instr = *self.code.get(ip)?;
-    let op = Op::from_byte((instr & 0xFF) as u8)?;
-    if !op.is_jump() {
-      return None;
-    }
-    if self.write_branch_offset(ip, 0) {
-      Some(op)
-    } else {
-      None
-    }
-  }
-
-  /// Convert `JumpIfFalse` at `ip` to unconditional `Jump`.
-  /// Returns the original `Op` if successful, or `None` on error.
-  pub fn hotwire_make_unconditional(
-    &mut self,
-    ip: usize,
-  ) -> Option<Op> {
-    let instr = *self.code.get(ip)?;
-    let op = Op::from_byte((instr & 0xFF) as u8)?;
-    match op {
-      Op::JumpIfFalse => {
-        let offset = decode_risc_cond_offset(instr);
-        if !(-(1 << 23)..(1 << 23)).contains(&offset) {
-          return None;
-        }
-        self.code[ip] = Op::Jump as u32 | (((offset as u32) & 0x00FF_FFFF) << 8);
-        Some(op)
-      }
-      Op::Jump => Some(op),
-      _ => None,
-    }
-  }
-
-  /// Hotwire the jump at `ip` so it jumps to `target_ip`.
-  /// Returns the original `Op` if successful, or `None` on error.
-  pub fn hotwire_redirect(
-    &mut self,
-    ip: usize,
-    target_ip: usize,
-  ) -> Option<Op> {
-    if target_ip >= self.code.len() {
-      return None;
-    }
-    let instr = *self.code.get(ip)?;
-    let op = Op::from_byte((instr & 0xFF) as u8)?;
-    if !op.is_jump() {
-      return None;
-    }
-    // next instruction is ip + 1
-    let next = (ip as i64) + 1;
-    let offset = (target_ip as i64).checked_sub(next)?;
-    let offset_i32 = i32::try_from(offset).ok()?;
-    if self.write_branch_offset(ip, offset_i32) {
-      Some(op)
-    } else {
-      None
-    }
-  }
 }
 
 // ============================================================================
@@ -1077,16 +929,6 @@ impl FunctionProto {
         ));
       }
     }
-    if let Some(entry) = self
-      .ic_table
-      .iter()
-      .find(|entry| entry.ic_type > 2)
-    {
-      return Err(format!(
-        "function {} has invalid inline-cache type {}",
-        self.name, entry.ic_type
-      ));
-    }
     self
       .chunk
       .verify_with_layout(local_count, self.upvalues.len())
@@ -1185,7 +1027,7 @@ pub enum Op {
 
   // === Comparison & Conditional Jumps (5) ===
   /// CompareJump: cond_type(3) | rs1(4) | rs2(4) | signed offset(13)
-  /// Compares rs1 and rs2 according to cond_type, jumps if true.
+  /// Compares rs1 and rs2 according to cond_type, jumps if false.
   /// cond_type: 0=Eq, 1=Neq, 2=Lt, 3=Lte, 4=Gt, 5=Gte, 6=StrictEq, 7=StrictNeq
   CompareJump,
   /// Jump offset_i24 (unconditional)
@@ -1729,29 +1571,6 @@ mod tests {
     let word = encode_compare_jump(6, 3, 14, -4096).expect("encodable branch");
     assert_eq!(decode_compare_jump(word), (6, 3, 14, -4096));
     assert!(encode_compare_jump(0, 0, 0, 4096).is_none());
-  }
-
-  #[test]
-  fn risc_hotpatching_preserves_conditional_operands() {
-    let mut chunk = Chunk::default();
-    chunk.write_instr(
-      encode_risc_cond_jump(Op::JumpIfFalse, 9, 1).expect("conditional jump"),
-      1,
-    );
-    chunk.write_instr(Op::Undefined as u32, 1);
-    chunk.write_instr(Op::Return as u32, 1);
-
-    assert_eq!(chunk.jump_target_from_ip(0), Some(2));
-    assert_eq!(chunk.hotwire_redirect(0, 1), Some(Op::JumpIfFalse));
-    assert_eq!(decode_rd(chunk.code[0]), 9);
-    assert_eq!(decode_risc_cond_offset(chunk.code[0]), 0);
-
-    assert_eq!(chunk.hotwire_make_unconditional(0), Some(Op::JumpIfFalse));
-    assert_eq!(
-      Op::from_byte(opcode_from_instr(chunk.code[0])),
-      Some(Op::Jump)
-    );
-    assert_eq!(chunk.jump_target_from_ip(0), Some(1));
   }
 
   #[test]

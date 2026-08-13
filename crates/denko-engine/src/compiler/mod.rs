@@ -534,11 +534,10 @@ mod test {
   use std::cell::RefCell;
   use std::collections::{HashMap, HashSet};
   use std::rc::Rc;
-  use std::sync::Arc;
 
   use crate::bytecode::{decode_compare_jump, decode_rd, decode_rs};
   use crate::compiler::compile;
-  use crate::{Chunk, Compiler, ModuleContext, ObjectData, Op, Value, Vm, compile_oxc_with_ctx};
+  use crate::{Chunk, ModuleContext, ObjectData, Op, Value, Vm, compile_oxc_with_ctx};
 
   #[cfg(test)]
   fn walk_chunk_ops(chunk: &Chunk) -> Vec<(usize, Op)> {
@@ -661,18 +660,17 @@ mod test {
   }
 
   #[test]
-  fn inline_cache_slot_allocation_rejects_overflow() {
-    let mut compiler = Compiler::new(Arc::new(String::new()));
-    for expected in 0_u16..=u8::MAX as u16 {
-      assert_eq!(
-        compiler.alloc_ic_slot().expect("slot available") as u16,
-        expected
-      );
-    }
-    let error = compiler
-      .alloc_ic_slot()
-      .expect_err("the 257th cache site must be rejected");
-    assert!(error.to_string().contains("maximum 256"));
+  fn property_sites_are_not_limited_by_unused_u8_cache_slots() {
+    let source = (0..300)
+      .map(|index| format!("value.property{index};"))
+      .collect::<String>();
+    let session = crate::parser::Parser::parse_source(&source).expect("parse ok");
+    let chunk = compile(session.program(), session.source()).expect("compile ok");
+    let property_sites = walk_chunk_ops(&chunk)
+      .into_iter()
+      .filter(|(_, op)| *op == Op::GetProperty)
+      .count();
+    assert_eq!(property_sites, 300);
   }
 
   #[test]

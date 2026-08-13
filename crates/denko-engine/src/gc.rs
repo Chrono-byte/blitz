@@ -1040,7 +1040,6 @@ mod tests {
       is_class_constructor: false,
       is_async: false,
       is_generator: false,
-      ic_table: Vec::new(),
     });
     let props = track_object(Rc::new(RefCell::new(ObjectData::new())));
     Value::Closure {

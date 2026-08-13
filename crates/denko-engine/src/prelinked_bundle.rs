@@ -10,7 +10,7 @@
 //! they are returned.
 
 use crate::bytecode::{
-  BytecodeVersion, Chunk, Constant, FinallyHandler, FunctionProto, ICEntry, UpvalueSpec,
+  BytecodeVersion, Chunk, Constant, FinallyHandler, FunctionProto, UpvalueSpec,
 };
 use crate::prelinked::{
   PrelinkedExport, PrelinkedGraphError, PrelinkedImport, PrelinkedModule, PrelinkedModuleGraph,
@@ -469,18 +469,8 @@ fn encode_function(
   writer.bool(function.is_class_constructor);
   writer.bool(function.is_async);
   writer.bool(function.is_generator);
-  writer.vector_len(
-    function.ic_table.len(),
-    MAX_VECTOR_ITEMS,
-    "inline cache count",
-  )?;
-  for entry in &function.ic_table {
-    writer.u64(entry.key);
-    writer.u64(entry.value);
-    writer.u32(entry.generation);
-    writer.u8(entry.ic_type);
-    writer.u8(entry.reserved);
-  }
+  // Retain the legacy field as an empty vector for wire-version compatibility.
+  writer.vector_len(0, MAX_VECTOR_ITEMS, "inline cache count")?;
   Ok(())
 }
 
@@ -527,15 +517,14 @@ fn decode_function(
   let is_async = reader.bool()?;
   let is_generator = reader.bool()?;
   let ic_count = reader.vector_len(MAX_VECTOR_ITEMS, "inline cache count")?;
-  let mut ic_table = Vec::with_capacity(ic_count);
   for _ in 0..ic_count {
-    ic_table.push(ICEntry {
-      key: reader.u64()?,
-      value: reader.u64()?,
-      generation: reader.u32()?,
-      ic_type: reader.u8()?,
-      reserved: reader.u8()?,
-    });
+    // Obsolete cache hints have no language semantics. Consume them only to
+    // retain compatibility with existing prelinked graphs.
+    let _ = reader.u64()?;
+    let _ = reader.u64()?;
+    let _ = reader.u32()?;
+    let _ = reader.u8()?;
+    let _ = reader.u8()?;
   }
   Ok(FunctionProto {
     name,
@@ -561,7 +550,6 @@ fn decode_function(
     is_class_constructor,
     is_async,
     is_generator,
-    ic_table,
   })
 }
 
@@ -1596,13 +1584,6 @@ mod tests {
       is_class_constructor: true,
       is_async: true,
       is_generator: true,
-      ic_table: vec![ICEntry {
-        key: 11,
-        value: 12,
-        generation: 13,
-        ic_type: 2,
-        reserved: 9,
-      }],
     });
     PrelinkedModuleGraph {
       format_version: PRELINKED_MODULE_GRAPH_VERSION,

@@ -16,6 +16,7 @@ struct ValueId(usize);
 struct PendingInstruction {
   op: Op,
   payload: u32,
+  branch_offset: Option<i32>,
   inputs: InstructionInputs,
   output: Option<ValueId>,
 }
@@ -64,6 +65,9 @@ impl PendingInstruction {
   }
 
   fn branch_offset(&self) -> Option<i32> {
+    if let Some(offset) = self.branch_offset {
+      return Some(offset);
+    }
     match self.op {
       Op::CompareJump => Some(i16::from_le_bytes([
         self.operand_u8(1).unwrap_or_default(),
@@ -200,6 +204,7 @@ struct BranchPatch {
   risc_ip: usize,
   old_target: usize,
   kind: BranchKind,
+  expanded_compare: bool,
 }
 
 /// Compiler-owned virtual-value builder. Frontend operations use stable value
@@ -306,15 +311,7 @@ impl RiscBuilder {
       .instructions
       .get_mut(index)
       .expect("jump patch in bounds");
-    if instruction.op == Op::CompareJump {
-      let condition = instruction.payload & 0xff;
-      let offset = i16::try_from(value)
-        .expect("compare jump offset overflow")
-        .cast_unsigned();
-      instruction.payload = condition | (u32::from(offset) << 8);
-    } else {
-      instruction.payload = value.cast_unsigned() & 0x00ff_ffff;
-    }
+    instruction.branch_offset = Some(value);
     let target = usize::try_from(index as i64 + 1 + i64::from(value)).expect("branch target");
     if let Some(edge) = self.branch_values.get(&index).cloned() {
       if target == self.instructions.len() {
@@ -390,6 +387,7 @@ impl RiscBuilder {
     self.instructions.push(PendingInstruction {
       op,
       payload,
+      branch_offset: None,
       inputs,
       output,
     });
@@ -879,14 +877,29 @@ impl RiscBuilder {
     }
     old_to_new[builder.instructions.len()] = Some(lowered.code.len());
 
+    relax_compare_branches(&mut lowered, &mut old_to_new, &mut patches)?;
+
     for patch in patches {
       let target = old_to_new
         .get(patch.old_target)
         .and_then(|target| *target)
         .ok_or_else(|| CompilerError::from("branch target is not present in frontend value IR"))?;
       let offset = target as i64 - (patch.risc_ip as i64 + 1);
-      let word = encode_branch_patch(patch.kind, offset)?;
-      lowered.code[patch.risc_ip] = word;
+      if patch.expanded_compare {
+        let BranchKind::Compare(condition, left, right) = patch.kind else {
+          return Err(CompilerError::from(
+            "only compare branches may use the expanded branch sequence",
+          ));
+        };
+        lowered.code[patch.risc_ip] = encode_compare_jump(condition, left, right, 1)
+          .ok_or_else(|| CompilerError::from("invalid expanded RISC compare branch"))?;
+        lowered.code[patch.risc_ip + 1] = encode_branch_patch(BranchKind::Jump, 1)?;
+        let long_offset = target as i64 - (patch.risc_ip as i64 + 3);
+        lowered.code[patch.risc_ip + 2] = encode_branch_patch(BranchKind::Jump, long_offset)?;
+      } else {
+        let word = encode_branch_patch(patch.kind, offset)?;
+        lowered.code[patch.risc_ip] = word;
+      }
     }
 
     lowered.finally_handlers = frontend_handlers
@@ -943,6 +956,62 @@ fn encode_branch_patch(
       encode_compare_jump(condition, left, right, offset)
         .ok_or_else(|| CompilerError::from("RISC compare branch exceeds signed i13"))
     }
+  }
+}
+
+fn relax_compare_branches(
+  lowered: &mut Chunk,
+  old_to_new: &mut [Option<usize>],
+  patches: &mut [BranchPatch],
+) -> Result<(), CompilerError> {
+  loop {
+    let mut expansion = None;
+    for (index, patch) in patches.iter().enumerate() {
+      if patch.expanded_compare || !matches!(patch.kind, BranchKind::Compare(..)) {
+        continue;
+      }
+      let target = old_to_new
+        .get(patch.old_target)
+        .and_then(|target| *target)
+        .ok_or_else(|| CompilerError::from("branch target is not present in frontend value IR"))?;
+      let offset = target as i64 - (patch.risc_ip as i64 + 1);
+      if !(-4096..=4095).contains(&offset) {
+        expansion = Some((index, patch.risc_ip));
+        break;
+      }
+    }
+
+    let Some((patch_index, compare_ip)) = expansion else {
+      return Ok(());
+    };
+    let line = lowered
+      .lines
+      .get(compare_ip)
+      .copied()
+      .ok_or_else(|| CompilerError::from("missing line for RISC compare branch"))?;
+    lowered
+      .code
+      .splice(compare_ip + 1..compare_ip + 1, [0, 0]);
+    lowered
+      .lines
+      .splice(compare_ip + 1..compare_ip + 1, [line, line]);
+
+    for target in old_to_new.iter_mut().flatten() {
+      if *target > compare_ip {
+        *target = target
+          .checked_add(2)
+          .ok_or_else(|| CompilerError::from("RISC branch relaxation overflow"))?;
+      }
+    }
+    for patch in patches.iter_mut() {
+      if patch.risc_ip > compare_ip {
+        patch.risc_ip = patch
+          .risc_ip
+          .checked_add(2)
+          .ok_or_else(|| CompilerError::from("RISC branch relaxation overflow"))?;
+      }
+    }
+    patches[patch_index].expanded_compare = true;
   }
 }
 
@@ -1203,6 +1272,7 @@ fn add_branch_patch(
     risc_ip,
     old_target: target,
     kind,
+    expanded_compare: false,
   });
   Ok(())
 }
@@ -1369,5 +1439,41 @@ mod tests {
     let comparison = encode_branch_patch(BranchKind::Compare(0, 0, 0), 1_i64 << 16)
       .expect_err("offset must not wrap to i16");
     assert!(comparison.message.contains("signed i13"));
+  }
+
+  #[test]
+  fn frontend_compare_branch_offsets_remain_full_width_until_lowering() {
+    let mut builder = RiscBuilder::new();
+    builder.emit(Op::True, 0, 1);
+    builder.emit(Op::True, 0, 1);
+    builder.emit(Op::CompareJump, 6, 1);
+    let branch_ip = builder.len() - 1;
+    builder.patch_branch(branch_ip, i32::from(i16::MAX) + 1);
+    assert_eq!(
+      builder.instructions[branch_ip].branch_offset(),
+      Some(i32::from(i16::MAX) + 1)
+    );
+  }
+
+  #[test]
+  fn relaxes_compare_branches_beyond_signed_i13() {
+    let mut source = String::from("let value = 0; if (value === 0) {\n");
+    for _ in 0..1_100 {
+      source.push_str("value += 1;\n");
+    }
+    source.push('}');
+
+    let session = Parser::parse_source(&source).expect("parse");
+    let chunk = compiler::compile(session.program(), session.source()).expect("compile");
+    chunk.verify().expect("verified RISC chunk");
+
+    let expanded = chunk.code.windows(3).any(|words| {
+      BytecodeOp::from_byte((words[0] & 0xff) as u8) == Some(BytecodeOp::CompareJump)
+        && crate::bytecode::decode_compare_jump(words[0]).3 == 1
+        && BytecodeOp::from_byte((words[1] & 0xff) as u8) == Some(BytecodeOp::Jump)
+        && ((words[1] as i32) >> 8) == 1
+        && BytecodeOp::from_byte((words[2] & 0xff) as u8) == Some(BytecodeOp::Jump)
+    });
+    assert!(expanded, "expected a relaxed long compare branch");
   }
 }

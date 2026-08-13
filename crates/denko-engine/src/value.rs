@@ -542,6 +542,8 @@ impl Uint8ArrayByteView {
 /// Backing store for proxy objects.
 #[derive(Clone, Debug)]
 pub struct ProxyData {
+  /// Stable identity used for cycle detection and future cache guards.
+  pub identity: u64,
   /// The target object being proxied.
   pub target: Value,
   /// The handler object that defines the proxy behavior.
@@ -555,6 +557,7 @@ impl ProxyData {
     handler: Value,
   ) -> Self {
     Self {
+      identity: ObjectData::next_identity(),
       target,
       handler: Some(handler),
     }
@@ -675,7 +678,7 @@ impl Default for ObjectData {
 }
 
 impl ObjectData {
-  fn next_identity() -> u64 {
+  pub(crate) fn next_identity() -> u64 {
     static NEXT_OBJECT_IDENTITY: AtomicU64 = AtomicU64::new(1);
     NEXT_OBJECT_IDENTITY.fetch_add(1, Ordering::Relaxed)
   }
@@ -1358,6 +1361,14 @@ impl PartialEq for Value {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn proxy_identities_are_stable_and_distinct() {
+    let target = || Value::Object(Rc::new(RefCell::new(ObjectData::new())));
+    let first = ProxyData::new(target(), target());
+    let second = ProxyData::new(target(), target());
+    assert_ne!(first.identity, second.identity);
+  }
 
   #[test]
   fn builtin_object_display_uses_name_property() {

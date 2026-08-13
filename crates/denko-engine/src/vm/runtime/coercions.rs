@@ -340,7 +340,7 @@ impl Vm {
             crate::trace::value_string("[trace] @@toPrimitive candidate method", &method);
             crate::trace::value_string("[trace] @@toPrimitive receiver", v);
             if let Some(id) = object_identity(v) {
-              eprintln!("[trace] @@toPrimitive receiver identity ptr={:#x}", id);
+              eprintln!("[trace] @@toPrimitive receiver identity={id}");
             }
           }
           let rv = self.call_with_this(
@@ -390,7 +390,7 @@ impl Vm {
               crate::trace::value_string(&format!("[trace] candidate method '{}':", name), &method);
               crate::trace::value_string("[trace] candidate receiver", v);
               if let Some(id) = object_identity(v) {
-                eprintln!("[trace] candidate receiver identity ptr={:#x}", id);
+                eprintln!("[trace] candidate receiver identity={id}");
               }
             }
             let rv = self.call_with_this(&method, v, &[])?;

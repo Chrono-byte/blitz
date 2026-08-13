@@ -363,7 +363,7 @@ Use verified RISC v2 bytecode as the only compilation input.
 ### Initial Design
 
 - Feature-gated JIT within `blitz-engine`.
-- Cranelift as the initial backend.
+- A project-owned baseline native-code backend.
 - Per-chunk execution counters.
 - Compiled-code cache owned by the VM/runtime.
 - Stable internal helper ABI.

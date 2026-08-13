@@ -7,7 +7,7 @@
 //! reconstructed chunk before returning it.
 
 use crate::bytecode::{
-  BytecodeVersion, Chunk, Constant, FinallyHandler, FunctionProto, ICEntry, UpvalueSpec,
+  BytecodeVersion, Chunk, Constant, FinallyHandler, FunctionProto, UpvalueSpec,
 };
 use crate::typecheck::{BuiltinType, LiteralType, Type};
 use crate::value::SymbolId;
@@ -536,11 +536,8 @@ impl Encoder {
       is_class_constructor: function.is_class_constructor,
       is_async: function.is_async,
       is_generator: function.is_generator,
-      ic_table: function
-        .ic_table
-        .iter()
-        .map(WireICEntry::from)
-        .collect(),
+      // Retain the legacy wire field for version-2 bundle compatibility.
+      ic_table: Vec::new(),
     })
   }
 }
@@ -687,11 +684,8 @@ impl Decoder {
       is_class_constructor: wire.is_class_constructor,
       is_async: wire.is_async,
       is_generator: wire.is_generator,
-      ic_table: wire
-        .ic_table
-        .into_iter()
-        .map(ICEntry::from)
-        .collect(),
+      // Version-2 bundles may contain obsolete cache hints. They have no
+      // language semantics and are intentionally discarded.
     })
   }
 }
@@ -797,30 +791,6 @@ impl From<WireSign> for Sign {
       WireSign::None => Self::NoSign,
       WireSign::Plus => Self::Plus,
       WireSign::Minus => Self::Minus,
-    }
-  }
-}
-
-impl From<&ICEntry> for WireICEntry {
-  fn from(value: &ICEntry) -> Self {
-    Self {
-      key: value.key,
-      value: value.value,
-      generation: value.generation,
-      ic_type: value.ic_type,
-      reserved: value.reserved,
-    }
-  }
-}
-
-impl From<WireICEntry> for ICEntry {
-  fn from(value: WireICEntry) -> Self {
-    Self {
-      key: value.key,
-      value: value.value,
-      generation: value.generation,
-      ic_type: value.ic_type,
-      reserved: value.reserved,
     }
   }
 }
@@ -1140,13 +1110,6 @@ mod tests {
       is_class_constructor: true,
       is_async: true,
       is_generator: true,
-      ic_table: vec![ICEntry {
-        key: 11,
-        value: 12,
-        generation: 13,
-        ic_type: 2,
-        reserved: 9,
-      }],
     });
 
     vec![NamedChunk {
@@ -1173,7 +1136,6 @@ mod tests {
       function.upvalues[0].mirror_global_name.as_deref(),
       Some("global")
     );
-    assert_eq!(function.ic_table[0].reserved, 9);
     assert_eq!(function.chunk.constants.len(), 8);
     assert_eq!(function.chunk.risc_value_spill_count, 3);
     assert_eq!(function.chunk.finally_handlers[0].did_return_slot, 3);

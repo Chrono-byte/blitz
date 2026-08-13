@@ -210,19 +210,12 @@ impl super::Compiler {
     &mut self,
     object_slot: usize,
     key_slot: usize,
-    use_ic: bool,
   ) -> Result<(), crate::errors::CompilerError> {
     self.emit(Op::LoadLocal, LINE);
     self.emit_byte(self.slot_to_u8(object_slot)?, LINE);
     self.emit(Op::LoadLocal, LINE);
     self.emit_byte(self.slot_to_u8(key_slot)?, LINE);
-    if use_ic {
-      self.emit(Op::GetProperty, LINE);
-      let slot = self.alloc_ic_slot()?;
-      self.emit_byte(slot, LINE);
-    } else {
-      self.emit(Op::GetProperty, LINE);
-    }
+    self.emit(Op::GetProperty, LINE);
     Ok(())
   }
 
@@ -230,7 +223,6 @@ impl super::Compiler {
     &mut self,
     object_slot: usize,
     key_slot: usize,
-    use_ic: bool,
   ) -> Result<(), crate::errors::CompilerError> {
     let value_slot = self.alloc_temp_local("ref_value");
     self.emit(Op::StoreLocal, LINE);
@@ -250,13 +242,7 @@ impl super::Compiler {
       u8::try_from(value_slot).expect("value_slot fits in u8"),
       LINE,
     );
-    if use_ic {
-      self.emit(Op::SetProperty, LINE);
-      let slot = self.alloc_ic_slot()?;
-      self.emit_byte(slot, LINE);
-    } else {
-      self.emit(Op::SetProperty, LINE);
-    }
+    self.emit(Op::SetProperty, LINE);
     Ok(())
   }
 
@@ -478,8 +464,6 @@ impl super::Compiler {
           LINE,
         );
         self.emit(Op::SetProperty, LINE);
-        let slot = self.alloc_ic_slot()?;
-        self.emit_byte(slot, LINE);
         self.emit(Op::Discard, LINE);
         let mut arg_count = 1usize;
         for sub in &t.quasi.expressions {
@@ -704,8 +688,6 @@ impl super::Compiler {
             self.emit_get_global_name("Object");
             self.emit_constant(Value::String("assign".to_string().into()), LINE);
             self.emit(Op::GetProperty, LINE);
-            let slot = self.alloc_ic_slot()?;
-            self.emit_byte(slot, LINE);
             self.emit(Op::Exchange, LINE);
             self.compile_expr_oast(&spread.argument)?;
             self.emit(Op::Call, LINE);
@@ -844,8 +826,6 @@ impl super::Compiler {
                 self.emit_constant(Value::String(m.property.name.to_string().into()), LINE);
                 self.compile_expr_oast(&a.right)?;
                 self.emit(Op::SetProperty, LINE);
-                let slot = self.alloc_ic_slot()?;
-                self.emit_byte(slot, LINE);
               }
             }
             oast::SimpleAssignmentTarget::ComputedMemberExpression(m) => {
@@ -930,10 +910,10 @@ impl super::Compiler {
                 self.emit(Op::Discard, LINE);
               } else {
                 let (object_slot, key_slot) = self.compile_static_member_reference(m)?;
-                self.emit_reference_get(object_slot, key_slot, true)?;
+                self.emit_reference_get(object_slot, key_slot)?;
                 self.compile_expr_oast(&a.right)?;
                 self.emit_compound_assignment_op(a.operator);
-                self.emit_reference_set_current_value(object_slot, key_slot, true)?;
+                self.emit_reference_set_current_value(object_slot, key_slot)?;
               }
             }
             oast::SimpleAssignmentTarget::ComputedMemberExpression(m) => {
@@ -962,10 +942,10 @@ impl super::Compiler {
                 self.emit(Op::Discard, LINE);
               } else {
                 let (object_slot, key_slot) = self.compile_computed_member_reference(m)?;
-                self.emit_reference_get(object_slot, key_slot, false)?;
+                self.emit_reference_get(object_slot, key_slot)?;
                 self.compile_expr_oast(&a.right)?;
                 self.emit_compound_assignment_op(a.operator);
-                self.emit_reference_set_current_value(object_slot, key_slot, false)?;
+                self.emit_reference_set_current_value(object_slot, key_slot)?;
               }
             }
             _ => {
@@ -1026,7 +1006,7 @@ impl super::Compiler {
             }
             oast::SimpleAssignmentTarget::StaticMemberExpression(m) => {
               let (object_slot, key_slot) = self.compile_static_member_reference(m)?;
-              self.emit_reference_get(object_slot, key_slot, true)?;
+              self.emit_reference_get(object_slot, key_slot)?;
               self.emit(Op::Copy, LINE);
               self.emit(Op::JumpIfFalse, LINE);
               let jump_end = self.current_ip();
@@ -1034,12 +1014,12 @@ impl super::Compiler {
               self.emit_byte(0, LINE);
               self.emit(Op::Discard, LINE);
               self.compile_expr_oast(&a.right)?;
-              self.emit_reference_set_current_value(object_slot, key_slot, true)?;
+              self.emit_reference_set_current_value(object_slot, key_slot)?;
               self.patch_jump(jump_end);
             }
             oast::SimpleAssignmentTarget::ComputedMemberExpression(m) => {
               let (object_slot, key_slot) = self.compile_computed_member_reference(m)?;
-              self.emit_reference_get(object_slot, key_slot, false)?;
+              self.emit_reference_get(object_slot, key_slot)?;
               self.emit(Op::Copy, LINE);
               self.emit(Op::JumpIfFalse, LINE);
               let jump_end = self.current_ip();
@@ -1047,7 +1027,7 @@ impl super::Compiler {
               self.emit_byte(0, LINE);
               self.emit(Op::Discard, LINE);
               self.compile_expr_oast(&a.right)?;
-              self.emit_reference_set_current_value(object_slot, key_slot, false)?;
+              self.emit_reference_set_current_value(object_slot, key_slot)?;
               self.patch_jump(jump_end);
             }
             _ => {
@@ -1108,7 +1088,7 @@ impl super::Compiler {
             }
             oast::SimpleAssignmentTarget::StaticMemberExpression(m) => {
               let (object_slot, key_slot) = self.compile_static_member_reference(m)?;
-              self.emit_reference_get(object_slot, key_slot, true)?;
+              self.emit_reference_get(object_slot, key_slot)?;
               self.emit(Op::Copy, LINE);
               self.emit(Op::JumpIfTrue, LINE);
               let jump_end = self.current_ip();
@@ -1116,12 +1096,12 @@ impl super::Compiler {
               self.emit_byte(0, LINE);
               self.emit(Op::Discard, LINE);
               self.compile_expr_oast(&a.right)?;
-              self.emit_reference_set_current_value(object_slot, key_slot, true)?;
+              self.emit_reference_set_current_value(object_slot, key_slot)?;
               self.patch_jump(jump_end);
             }
             oast::SimpleAssignmentTarget::ComputedMemberExpression(m) => {
               let (object_slot, key_slot) = self.compile_computed_member_reference(m)?;
-              self.emit_reference_get(object_slot, key_slot, false)?;
+              self.emit_reference_get(object_slot, key_slot)?;
               self.emit(Op::Copy, LINE);
               self.emit(Op::JumpIfTrue, LINE);
               let jump_end = self.current_ip();
@@ -1129,7 +1109,7 @@ impl super::Compiler {
               self.emit_byte(0, LINE);
               self.emit(Op::Discard, LINE);
               self.compile_expr_oast(&a.right)?;
-              self.emit_reference_set_current_value(object_slot, key_slot, false)?;
+              self.emit_reference_set_current_value(object_slot, key_slot)?;
               self.patch_jump(jump_end);
             }
             _ => {
@@ -1205,7 +1185,7 @@ impl super::Compiler {
             }
             oast::SimpleAssignmentTarget::StaticMemberExpression(m) => {
               let (object_slot, key_slot) = self.compile_static_member_reference(m)?;
-              self.emit_reference_get(object_slot, key_slot, true)?;
+              self.emit_reference_get(object_slot, key_slot)?;
               self.emit(Op::Copy, LINE);
               self.emit(Op::JumpIfNullish, LINE);
               let jump_end = self.current_ip();
@@ -1218,12 +1198,12 @@ impl super::Compiler {
               self.patch_jump(jump_end);
               self.emit(Op::Discard, LINE);
               self.compile_expr_oast(&a.right)?;
-              self.emit_reference_set_current_value(object_slot, key_slot, true)?;
+              self.emit_reference_set_current_value(object_slot, key_slot)?;
               self.patch_jump(after_store);
             }
             oast::SimpleAssignmentTarget::ComputedMemberExpression(m) => {
               let (object_slot, key_slot) = self.compile_computed_member_reference(m)?;
-              self.emit_reference_get(object_slot, key_slot, false)?;
+              self.emit_reference_get(object_slot, key_slot)?;
               self.emit(Op::Copy, LINE);
               self.emit(Op::JumpIfNullish, LINE);
               let jump_end = self.current_ip();
@@ -1236,7 +1216,7 @@ impl super::Compiler {
               self.patch_jump(jump_end);
               self.emit(Op::Discard, LINE);
               self.compile_expr_oast(&a.right)?;
-              self.emit_reference_set_current_value(object_slot, key_slot, false)?;
+              self.emit_reference_set_current_value(object_slot, key_slot)?;
               self.patch_jump(after_store);
             }
             _ => {
@@ -1338,7 +1318,7 @@ impl super::Compiler {
           }
           OTarget::StaticMemberExpression(m) => {
             let (object_slot, key_slot) = self.compile_static_member_reference(m)?;
-            self.emit_reference_get(object_slot, key_slot, true)?;
+            self.emit_reference_get(object_slot, key_slot)?;
             let old_slot = self.alloc_temp_local("ref_old");
             self.emit(Op::StoreLocal, LINE);
             self.emit_byte(self.slot_to_u8(old_slot)?, LINE);
@@ -1354,14 +1334,14 @@ impl super::Compiler {
               oast::UpdateOperator::Increment => self.emit(Op::Add, LINE),
               oast::UpdateOperator::Decrement => self.emit(Op::Sub, LINE),
             }
-            self.emit_reference_set_current_value(object_slot, key_slot, true)?;
+            self.emit_reference_set_current_value(object_slot, key_slot)?;
             if !u.prefix {
               self.emit(Op::Discard, LINE);
             }
           }
           OTarget::ComputedMemberExpression(m) => {
             let (object_slot, key_slot) = self.compile_computed_member_reference(m)?;
-            self.emit_reference_get(object_slot, key_slot, false)?;
+            self.emit_reference_get(object_slot, key_slot)?;
             let old_slot = self.alloc_temp_local("ref_old");
             self.emit(Op::StoreLocal, LINE);
             self.emit_byte(self.slot_to_u8(old_slot)?, LINE);
@@ -1377,7 +1357,7 @@ impl super::Compiler {
               oast::UpdateOperator::Increment => self.emit(Op::Add, LINE),
               oast::UpdateOperator::Decrement => self.emit(Op::Sub, LINE),
             }
-            self.emit_reference_set_current_value(object_slot, key_slot, false)?;
+            self.emit_reference_set_current_value(object_slot, key_slot)?;
             if !u.prefix {
               self.emit(Op::Discard, LINE);
             }
@@ -1562,8 +1542,6 @@ impl super::Compiler {
             self.emit_jump_placeholder();
             self.emit_constant(Value::String(m.property.name.to_string().into()), LINE);
             self.emit(Op::GetProperty, LINE);
-            let slot = self.alloc_ic_slot()?;
-            self.emit_byte(slot, LINE);
             self.emit(Op::Jump, LINE);
             let end = self.current_ip();
             self.emit_jump_placeholder();
@@ -1574,8 +1552,6 @@ impl super::Compiler {
           } else {
             self.emit_constant(Value::String(m.property.name.to_string().into()), LINE);
             self.emit(Op::GetProperty, LINE);
-            let slot = self.alloc_ic_slot()?;
-            self.emit_byte(slot, LINE);
           }
         }
       }
@@ -1652,8 +1628,6 @@ impl super::Compiler {
                 self.emit_jump_placeholder();
                 self.emit_constant(Value::String(m.property.name.to_string().into()), LINE);
                 self.emit(Op::GetProperty, LINE);
-                let slot = self.alloc_ic_slot()?;
-                self.emit_byte(slot, LINE);
                 self.emit(Op::Jump, LINE);
                 let end = self.current_ip();
                 self.emit_jump_placeholder();
@@ -1664,8 +1638,6 @@ impl super::Compiler {
               } else {
                 self.emit_constant(Value::String(m.property.name.to_string().into()), LINE);
                 self.emit(Op::GetProperty, LINE);
-                let slot = self.alloc_ic_slot()?;
-                self.emit_byte(slot, LINE);
               }
             }
           }
@@ -1896,8 +1868,6 @@ impl super::Compiler {
               this.emit(Op::Copy, LINE);
               this.emit_constant(Value::String(m.property.name.to_string().into()), LINE);
               this.emit(Op::GetProperty, LINE);
-              let slot = this.alloc_ic_slot()?;
-              this.emit_byte(slot, LINE);
               Ok(())
             })?;
           } else {
@@ -1911,8 +1881,6 @@ impl super::Compiler {
             self.emit_byte(self.slot_to_u8(receiver_slot)?, LINE);
             self.emit_constant(Value::String(m.property.name.to_string().into()), LINE);
             self.emit(Op::GetProperty, LINE);
-            let slot = self.alloc_ic_slot()?;
-            self.emit_byte(slot, LINE);
           }
 
           let arg_count = self.compile_call_arguments(&c.arguments)?;

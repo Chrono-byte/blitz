@@ -62,7 +62,7 @@ pub(in crate::vm::runtime) fn object_identity(obj: &Value) -> Option<usize> {
     // Use the array's props object identity so IC keys remain stable across
     // dense storage reallocations.
     Value::Array(_, props) => Some(props.borrow().identity as usize),
-    Value::Proxy(proxy) => Some(Rc::as_ptr(proxy) as usize),
+    Value::Proxy(proxy) => Some(proxy.borrow().identity as usize),
     Value::Closure { props, .. } => Some(props.borrow().identity as usize),
     Value::BuiltinObject(_, props) | Value::Promise(_, props) => {
       Some(props.borrow().identity as usize)
