@@ -237,6 +237,23 @@ pub struct Chunk {
   pub finally_handlers: Vec<FinallyHandler>,
 }
 
+/// Bytecode that has passed structural verification and can be executed
+/// repeatedly without rescanning the instruction stream.
+#[derive(Clone, Debug)]
+pub struct VerifiedChunk(Arc<Chunk>);
+
+impl VerifiedChunk {
+  /// Verify and retain a bytecode chunk for repeated execution.
+  pub fn new(chunk: Chunk) -> Result<Self, String> {
+    chunk.verify()?;
+    Ok(Self(Arc::new(chunk)))
+  }
+
+  pub(crate) fn chunk(&self) -> Arc<Chunk> {
+    Arc::clone(&self.0)
+  }
+}
+
 #[derive(Clone, Debug)]
 /// Control-flow metadata for a protected region with a `finally` clause.
 pub struct FinallyHandler {
@@ -257,8 +274,10 @@ pub struct FunctionProto {
   pub name: String,
   /// Source span in the original script
   pub span: Span,
-  /// Number of parameters
+  /// Number of parameter slots used to initialize a call frame.
   pub arity: usize,
+  /// ECMAScript `length` value: parameters before the first default, excluding rest.
+  pub length: usize,
   /// Compiled bytecode for this function
   pub chunk: Arc<Chunk>,
   /// Optional static slot types retained for tooling and serialization; the

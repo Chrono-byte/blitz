@@ -19,8 +19,25 @@ fn validated_sources_preserve_the_original_bytes() {
 }
 
 #[test]
-fn format_mode_preserves_rust_format_semantics() {
+fn format_mode_validates_the_static_scaffold_and_preserves_format_semantics() {
   let value = 42;
-  let source = js!(format(script), "const answer = {value};");
-  assert_eq!(source, "const answer = 42;");
+  let source = js!(
+    format(script),
+    "function answer() {{ return {value}; }} answer();"
+  );
+  assert_eq!(source, "function answer() { return 42; } answer();");
+}
+
+#[test]
+fn format_mode_supports_expression_and_binding_fields() {
+  let value = 42;
+  let source = js!(
+    format(script),
+    "function answer({{ value = {} }}) {{ return value + {value}; }}",
+    value + 1
+  );
+  assert_eq!(
+    source,
+    "function answer({ value = 43 }) { return value + 42; }"
+  );
 }

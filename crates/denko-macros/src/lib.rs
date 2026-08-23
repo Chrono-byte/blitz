@@ -40,10 +40,14 @@ struct JavaScriptInput {
 impl Parse for JavaScriptInput {
   fn parse(input: ParseStream<'_>) -> Result<Self> {
     if input.peek(LitStr) {
+      let source = input.parse()?;
+      if !input.is_empty() {
+        return Err(input.error("unexpected tokens after JavaScript source literal"));
+      }
       return Ok(Self {
         mode: LanguageMode::Script,
         expect_parse_error: false,
-        source: input.parse()?,
+        source,
         is_format: false,
         format_tail: TokenStream2::new(),
       });
@@ -111,23 +115,57 @@ fn parse_mode(mode: &Ident) -> Result<LanguageMode> {
   }
 }
 
-/// Validate embedded JavaScript or TypeScript and expand to the original string literal.
+/// Produce a parseable approximation of a Rust format string.
 ///
-/// The one-argument form parses an ordinary script. An explicit source mode can
-/// be supplied as the first argument, such as `js!(module, "...")`. Negative
-/// parser fixtures use `js!(parse_error(script), "...")`.
-#[proc_macro]
-pub fn js(input: TokenStream) -> TokenStream {
-  let input = syn::parse_macro_input!(input as JavaScriptInput);
-  if input.is_format {
-    let format_tail = input.format_tail;
-    let source = input.source;
-    return quote!(format!(#source #format_tail)).into();
+/// Escaped braces become JavaScript braces and each replacement field becomes
+/// a unique identifier. Identifiers work as both expressions and bindings, so
+/// this also supports templates that generate function parameters. The Rust
+/// compiler remains responsible for validating the format arguments.
+fn format_scaffold(source: &LitStr) -> Result<String> {
+  let value = source.value();
+  let mut scaffold = String::with_capacity(value.len());
+  let mut chars = value.char_indices().peekable();
+  let mut field_index = 0usize;
+
+  while let Some((offset, character)) = chars.next() {
+    match character {
+      '{' if chars.peek().is_some_and(|(_, next)| *next == '{') => {
+        chars.next();
+        scaffold.push('{');
+      }
+      '}' if chars.peek().is_some_and(|(_, next)| *next == '}') => {
+        chars.next();
+        scaffold.push('}');
+      }
+      '{' => {
+        let Some((_, _)) = chars.find(|(_, next)| *next == '}') else {
+          return Err(syn::Error::new(
+            source.span(),
+            format!("unclosed format replacement field at byte {offset}"),
+          ));
+        };
+        scaffold.push_str(&format!("__denko_interpolation_{field_index}__"));
+        field_index += 1;
+      }
+      '}' => {
+        return Err(syn::Error::new(
+          source.span(),
+          format!("unmatched closing brace in JavaScript format template at byte {offset}"),
+        ));
+      }
+      _ => scaffold.push(character),
+    }
   }
 
-  let source_text = input.source.value();
+  Ok(scaffold)
+}
+
+fn validate_source(
+  input: &JavaScriptInput,
+  source_text: &str,
+) -> Result<()> {
   let allocator = Allocator::default();
-  let parsed = Parser::new(&allocator, &source_text, input.mode.source_type())
+  let parsed = Parser::new(&allocator, source_text, input.mode.source_type())
     .with_options(ParseOptions {
       parse_regular_expression: true,
       ..ParseOptions::default()
@@ -136,8 +174,7 @@ pub fn js(input: TokenStream) -> TokenStream {
   let has_errors = !parsed.diagnostics.is_empty();
 
   if input.expect_parse_error == has_errors {
-    let source = input.source;
-    return quote!(#source).into();
+    return Ok(());
   }
 
   let message = if input.expect_parse_error {
@@ -146,12 +183,52 @@ pub fn js(input: TokenStream) -> TokenStream {
     parsed
       .diagnostics
       .into_iter()
-      .map(|diagnostic| format!("{diagnostic:?}"))
+      .map(|diagnostic| diagnostic.to_string())
       .collect::<Vec<_>>()
       .join("\n")
   };
+  Err(syn::Error::new(input.source.span(), message))
+}
 
-  syn::Error::new(input.source.span(), message)
-    .into_compile_error()
-    .into()
+/// Validate embedded JavaScript or TypeScript at compile time.
+///
+/// The one-argument form validates a script and expands to the original string
+/// literal. Use an explicit mode for modules, TypeScript, or TSX:
+/// `js!(module, "export const answer = 42;")`.
+///
+/// `js!(format(script), "const answer = {};", answer)` expands like `format!`
+/// and validates its static JavaScript scaffold after replacing each format
+/// field with an expression placeholder. Negative parser fixtures use
+/// `js!(parse_error(script), "const = ;")`.
+///
+/// Invalid source is a compile-time error:
+///
+/// ```compile_fail
+/// use denko_macros::js;
+///
+/// let _ = js!("const = ;");
+/// ```
+#[proc_macro]
+pub fn js(input: TokenStream) -> TokenStream {
+  let input = syn::parse_macro_input!(input as JavaScriptInput);
+  let source_text = if input.is_format {
+    match format_scaffold(&input.source) {
+      Ok(scaffold) => scaffold,
+      Err(error) => return error.into_compile_error().into(),
+    }
+  } else {
+    input.source.value()
+  };
+
+  if let Err(error) = validate_source(&input, &source_text) {
+    return error.into_compile_error().into();
+  }
+
+  let source = input.source;
+  if input.is_format {
+    let format_tail = input.format_tail;
+    quote!(format!(#source #format_tail)).into()
+  } else {
+    quote!(#source).into()
+  }
 }

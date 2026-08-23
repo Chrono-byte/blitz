@@ -103,6 +103,15 @@ impl super::Compiler {
     }
 
     let arg_count = self.checked_arg_count(c.arguments.len())?;
+    let is_super_construct = matches!(&c.callee, oast::Expression::Super(_));
+    if is_super_construct {
+      if !self.allow_super {
+        return Err(crate::errors::CompilerError::from(
+          "SyntaxError: super used outside of a method",
+        ));
+      }
+      self.emit(Op::Undefined, LINE);
+    }
     let receiver_slot = match &c.callee {
       oast::Expression::StaticMemberExpression(member)
         if !c.optional
@@ -139,6 +148,7 @@ impl super::Compiler {
         self.emit(Op::GetProperty, LINE);
         Some(receiver)
       }
+      oast::Expression::Super(_) => None,
       _ => {
         self.compile_expr_oast(&c.callee)?;
         None
@@ -178,17 +188,24 @@ impl super::Compiler {
     self.emit(Op::BuildArray, LINE);
     self.emit_byte(arg_count, LINE);
     for (index, is_spread) in spread_flags.into_iter().enumerate() {
-      if index == 0
-        && let Some(receiver) = receiver_slot
-      {
-        // A two-element entry in the first mask slot is an internal marker
-        // carrying the receiver and the actual spread flag. This preserves
-        // the existing Spread bytecode ABI for direct calls.
-        self.emit(Op::LoadLocal, LINE);
-        self.emit_byte(self.slot_to_u8(receiver)?, LINE);
+      if index == 0 && (receiver_slot.is_some() || is_super_construct) {
+        // The first mask slot can carry an internal call-kind marker alongside
+        // the actual spread flag. A third true entry marks `super(...)`.
+        if let Some(receiver) = receiver_slot {
+          self.emit(Op::LoadLocal, LINE);
+          self.emit_byte(self.slot_to_u8(receiver)?, LINE);
+        } else {
+          self.emit(Op::Undefined, LINE);
+        }
         self.emit(if is_spread { Op::True } else { Op::False }, LINE);
-        self.emit(Op::BuildArray, LINE);
-        self.emit_byte(2, LINE);
+        if is_super_construct {
+          self.emit(Op::True, LINE);
+          self.emit(Op::BuildArray, LINE);
+          self.emit_byte(3, LINE);
+        } else {
+          self.emit(Op::BuildArray, LINE);
+          self.emit_byte(2, LINE);
+        }
       } else {
         self.emit(if is_spread { Op::True } else { Op::False }, LINE);
       }
@@ -197,6 +214,9 @@ impl super::Compiler {
     self.emit_byte(arg_count, LINE);
     self.emit(Op::Spread, LINE);
     self.emit_byte(arg_count, LINE);
+    if is_super_construct {
+      self.emit_pending_instance_field_initializers()?;
+    }
 
     if let Some(callee_nullish) = callee_nullish {
       self.emit(Op::Jump, LINE);

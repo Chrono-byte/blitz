@@ -19,7 +19,7 @@ use std::sync::Arc;
 use thiserror::Error;
 
 /// Current version of the bytecode bundle container format.
-pub const BYTECODE_BUNDLE_VERSION: u16 = 2;
+pub const BYTECODE_BUNDLE_VERSION: u16 = 3;
 
 const MAGIC: &[u8; 8] = b"BLITZBC\0";
 const HEADER_LEN: usize = MAGIC.len() + 2 + 8 + 4;
@@ -275,6 +275,7 @@ struct WireFunctionProto {
   span_start: u32,
   span_end: u32,
   arity: u64,
+  length: u64,
   chunk: u32,
   slot_types: Vec<Option<WireType>>,
   slot_names: Vec<Option<String>>,
@@ -504,6 +505,7 @@ impl Encoder {
       span_start: function.span.start,
       span_end: function.span.end,
       arity: function.arity as u64,
+      length: function.length as u64,
       chunk: self.add_nested(&function.chunk)?,
       slot_types: encode_optional_types(&function.slot_types),
       slot_names: function.slot_names.clone(),
@@ -536,7 +538,7 @@ impl Encoder {
       is_class_constructor: function.is_class_constructor,
       is_async: function.is_async,
       is_generator: function.is_generator,
-      // Retain the legacy wire field for version-2 bundle compatibility.
+      // Retain the legacy wire field so the current layout remains explicit.
       ic_table: Vec::new(),
     })
   }
@@ -648,6 +650,7 @@ impl Decoder {
       name: wire.name,
       span: Span::new(wire.span_start, wire.span_end),
       arity: usize_from_u64(wire.arity, "function arity")?,
+      length: usize_from_u64(wire.length, "function length")?,
       chunk: self.build_chunk(chunk_index, depth)?,
       slot_types: decode_optional_types(wire.slot_types)?,
       slot_names: wire.slot_names,
@@ -1079,6 +1082,7 @@ mod tests {
       name: "nested".into(),
       span: Span::new(0, 42),
       arity: 2,
+      length: 1,
       chunk: Arc::new(nested),
       slot_types: vec![
         Some(Type::Literal(LiteralType::String("x".into()))),
@@ -1132,6 +1136,7 @@ mod tests {
     let function = &root.functions[0];
     assert_eq!(function.span, Span::new(0, 42));
     assert_eq!(function.arity, 2);
+    assert_eq!(function.length, 1);
     assert_eq!(
       function.upvalues[0].mirror_global_name.as_deref(),
       Some("global")

@@ -930,6 +930,10 @@ impl super::Compiler {
         // properties into separate buckets: keys and values can have effects.
         self.emit(Op::BuildObject, LINE);
         self.emit_byte(0, LINE);
+        let home_object_slot = self.alloc_temp_local("object_literal_home");
+        self.emit(Op::Copy, LINE);
+        self.emit(Op::StoreLocal, LINE);
+        self.emit_byte(self.slot_to_u8(home_object_slot)?, LINE);
 
         for prop in &obj.properties {
           match prop {
@@ -968,6 +972,28 @@ impl super::Compiler {
                   }
                   _ => self.emit(Op::Undefined, LINE),
                 }
+              } else if p.method
+                && let oast::Expression::FunctionExpression(function) = &p.value
+              {
+                let method_name = if p.computed {
+                  "<method>".to_string()
+                } else {
+                  match &p.key {
+                    oast::PropertyKey::StaticIdentifier(identifier) => identifier.name.to_string(),
+                    oast::PropertyKey::Identifier(identifier) => identifier.name.to_string(),
+                    oast::PropertyKey::StringLiteral(string) => string.value.to_string(),
+                    oast::PropertyKey::NumericLiteral(number) => {
+                      super::numeric_property_key(number.value)
+                    }
+                    _ => "<method>".to_string(),
+                  }
+                };
+                let (proto, _env_len) =
+                  self.compile_function(&method_name, None, function, None, true)?;
+                let index = self.chunk.add_function(proto);
+                self.emit(Op::MakeClosure, LINE);
+                self.emit_byte(self.function_index_to_u8(index)?, LINE);
+                self.emit_set_method_home_object(home_object_slot)?;
               } else {
                 self.compile_expr_oast(&p.value)?;
               }
@@ -1033,12 +1059,11 @@ impl super::Compiler {
                 .unwrap_or_else(|| "<accessor>".to_string());
               self.emit_constant(Value::String(descriptor_prop_name.to_string().into()), LINE);
               if let oast::Expression::FunctionExpression(f) = &p.value {
-                let self_name = f.id.as_ref().map(|id| id.name.as_str());
-                let (proto, _env_len) =
-                  self.compile_function(&method_name, self_name, f, None, false)?;
+                let (proto, _env_len) = self.compile_function(&method_name, None, f, None, true)?;
                 let idx = self.chunk.add_function(proto);
                 self.emit(Op::MakeClosure, LINE);
                 self.emit_byte(self.function_index_to_u8(idx)?, LINE);
+                self.emit_set_method_home_object(home_object_slot)?;
               } else {
                 self.compile_expr_oast(&p.value)?;
               }
@@ -1123,6 +1148,9 @@ impl super::Compiler {
       }
       OExpr::Identifier(id) => {
         let name = id.name.as_str();
+        if let Some(error) = Self::strict_identifier_reference_error(self.strict_context, name) {
+          return Err(error);
+        }
         self.emit_get_binding(name);
       }
       OExpr::AssignmentExpression(a) => {
@@ -1622,13 +1650,41 @@ impl super::Compiler {
             ));
           }
           if let OExpr::StaticMemberExpression(m) = &u.argument {
-            self.compile_expr_oast(&m.object)?;
-            self.emit_constant(Value::String(m.property.name.to_string().into()), LINE);
-            self.emit(Op::DeleteProperty, LINE);
+            if matches!(&m.object, OExpr::Super(_)) {
+              self.emit_get_global_name("Object");
+              self.emit_constant(Value::String("create".into()), LINE);
+              self.emit(Op::GetProperty, LINE);
+              self.emit_get_global_name("ReferenceError");
+              self.emit_constant(Value::String("prototype".into()), LINE);
+              self.emit(Op::GetProperty, LINE);
+              self.emit(Op::Call, LINE);
+              self.emit_byte(1, LINE);
+              self.emit(Op::Throw, LINE);
+              self.emit(Op::Undefined, LINE);
+            } else {
+              self.compile_expr_oast(&m.object)?;
+              self.emit_constant(Value::String(m.property.name.to_string().into()), LINE);
+              self.emit(Op::DeleteProperty, LINE);
+            }
           } else if let OExpr::ComputedMemberExpression(m) = &u.argument {
-            self.compile_expr_oast(&m.object)?;
-            self.compile_expr_oast(&m.expression)?;
-            self.emit(Op::DeleteProperty, LINE);
+            if matches!(&m.object, OExpr::Super(_)) {
+              self.compile_expr_oast(&m.expression)?;
+              self.emit(Op::Discard, LINE);
+              self.emit_get_global_name("Object");
+              self.emit_constant(Value::String("create".into()), LINE);
+              self.emit(Op::GetProperty, LINE);
+              self.emit_get_global_name("ReferenceError");
+              self.emit_constant(Value::String("prototype".into()), LINE);
+              self.emit(Op::GetProperty, LINE);
+              self.emit(Op::Call, LINE);
+              self.emit_byte(1, LINE);
+              self.emit(Op::Throw, LINE);
+              self.emit(Op::Undefined, LINE);
+            } else {
+              self.compile_expr_oast(&m.object)?;
+              self.compile_expr_oast(&m.expression)?;
+              self.emit(Op::DeleteProperty, LINE);
+            }
           } else if let OExpr::Identifier(id) = &u.argument {
             if self.resolve_local(id.name.as_str()).is_some()
               || self.resolve_upvalue(id.name.as_str()).is_some()

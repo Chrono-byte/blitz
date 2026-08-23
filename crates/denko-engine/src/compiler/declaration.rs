@@ -1855,6 +1855,14 @@ impl Compiler {
       })
   }
 
+  fn expected_argument_count(params: &oast::FormalParameters<'_>) -> usize {
+    params
+      .items
+      .iter()
+      .take_while(|parameter| parameter.initializer.is_none())
+      .count()
+  }
+
   /// Emit bytecode to initialize non-simple function parameters from hidden
   /// raw argument slots.
   ///
@@ -2069,13 +2077,17 @@ impl Compiler {
     };
 
     let self_name = md.value.id.as_ref().map(|id| id.name.as_str());
-    let (mut proto, _env_len) = self.compile_function(
+    let outer_strict = self.strict_context;
+    self.strict_context = true;
+    let compiled = self.compile_function(
       method_name.as_deref().unwrap_or("<method>"),
       self_name,
       &md.value,
       None,
       true,
-    )?;
+    );
+    self.strict_context = outer_strict;
+    let (mut proto, _env_len) = compiled?;
     proto.is_strict = true;
     let fidx = self.chunk.add_function(proto);
 
@@ -2205,6 +2217,7 @@ impl Compiler {
       name: "<static field>".to_string(),
       span: initializer.span(),
       arity: 0,
+      length: 0,
       chunk: Arc::new(chunk),
       slot_types: inner.local_types,
       slot_names,
@@ -2291,6 +2304,7 @@ impl Compiler {
       name: "<static block>".to_string(),
       span: block.span,
       arity: 0,
+      length: 0,
       chunk: Arc::new(chunk),
       slot_types: inner.local_types,
       slot_names,
@@ -2407,14 +2421,18 @@ impl Compiler {
     });
     let class_has_super = c.super_class.is_some();
     let proto = if let Some(md) = constructor_method {
-      let (mut proto, _env_len) = self.compile_function_with_instance_fields(
+      let outer_strict = self.strict_context;
+      self.strict_context = true;
+      let compiled = self.compile_function_with_instance_fields(
         &class_name,
         None,
         &md.value,
         None,
         class_has_super,
         &prepared_fields,
-      )?;
+      );
+      self.strict_context = outer_strict;
+      let (mut proto, _env_len) = compiled?;
       proto.is_strict = true;
       proto.is_derived_constructor = class_has_super;
       proto.is_class_constructor = true;
@@ -2484,6 +2502,7 @@ impl Compiler {
           name: class_name.clone(),
           span: c.span,
           arity: 0,
+          length: 0,
           chunk: Arc::new(ctor_chunk),
           slot_types: inner.local_types,
           slot_names: inner.locals.into_iter().map(Some).collect(),
@@ -2524,6 +2543,7 @@ impl Compiler {
           name: class_name.clone(),
           span: c.span,
           arity: 0,
+          length: 0,
           chunk: Arc::new(ctor_chunk),
           slot_types: inner.local_types,
           slot_names: inner.locals.into_iter().map(Some).collect(),
@@ -2673,7 +2693,12 @@ impl Compiler {
       .as_ref()
       .is_some_and(|body| Self::has_use_strict_directive(body));
 
-    if let Some(err) = Self::strict_binding_name_error(function_is_strict, name) {
+    // `name` is function metadata and may be inferred from a property's
+    // IdentifierName, which can legally be a reserved word. Validate only
+    // actual function bindings from the AST.
+    if let Some(binding) = &func.id
+      && let Some(err) = Self::strict_binding_name_error(function_is_strict, &binding.name)
+    {
       return Err(err);
     }
     if let Some(self_name) = self_name
@@ -2905,7 +2930,8 @@ impl Compiler {
       FunctionProto {
         name: name.to_string(),
         span: func.span,
-        arity: func.params.items.len() + if has_rest { 1 } else { 0 },
+        arity: func.params.items.len() + usize::from(has_rest),
+        length: Self::expected_argument_count(&func.params),
         chunk: Arc::new(chunk),
         slot_types,
         slot_names,
@@ -2953,9 +2979,8 @@ impl Compiler {
           && param.initializer.is_none()
       });
 
-    if let Some(err) = Self::strict_binding_name_error(function_is_strict, name) {
-      return Err(err);
-    }
+    // Arrow names are metadata inferred from their syntactic position, not
+    // lexical bindings, so reserved IdentifierNames are valid here.
     if function_is_strict {
       let mut seen = HashSet::new();
       for p in &func.params.items {
@@ -3188,7 +3213,8 @@ impl Compiler {
       FunctionProto {
         name: name.to_string(),
         span: func.span,
-        arity: func.params.items.len() + if has_rest { 1 } else { 0 },
+        arity: func.params.items.len() + usize::from(has_rest),
+        length: Self::expected_argument_count(&func.params),
         chunk: Arc::new(chunk),
         slot_types,
         slot_names,

@@ -294,9 +294,240 @@ impl Compiler {
     Ok(())
   }
 
-  fn validate_function(
+  fn validate_assignment_target(
+    &self,
+    target: &oast::AssignmentTarget<'_>,
+  ) -> Result<(), crate::errors::CompilerError> {
+    match target {
+      oast::AssignmentTarget::AssignmentTargetIdentifier(identifier) => {
+        if let Some(error) =
+          Self::strict_binding_name_error(self.strict_context, identifier.name.as_str())
+        {
+          return Err(error);
+        }
+        Ok(())
+      }
+      oast::AssignmentTarget::StaticMemberExpression(member) => {
+        self.validate_early_errors_in_expression(&member.object)
+      }
+      oast::AssignmentTarget::ComputedMemberExpression(member) => {
+        self.validate_early_errors_in_expression(&member.object)?;
+        self.validate_early_errors_in_expression(&member.expression)
+      }
+      oast::AssignmentTarget::ArrayAssignmentTarget(array) => {
+        for element in array.elements.iter().flatten() {
+          self.validate_assignment_target_maybe_default(element)?;
+        }
+        if let Some(rest) = &array.rest {
+          self.validate_assignment_target(&rest.target)?;
+        }
+        Ok(())
+      }
+      oast::AssignmentTarget::ObjectAssignmentTarget(object) => {
+        for property in &object.properties {
+          match property {
+            oast::AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(property) => {
+              if let Some(error) =
+                Self::strict_binding_name_error(self.strict_context, property.binding.name.as_str())
+              {
+                return Err(error);
+              }
+              if let Some(initializer) = &property.init {
+                self.validate_early_errors_in_expression(initializer)?;
+              }
+            }
+            oast::AssignmentTargetProperty::AssignmentTargetPropertyProperty(property) => {
+              if property.computed
+                && let Some(key) = property.name.as_expression()
+              {
+                self.validate_early_errors_in_expression(key)?;
+              }
+              self.validate_assignment_target_maybe_default(&property.binding)?;
+            }
+          }
+        }
+        if let Some(rest) = &object.rest {
+          self.validate_assignment_target(&rest.target)?;
+        }
+        Ok(())
+      }
+      _ => Ok(()),
+    }
+  }
+
+  fn validate_assignment_target_maybe_default(
+    &self,
+    target: &oast::AssignmentTargetMaybeDefault<'_>,
+  ) -> Result<(), crate::errors::CompilerError> {
+    match target {
+      oast::AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(default) => {
+        self.validate_assignment_target(&default.binding)?;
+        self.validate_early_errors_in_expression(&default.init)
+      }
+      oast::AssignmentTargetMaybeDefault::AssignmentTargetIdentifier(identifier) => {
+        if let Some(error) =
+          Self::strict_binding_name_error(self.strict_context, identifier.name.as_str())
+        {
+          return Err(error);
+        }
+        Ok(())
+      }
+      oast::AssignmentTargetMaybeDefault::StaticMemberExpression(member) => {
+        self.validate_early_errors_in_expression(&member.object)
+      }
+      oast::AssignmentTargetMaybeDefault::ComputedMemberExpression(member) => {
+        self.validate_early_errors_in_expression(&member.object)?;
+        self.validate_early_errors_in_expression(&member.expression)
+      }
+      oast::AssignmentTargetMaybeDefault::ArrayAssignmentTarget(array) => {
+        for element in array.elements.iter().flatten() {
+          self.validate_assignment_target_maybe_default(element)?;
+        }
+        if let Some(rest) = &array.rest {
+          self.validate_assignment_target(&rest.target)?;
+        }
+        Ok(())
+      }
+      oast::AssignmentTargetMaybeDefault::ObjectAssignmentTarget(object) => {
+        for property in &object.properties {
+          match property {
+            oast::AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(property) => {
+              if let Some(error) =
+                Self::strict_binding_name_error(self.strict_context, property.binding.name.as_str())
+              {
+                return Err(error);
+              }
+              if let Some(initializer) = &property.init {
+                self.validate_early_errors_in_expression(initializer)?;
+              }
+            }
+            oast::AssignmentTargetProperty::AssignmentTargetPropertyProperty(property) => {
+              if property.computed
+                && let Some(key) = property.name.as_expression()
+              {
+                self.validate_early_errors_in_expression(key)?;
+              }
+              self.validate_assignment_target_maybe_default(&property.binding)?;
+            }
+          }
+        }
+        if let Some(rest) = &object.rest {
+          self.validate_assignment_target(&rest.target)?;
+        }
+        Ok(())
+      }
+      _ => Ok(()),
+    }
+  }
+
+  fn validate_for_statement_left(
+    &self,
+    left: &oast::ForStatementLeft<'_>,
+  ) -> Result<(), crate::errors::CompilerError> {
+    match left {
+      oast::ForStatementLeft::VariableDeclaration(declaration) => {
+        for declarator in &declaration.declarations {
+          if let Some(error) =
+            Self::strict_binding_pattern_name_error(self.strict_context, &declarator.id)
+          {
+            return Err(error);
+          }
+          if let Some(initializer) = &declarator.init {
+            self.validate_early_errors_in_expression(initializer)?;
+          }
+        }
+        Ok(())
+      }
+      oast::ForStatementLeft::AssignmentTargetIdentifier(identifier) => {
+        if let Some(error) =
+          Self::strict_binding_name_error(self.strict_context, identifier.name.as_str())
+        {
+          return Err(error);
+        }
+        Ok(())
+      }
+      oast::ForStatementLeft::StaticMemberExpression(member) => {
+        self.validate_early_errors_in_expression(&member.object)
+      }
+      oast::ForStatementLeft::ComputedMemberExpression(member) => {
+        self.validate_early_errors_in_expression(&member.object)?;
+        self.validate_early_errors_in_expression(&member.expression)
+      }
+      oast::ForStatementLeft::ArrayAssignmentTarget(array) => {
+        for element in array.elements.iter().flatten() {
+          self.validate_assignment_target_maybe_default(element)?;
+        }
+        if let Some(rest) = &array.rest {
+          self.validate_assignment_target(&rest.target)?;
+        }
+        Ok(())
+      }
+      oast::ForStatementLeft::ObjectAssignmentTarget(object) => {
+        for property in &object.properties {
+          match property {
+            oast::AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(property) => {
+              if let Some(error) =
+                Self::strict_binding_name_error(self.strict_context, property.binding.name.as_str())
+              {
+                return Err(error);
+              }
+              if let Some(initializer) = &property.init {
+                self.validate_early_errors_in_expression(initializer)?;
+              }
+            }
+            oast::AssignmentTargetProperty::AssignmentTargetPropertyProperty(property) => {
+              if property.computed
+                && let Some(key) = property.name.as_expression()
+              {
+                self.validate_early_errors_in_expression(key)?;
+              }
+              self.validate_assignment_target_maybe_default(&property.binding)?;
+            }
+          }
+        }
+        if let Some(rest) = &object.rest {
+          self.validate_assignment_target(&rest.target)?;
+        }
+        Ok(())
+      }
+      _ => Ok(()),
+    }
+  }
+
+  fn parameter_expression_contains_yield(expression: &oast::Expression<'_>) -> bool {
+    match expression {
+      oast::Expression::YieldExpression(_) => true,
+      oast::Expression::ParenthesizedExpression(parenthesized) => {
+        Self::parameter_expression_contains_yield(&parenthesized.expression)
+      }
+      oast::Expression::SequenceExpression(sequence) => sequence
+        .expressions
+        .iter()
+        .any(Self::parameter_expression_contains_yield),
+      oast::Expression::ConditionalExpression(conditional) => {
+        Self::parameter_expression_contains_yield(&conditional.test)
+          || Self::parameter_expression_contains_yield(&conditional.consequent)
+          || Self::parameter_expression_contains_yield(&conditional.alternate)
+      }
+      oast::Expression::BinaryExpression(binary) => {
+        Self::parameter_expression_contains_yield(&binary.left)
+          || Self::parameter_expression_contains_yield(&binary.right)
+      }
+      oast::Expression::LogicalExpression(logical) => {
+        Self::parameter_expression_contains_yield(&logical.left)
+          || Self::parameter_expression_contains_yield(&logical.right)
+      }
+      oast::Expression::UnaryExpression(unary) => {
+        Self::parameter_expression_contains_yield(&unary.argument)
+      }
+      _ => false,
+    }
+  }
+
+  fn validate_function_with_context(
     &self,
     function: &oast::Function<'_>,
+    force_strict: bool,
   ) -> Result<(), crate::errors::CompilerError> {
     let mut params = HashSet::new();
     let simple = function.params.rest.is_none()
@@ -314,6 +545,11 @@ impl Compiler {
       }
       params.extend(names);
       if let Some(init) = &parameter.initializer {
+        if (force_strict || function.generator) && Self::parameter_expression_contains_yield(init) {
+          return Err(crate::errors::CompilerError::from(
+            "SyntaxError: yield is not allowed in function parameters",
+          ));
+        }
         self.validate_early_errors_in_expression(init)?;
       }
     }
@@ -344,6 +580,61 @@ impl Compiler {
     Ok(())
   }
 
+  fn validate_function(
+    &self,
+    function: &oast::Function<'_>,
+  ) -> Result<(), crate::errors::CompilerError> {
+    self.validate_function_with_context(function, false)
+  }
+
+  fn expression_contains_direct_super_call(expression: &oast::Expression<'_>) -> bool {
+    match expression {
+      oast::Expression::CallExpression(call) => {
+        matches!(call.callee, oast::Expression::Super(_))
+          || Self::expression_contains_direct_super_call(&call.callee)
+          || call.arguments.iter().any(|argument| {
+            argument
+              .as_expression()
+              .is_some_and(Self::expression_contains_direct_super_call)
+          })
+      }
+      oast::Expression::ParenthesizedExpression(parenthesized) => {
+        Self::expression_contains_direct_super_call(&parenthesized.expression)
+      }
+      oast::Expression::SequenceExpression(sequence) => sequence
+        .expressions
+        .iter()
+        .any(Self::expression_contains_direct_super_call),
+      oast::Expression::ConditionalExpression(conditional) => {
+        Self::expression_contains_direct_super_call(&conditional.test)
+          || Self::expression_contains_direct_super_call(&conditional.consequent)
+          || Self::expression_contains_direct_super_call(&conditional.alternate)
+      }
+      _ => false,
+    }
+  }
+
+  fn statements_contain_direct_super_call(statements: &[oast::Statement<'_>]) -> bool {
+    statements
+      .iter()
+      .any(|statement| match statement {
+        oast::Statement::ExpressionStatement(expression) => {
+          Self::expression_contains_direct_super_call(&expression.expression)
+        }
+        oast::Statement::ReturnStatement(statement) => statement
+          .argument
+          .as_ref()
+          .is_some_and(Self::expression_contains_direct_super_call),
+        oast::Statement::ThrowStatement(statement) => {
+          Self::expression_contains_direct_super_call(&statement.argument)
+        }
+        oast::Statement::BlockStatement(block) => {
+          Self::statements_contain_direct_super_call(&block.body)
+        }
+        _ => false,
+      })
+  }
+
   fn validate_class(
     &self,
     class: &oast::Class<'_>,
@@ -351,19 +642,51 @@ impl Compiler {
     if let Some(super_class) = &class.super_class {
       self.validate_early_errors_in_expression(super_class)?;
     }
+    let constructor_count = class
+      .body
+      .body
+      .iter()
+      .filter(|element| {
+        matches!(
+          element,
+          oast::ClassElement::MethodDefinition(method)
+            if matches!(method.kind, oast::MethodDefinitionKind::Constructor)
+        )
+      })
+      .count();
+    if constructor_count > 1 {
+      return Err(crate::errors::CompilerError::from(
+        "SyntaxError: class may only have one constructor",
+      ));
+    }
     for element in &class.body.body {
       match element {
         oast::ClassElement::StaticBlock(block) => {
           self.validate_early_errors_in_statements(&block.body, false, false)?;
         }
         oast::ClassElement::MethodDefinition(method) => {
-          if let Some(key) = method.key.as_expression() {
+          if method.computed
+            && let Some(key) = method.key.as_expression()
+          {
             self.validate_early_errors_in_expression(key)?;
           }
-          self.validate_function(&method.value)?;
+          if !matches!(method.kind, oast::MethodDefinitionKind::Constructor)
+            && method
+              .value
+              .body
+              .as_ref()
+              .is_some_and(|body| Self::statements_contain_direct_super_call(&body.statements))
+          {
+            return Err(crate::errors::CompilerError::from(
+              "SyntaxError: direct super call is only valid in a constructor",
+            ));
+          }
+          self.validate_function_with_context(&method.value, true)?;
         }
         oast::ClassElement::PropertyDefinition(property) => {
-          if let Some(key) = property.key.as_expression() {
+          if property.computed
+            && let Some(key) = property.key.as_expression()
+          {
             self.validate_early_errors_in_expression(key)?;
           }
           if let Some(value) = &property.value {
@@ -387,8 +710,26 @@ impl Compiler {
   ) -> Result<(), crate::errors::CompilerError> {
     use oast::Expression as E;
     match expr {
+      E::Identifier(identifier) => {
+        if let Some(error) =
+          Self::strict_identifier_reference_error(self.strict_context, identifier.name.as_str())
+        {
+          return Err(error);
+        }
+        Ok(())
+      }
       E::FunctionExpression(f) => self.validate_function(f),
       E::ArrowFunctionExpression(a) => {
+        for parameter in &a.params.items {
+          if let Some(initializer) = &parameter.initializer {
+            if Self::parameter_expression_contains_yield(initializer) {
+              return Err(crate::errors::CompilerError::from(
+                "SyntaxError: yield is not allowed in arrow parameters",
+              ));
+            }
+            self.validate_early_errors_in_expression(initializer)?;
+          }
+        }
         self.validate_early_errors_in_statements(&a.body.statements, false, true)
       }
       E::ClassExpression(c) => self.validate_class(c),
@@ -407,8 +748,31 @@ impl Compiler {
         for property in &o.properties {
           match property {
             oast::ObjectPropertyKind::ObjectProperty(p) => {
-              if let Some(key) = p.key.as_expression() {
+              if p.computed
+                && let Some(key) = p.key.as_expression()
+              {
                 self.validate_early_errors_in_expression(key)?;
+              }
+              if p.method
+                && let oast::Expression::FunctionExpression(function) = &p.value
+              {
+                let parameter_has_direct_super = function.params.items.iter().any(|parameter| {
+                  parameter
+                    .initializer
+                    .as_ref()
+                    .is_some_and(|initializer| {
+                      Self::expression_contains_direct_super_call(initializer)
+                    })
+                });
+                let body_has_direct_super = function
+                  .body
+                  .as_ref()
+                  .is_some_and(|body| Self::statements_contain_direct_super_call(&body.statements));
+                if parameter_has_direct_super || body_has_direct_super {
+                  return Err(crate::errors::CompilerError::from(
+                    "SyntaxError: direct super call is only valid in a constructor",
+                  ));
+                }
               }
               self.validate_early_errors_in_expression(&p.value)?;
             }
@@ -486,7 +850,10 @@ impl Compiler {
           self.validate_early_errors_in_expression(&m.object)
         }
       },
-      E::AssignmentExpression(a) => self.validate_early_errors_in_expression(&a.right),
+      E::AssignmentExpression(a) => {
+        self.validate_assignment_target(&a.left)?;
+        self.validate_early_errors_in_expression(&a.right)
+      }
       E::AwaitExpression(a) => self.validate_early_errors_in_expression(&a.argument),
       E::BinaryExpression(a) => {
         self.validate_early_errors_in_expression(&a.left)?;
@@ -621,10 +988,14 @@ impl Compiler {
           self.validate_early_errors_in_statements(std::slice::from_ref(&f.body), false, false)?
         }
         oast::Statement::ForInStatement(f) => {
+          self.validate_for_statement_left(&f.left)?;
+          self.validate_early_errors_in_expression(&f.right)?;
           self.validate_statement_position_function(&f.body)?;
           self.validate_early_errors_in_statements(std::slice::from_ref(&f.body), false, false)?
         }
         oast::Statement::ForOfStatement(f) => {
+          self.validate_for_statement_left(&f.left)?;
+          self.validate_early_errors_in_expression(&f.right)?;
           self.validate_statement_position_function(&f.body)?;
           self.validate_early_errors_in_statements(std::slice::from_ref(&f.body), false, false)?
         }
@@ -634,6 +1005,36 @@ impl Compiler {
         }
         oast::Statement::WithStatement(w) => {
           self.validate_early_errors_in_statements(std::slice::from_ref(&w.body), false, false)?
+        }
+        oast::Statement::SwitchStatement(s) => {
+          self.validate_early_errors_in_expression(&s.discriminant)?;
+          let mut lexical = HashSet::new();
+          let mut vars = HashSet::new();
+          for case in &s.cases {
+            if let Some(test) = &case.test {
+              self.validate_early_errors_in_expression(test)?;
+            }
+            for statement in &case.consequent {
+              let mut names = HashSet::new();
+              Self::lexical_declared_names_of_statement(statement, &mut names, false);
+              for name in names {
+                if !lexical.insert(name.clone()) {
+                  return Err(crate::errors::CompilerError::from(format!(
+                    "SyntaxError: redeclaration of lexical binding `{name}`"
+                  )));
+                }
+              }
+              self.var_declared_names_of_statement(statement, &mut vars);
+            }
+          }
+          if let Some(name) = lexical.iter().find(|name| vars.contains(*name)) {
+            return Err(crate::errors::CompilerError::from(format!(
+              "SyntaxError: redeclaration of lexical binding `{name}`"
+            )));
+          }
+          for case in &s.cases {
+            self.validate_early_errors_in_statements(&case.consequent, false, false)?;
+          }
         }
         oast::Statement::TryStatement(t) => {
           self.validate_early_errors_in_statements(&t.block.body, false, false)?;
@@ -805,6 +1206,22 @@ mod test {
     let chunk = super::compile_session(&session).expect("compile session");
 
     assert_eq!(chunk.source_text.as_str(), source);
+  }
+
+  #[test]
+  fn strict_reserved_words_are_rejected_in_for_in_assignment_patterns() {
+    for source in [
+      crate::js!(r#""use strict"; for ([x[yield]] in [[]]);"#),
+      crate::js!(r#""use strict"; for ([yield = 0] in [[]]);"#),
+      crate::js!(r#""use strict"; for ({x: yield} in [{}]);"#),
+    ] {
+      let session = crate::parser::Parser::parse_source(source).expect("parse to AST");
+      let error = super::compile_session(&session).expect_err("strict reserved word must fail");
+      assert!(
+        error.to_string().contains("SyntaxError"),
+        "unexpected compiler error: {error}"
+      );
+    }
   }
 
   #[test]

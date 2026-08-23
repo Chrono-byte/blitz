@@ -24,7 +24,7 @@ use std::sync::Arc;
 use thiserror::Error;
 
 /// Current version of the prelinked graph wire envelope.
-pub const PRELINKED_GRAPH_WIRE_VERSION: u16 = 3;
+pub const PRELINKED_GRAPH_WIRE_VERSION: u16 = 4;
 
 const SOURCE_TEXT_WIRE_VERSION: u16 = 2;
 
@@ -136,10 +136,7 @@ pub fn decode(bytes: &[u8]) -> Result<PrelinkedModuleGraph, PrelinkedGraphCodecE
     return Err(PrelinkedGraphCodecError::InvalidHeader);
   }
   let version = u16::from_le_bytes([bytes[8], bytes[9]]);
-  if !matches!(
-    version,
-    SOURCE_TEXT_WIRE_VERSION | PRELINKED_GRAPH_WIRE_VERSION
-  ) {
+  if !(SOURCE_TEXT_WIRE_VERSION..=PRELINKED_GRAPH_WIRE_VERSION).contains(&version) {
     return Err(PrelinkedGraphCodecError::UnsupportedVersion(version));
   }
   let payload_len = u64::from_le_bytes(
@@ -267,7 +264,7 @@ fn decode_module(reader: &mut Reader<'_>) -> Result<PrelinkedModule, PrelinkedGr
       binding_id: reader.u32()?,
     });
   }
-  let module_source = if reader.wire_version == PRELINKED_GRAPH_WIRE_VERSION {
+  let module_source = if reader.wire_version >= 3 {
     Some(Arc::new(reader.string(StringKind::Source)?))
   } else {
     None
@@ -442,6 +439,10 @@ fn encode_function(
     u64::try_from(function.arity)
       .map_err(|_| invalid("function arity does not fit portable u64"))?,
   );
+  writer.u64(
+    u64::try_from(function.length)
+      .map_err(|_| invalid("function length does not fit portable u64"))?,
+  );
   encode_chunk(writer, &function.chunk, module_source, depth)?;
   encode_optional_types(writer, &function.slot_types, 0)?;
   encode_optional_strings(writer, &function.slot_names)?;
@@ -485,6 +486,14 @@ fn decode_function(
   let arity = reader.portable_usize("function arity")?;
   if arity > MAX_FUNCTION_ARITY {
     return Err(limit("function arity", arity, MAX_FUNCTION_ARITY));
+  }
+  let length = if reader.wire_version >= 4 {
+    reader.portable_usize("function length")?
+  } else {
+    arity
+  };
+  if length > MAX_FUNCTION_ARITY {
+    return Err(limit("function length", length, MAX_FUNCTION_ARITY));
   }
   let chunk = Arc::new(decode_chunk(reader, depth, module_source)?);
   let slot_types = decode_optional_types(reader, 0)?;
@@ -530,6 +539,7 @@ fn decode_function(
     name,
     span: Span::new(span_start, span_end),
     arity,
+    length,
     chunk,
     slot_types,
     slot_names,
@@ -1553,6 +1563,7 @@ mod tests {
       name: "nested".into(),
       span: Span::new(0, 24),
       arity: 2,
+      length: 1,
       chunk: Arc::new(nested),
       slot_types: vec![
         Some(Type::Literal(LiteralType::String("x".into()))),
@@ -1664,6 +1675,8 @@ mod tests {
       3
     );
     assert_eq!(decoded.modules[1].chunk.constants.len(), 0);
+    assert_eq!(decoded.modules[1].chunk.functions[0].arity, 2);
+    assert_eq!(decoded.modules[1].chunk.functions[0].length, 1);
     assert_eq!(
       decoded.modules[1].chunk.functions[0]
         .chunk

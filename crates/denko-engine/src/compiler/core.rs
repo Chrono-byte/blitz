@@ -518,10 +518,52 @@ impl Compiler {
     strict_context: bool,
     name: &str,
   ) -> Option<CompilerError> {
-    if strict_context && matches!(name, "eval" | "arguments") {
+    if strict_context
+      && matches!(
+        name,
+        "eval"
+          | "arguments"
+          | "implements"
+          | "interface"
+          | "let"
+          | "package"
+          | "private"
+          | "protected"
+          | "public"
+          | "static"
+          | "yield"
+      )
+    {
       Some(CompilerError::from(format!(
         "SyntaxError: `{}` is not allowed in strict mode",
         name
+      )))
+    } else {
+      None
+    }
+  }
+
+  /// Returns a compiler error for a strict-mode reserved identifier reference.
+  pub(crate) fn strict_identifier_reference_error(
+    strict_context: bool,
+    name: &str,
+  ) -> Option<CompilerError> {
+    if strict_context
+      && matches!(
+        name,
+        "implements"
+          | "interface"
+          | "let"
+          | "package"
+          | "private"
+          | "protected"
+          | "public"
+          | "static"
+          | "yield"
+      )
+    {
+      Some(CompilerError::from(format!(
+        "SyntaxError: `{name}` is not allowed in strict mode"
       )))
     } else {
       None
