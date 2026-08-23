@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: MPL-2.0
 use crate::ecmascript::semantics::byte_views::{
-  byte_view_index_from_key, byte_view_index_info, byte_view_index_value, write_byte_view_index,
+  byte_view_index_from_key, byte_view_index_info, byte_view_index_value, byte_view_metadata,
+  canonical_numeric_index_from_key, is_byte_view, write_byte_view_index,
 };
 use crate::ecmascript::semantics::properties::{
   own_property_descriptor, own_property_keys, property_key_to_value,
 };
 use crate::errors::RuntimeError;
-use crate::runtime_utils::{to_length, usize_to_f64};
+use crate::runtime_utils::{strict_equal, to_length, usize_to_f64};
 use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
 use crate::vm::Vm;
 use crate::vm::state::{MAX_PROTOTYPE_DEPTH, PartialDescriptor, PropertyGetIcEntry};
@@ -45,31 +46,31 @@ impl Vm {
     if is_module_namespace_object(obj) {
       return self.get_property_value(obj, key);
     }
-    let receiver_identity = match obj {
+    let receiver = match obj {
       // Dense array elements and `length` are mutated by native array
       // methods as well as ordinary property writes. Until those mutations
       // all flow through the tracked property path, caching array reads can
       // retain a stale length or element value.
-      Value::Object(_) | Value::Closure { .. } | Value::BuiltinObject(_, _) => {
-        super::property::object_identity(obj)
+      Value::Object(data) => {
+        let data = data.borrow();
+        Some((data.identity as usize, data.mutation_generation))
+      }
+      Value::Closure { props, .. } | Value::BuiltinObject(_, props) => {
+        let data = props.borrow();
+        Some((data.identity as usize, data.mutation_generation))
       }
       _ => None,
     };
-    let Some(receiver_identity) = receiver_identity else {
+    let Some((receiver_identity, receiver_generation)) = receiver else {
       return self.get_property_value(obj, key);
     };
-    let receiver_generation = self
-      .caches
-      .object_generations
-      .get(&receiver_identity)
-      .copied()
-      .unwrap_or(0);
     let site = (
       std::sync::Arc::as_ptr(&self.execution.active.chunk) as usize,
       instruction_ip,
     );
 
     if let Some(entry) = self.caches.property_get.get(&site)
+      && entry.epoch == self.caches.property_get_epoch
       && entry.receiver_identity == receiver_identity
       && entry.receiver_generation == receiver_generation
       && entry.key == *key
@@ -85,6 +86,7 @@ impl Vm {
       self.caches.property_get.insert(
         site,
         PropertyGetIcEntry {
+          epoch: self.caches.property_get_epoch,
           receiver_identity,
           receiver_generation,
           key: key.clone(),
@@ -233,6 +235,28 @@ impl Vm {
     if is_module_namespace_object(target) {
       return Ok(false);
     }
+    if canonical_numeric_index_from_key(key).is_some() {
+      let mut current = target.clone();
+      for _ in 0..MAX_PROTOTYPE_DEPTH {
+        if is_byte_view(&current)
+          && byte_view_index_from_key(key)
+            .and_then(|index| byte_view_index_value(&current, index))
+            .is_none()
+        {
+          if strict_equal(&current, receiver)
+            && let Some((_, kind, _, _)) = byte_view_metadata(&current)
+          {
+            let _ =
+              crate::ecmascript::semantics::byte_views::encode_typed_element(self, &kind, &value)?;
+          }
+          return Ok(true);
+        }
+        current = self.get_prototype(&current);
+        if matches!(current, Value::Null) {
+          break;
+        }
+      }
+    }
 
     if let Some((desc, _holder)) = self.lookup_property_descriptor(target, key, 0)? {
       match desc {
@@ -261,6 +285,12 @@ impl Vm {
           writable: false, ..
         } => return Ok(false),
         PropertyDescriptor::Data { .. } => {
+          if matches!(receiver, Value::Array(array, _) if array_index_from_key(key)
+            .is_some_and(|index| index < array.borrow().len()))
+          {
+            self.set_property_tracked(receiver, key, value)?;
+            return Ok(true);
+          }
           let accepted = self.define_own_property(
             receiver,
             key.clone(),
@@ -398,47 +428,18 @@ impl Vm {
         obj.type_name()
       )));
     }
-    if matches!(obj, Value::Proxy(_)) {
-      let accepted = self.set_proxy_property(obj, key, value, receiver)?;
-      if !accepted && self.is_strict_mode() {
-        return Err(self.throw_type_error("Proxy set trap returned false"));
+    let accepted = self.set_property_value(obj, key, value, receiver)?;
+    if !accepted && self.is_strict_mode() {
+      if receiver.is_object()
+        && self
+          .get_own_property_value(receiver, key)?
+          .is_none()
+        && !self.is_extensible_value(receiver)?
+      {
+        return Err(self.throw_type_error("Cannot add property to non-extensible object"));
       }
-      return Ok(());
+      return Err(self.throw_type_error("Property assignment was rejected"));
     }
-    if is_module_namespace_object(obj) {
-      if self.is_strict_mode() {
-        return Err(self.throw_type_error("Cannot assign to a module namespace property"));
-      }
-      return Ok(());
-    }
-    if let Some((desc, _holder)) = self.lookup_property_descriptor(obj, key, 0)? {
-      match desc {
-        PropertyDescriptor::Accessor { set, .. } => {
-          if let Some(setter) = set.filter(|setter| !matches!(setter, Value::Undefined)) {
-            drop(self.call_with_this(&setter, receiver, &[value])?);
-            self.bump_object_generation(receiver);
-            return Ok(());
-          }
-          if self.is_strict_mode() {
-            return Err(self.throw_type_error("Cannot set property with no setter"));
-          }
-          return Ok(());
-        }
-        PropertyDescriptor::Data {
-          writable: false, ..
-        } => {
-          if self.is_strict_mode() {
-            return Err(self.throw_type_error("Cannot assign to read only property"));
-          }
-          return Ok(());
-        }
-        PropertyDescriptor::Data { .. } => {
-          self.set_property_tracked(receiver, key, value)?;
-          return Ok(());
-        }
-      }
-    }
-    self.set_property_tracked(receiver, key, value)?;
     Ok(())
   }
 
@@ -813,7 +814,7 @@ impl Vm {
     // inherit the strictness of the user script that happened to call them.
     let saved_strict = self.execution.active.strict;
     self.execution.active.strict = true;
-    let set_result = self.set_property_tracked(obj, &prop, value);
+    let set_result = self.set_property_with_receiver(obj, &prop, value, obj);
     self.execution.active.strict = saved_strict;
     set_result?;
     Ok(result)
@@ -859,10 +860,12 @@ impl Vm {
     if matches!(obj, Value::Proxy(_)) {
       return self.get_proxy_property(obj, key, obj);
     }
-    if let Some(index) = byte_view_index_from_key(key)
-      && let Some(value) = byte_view_index_value(obj, index)
-    {
-      return Ok(value);
+    if is_byte_view(obj) && canonical_numeric_index_from_key(key).is_some() {
+      return Ok(
+        byte_view_index_from_key(key)
+          .and_then(|index| byte_view_index_value(obj, index))
+          .unwrap_or(Value::Undefined),
+      );
     }
     if let Some((desc, _holder)) = self.lookup_property_descriptor(obj, key, 0)? {
       return match desc {
@@ -998,18 +1001,22 @@ impl Vm {
         "Prototype chain cycle detected or too deep",
       ));
     }
-    if let Some(index) = byte_view_index_from_key(key)
-      && let Some(value) = byte_view_index_value(obj, index)
-    {
-      return Ok(Some((
-        PropertyDescriptor::Data {
-          value,
-          writable: true,
-          enumerable: true,
-          configurable: true,
-        },
-        obj.clone(),
-      )));
+    if is_byte_view(obj) && canonical_numeric_index_from_key(key).is_some() {
+      return Ok(
+        byte_view_index_from_key(key)
+          .and_then(|index| byte_view_index_value(obj, index))
+          .map(|value| {
+            (
+              PropertyDescriptor::Data {
+                value,
+                writable: true,
+                enumerable: true,
+                configurable: true,
+              },
+              obj.clone(),
+            )
+          }),
+      );
     }
     match obj {
       Value::Object(data) => {
@@ -1164,10 +1171,11 @@ impl Vm {
       }
       return Ok(());
     }
-    if let Some(index) = byte_view_index_from_key(key)
-      && let Some(info) = byte_view_index_info(obj)
-    {
-      if index < info.length {
+    if is_byte_view(obj) && canonical_numeric_index_from_key(key).is_some() {
+      if let Some(index) = byte_view_index_from_key(key)
+        && let Some(info) = byte_view_index_info(obj)
+        && index < info.length
+      {
         write_byte_view_index(self, &info, index, &value)?;
         self.bump_object_generation(obj);
       }

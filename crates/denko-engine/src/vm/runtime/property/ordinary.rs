@@ -461,21 +461,17 @@ impl Vm {
     &mut self,
     obj: &Value,
   ) {
-    let ptr = match obj {
-      Value::Object(m) => Some(m.borrow().identity as usize),
-      Value::Array(_, props) => Some(props.borrow().identity as usize),
-      Value::Closure { props, .. } => Some(props.borrow().identity as usize),
-      Value::BuiltinObject(_, props) | Value::Promise(_, props) => {
-        Some(props.borrow().identity as usize)
-      }
+    let data = match obj {
+      Value::Object(data) => Some(data),
+      Value::Array(_, props)
+      | Value::Closure { props, .. }
+      | Value::BuiltinObject(_, props)
+      | Value::Promise(_, props) => Some(props),
       _ => None,
     };
-    if let Some(p) = ptr {
-      *self
-        .caches
-        .object_generations
-        .entry(p)
-        .or_insert(0) += 1;
+    if let Some(data) = data {
+      let mut data = data.borrow_mut();
+      data.mutation_generation = data.mutation_generation.wrapping_add(1);
     }
   }
 }

@@ -6,9 +6,10 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use denko::bytecode::VerifiedChunk;
 use denko::compiler;
 use denko::parser::Parser;
 use denko::runtime_utils;
@@ -203,21 +204,26 @@ fn bench_execute_fast(c: &mut Criterion) {
 
   for fixture in FAST_EXEC_FIXTURES {
     let path = fixture_path(fixture);
-    let chunk = compile_fixture(&path);
+    let chunk = VerifiedChunk::new(compile_fixture(&path)).expect("fixture bytecode should verify");
     let globals = benchmark_globals();
     let keep_globals = baseline_global_names(&globals);
     let mut vm = Vm::new(Rc::clone(&globals));
 
     group.throughput(Throughput::Elements(1));
     group.bench_with_input(BenchmarkId::from_parameter(fixture), &chunk, |b, chunk| {
-      b.iter_batched(
-        || chunk.clone(),
-        |chunk| {
-          drop(vm.run(chunk).expect("fixture should execute"));
+      b.iter_custom(|iterations| {
+        let mut elapsed = Duration::ZERO;
+        for _ in 0..iterations {
+          let started = Instant::now();
+          drop(
+            vm.run_verified(chunk)
+              .expect("fixture should execute"),
+          );
+          elapsed += started.elapsed();
           vm.reset(&keep_globals);
-        },
-        BatchSize::SmallInput,
-      );
+        }
+        elapsed
+      });
     });
   }
   group.finish();
@@ -232,21 +238,26 @@ fn bench_execute_slow(c: &mut Criterion) {
 
   for fixture in SLOW_EXEC_FIXTURES {
     let path = fixture_path(fixture);
-    let chunk = compile_fixture(&path);
+    let chunk = VerifiedChunk::new(compile_fixture(&path)).expect("fixture bytecode should verify");
     let globals = benchmark_globals();
     let keep_globals = baseline_global_names(&globals);
     let mut vm = Vm::new(Rc::clone(&globals));
 
     group.throughput(Throughput::Elements(1));
     group.bench_with_input(BenchmarkId::from_parameter(fixture), &chunk, |b, chunk| {
-      b.iter_batched(
-        || chunk.clone(),
-        |chunk| {
-          drop(vm.run(chunk).expect("fixture should execute"));
+      b.iter_custom(|iterations| {
+        let mut elapsed = Duration::ZERO;
+        for _ in 0..iterations {
+          let started = Instant::now();
+          drop(
+            vm.run_verified(chunk)
+              .expect("fixture should execute"),
+          );
+          elapsed += started.elapsed();
           vm.reset(&keep_globals);
-        },
-        BatchSize::SmallInput,
-      );
+        }
+        elapsed
+      });
     });
   }
   group.finish();
@@ -261,21 +272,26 @@ fn bench_execute_stress(c: &mut Criterion) {
 
   for fixture in STRESS_EXEC_FIXTURES {
     let path = fixture_path(fixture);
-    let chunk = compile_fixture(&path);
+    let chunk = VerifiedChunk::new(compile_fixture(&path)).expect("fixture bytecode should verify");
     let globals = benchmark_globals();
     let keep_globals = baseline_global_names(&globals);
     let mut vm = Vm::new(Rc::clone(&globals));
 
     group.throughput(Throughput::Elements(1));
     group.bench_with_input(BenchmarkId::from_parameter(fixture), &chunk, |b, chunk| {
-      b.iter_batched(
-        || chunk.clone(),
-        |chunk| {
-          drop(vm.run(chunk).expect("fixture should execute"));
+      b.iter_custom(|iterations| {
+        let mut elapsed = Duration::ZERO;
+        for _ in 0..iterations {
+          let started = Instant::now();
+          drop(
+            vm.run_verified(chunk)
+              .expect("fixture should execute"),
+          );
+          elapsed += started.elapsed();
           vm.reset(&keep_globals);
-        },
-        BatchSize::SmallInput,
-      );
+        }
+        elapsed
+      });
     });
   }
   group.finish();
@@ -293,24 +309,29 @@ fn bench_execute_unicode_hotpaths(c: &mut Criterion) {
     ("a6_like_comment_only_eval", comment_only_eval_source()),
   ] {
     let session = Parser::parse_source(&source).expect("benchmark source should parse as JS");
-    let chunk = compiler::compile_session(&session).expect("benchmark source should compile");
+    let chunk = VerifiedChunk::new(
+      compiler::compile_session(&session).expect("benchmark source should compile"),
+    )
+    .expect("benchmark bytecode should verify");
     let globals = benchmark_globals();
     let keep_globals = baseline_global_names(&globals);
     let mut vm = Vm::new(Rc::clone(&globals));
 
     group.throughput(Throughput::Elements(1));
     group.bench_with_input(BenchmarkId::from_parameter(fixture), &chunk, |b, chunk| {
-      b.iter_batched(
-        || chunk.clone(),
-        |chunk| {
+      b.iter_custom(|iterations| {
+        let mut elapsed = Duration::ZERO;
+        for _ in 0..iterations {
+          let started = Instant::now();
           drop(
-            vm.run(chunk)
+            vm.run_verified(chunk)
               .expect("benchmark source should execute"),
           );
+          elapsed += started.elapsed();
           vm.reset(&keep_globals);
-        },
-        BatchSize::SmallInput,
-      );
+        }
+        elapsed
+      });
     });
   }
   group.finish();

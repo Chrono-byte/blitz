@@ -275,7 +275,7 @@ impl Vm {
     props.borrow_mut().properties.insert(
       PropertyKey::String("length".to_string().into()),
       PropertyDescriptor::Data {
-        value: Value::Number(usize_to_f64(closure_proto.arity)),
+        value: Value::Number(usize_to_f64(closure_proto.length)),
         writable: false,
         enumerable: false,
         configurable: true,

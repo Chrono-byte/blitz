@@ -99,6 +99,7 @@ pub(super) type DynamicImportJob =
 
 #[derive(Clone)]
 pub(super) struct PropertyGetIcEntry {
+  pub(super) epoch: u64,
   pub(super) receiver_identity: usize,
   pub(super) receiver_generation: u64,
   pub(super) key: crate::value::PropertyKey,
@@ -207,6 +208,9 @@ pub(super) struct DirectEvalState {
 
 pub(super) struct ExecutionState {
   pub(super) active: ExecutionContext,
+  /// Number of active interpreter loops. Native calls only drain jobs when
+  /// this is zero, preserving JavaScript job run-to-completion.
+  pub(super) interpreter_depth: usize,
   pub(super) builtin_this_arg_prepended: bool,
   pub(super) pending_closure_env: Option<Rc<RefCell<Vec<SharedValue>>>>,
   pub(super) call_stack: CallStack,
@@ -243,8 +247,9 @@ pub(super) struct JobState {
 }
 
 pub(super) struct CacheState {
-  pub(super) object_generations: HashMap<usize, u64>,
   pub(super) property_get: HashMap<(usize, usize), PropertyGetIcEntry>,
+  /// O(1) invalidation boundary for mutation-opaque native callbacks.
+  pub(super) property_get_epoch: u64,
 }
 
 pub(super) struct ProfilingState {

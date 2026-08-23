@@ -27,10 +27,17 @@
 //! - [`value_string`] - Log a runtime Value
 
 use std::env;
+use std::sync::OnceLock;
 
-/// Returns true if tracing is enabled via TSBLITZ_TRACE environment variable
+/// Returns true if tracing is enabled via TSBLITZ_TRACE environment variable.
+///
+/// Tracing is process configuration, so cache it rather than querying the
+/// environment from the interpreter's per-instruction hot path.
 pub fn enabled() -> bool {
-  env::var("TSBLITZ_TRACE").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+  static ENABLED: OnceLock<bool> = OnceLock::new();
+  *ENABLED.get_or_init(|| {
+    env::var("TSBLITZ_TRACE").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+  })
 }
 
 fn string_inner(

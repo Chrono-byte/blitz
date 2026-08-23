@@ -71,11 +71,11 @@ impl Vm {
 
   pub(in crate::vm::runtime) fn prepare_call_args(
     &self,
-    args: &[Value],
+    args: Vec<Value>,
     proto: &FunctionProto,
   ) -> Result<Vec<Value>, RuntimeError> {
     if !proto.has_rest {
-      return Ok(args.to_vec());
+      return Ok(args);
     }
 
     let ar = proto.arity;

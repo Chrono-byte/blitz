@@ -170,6 +170,34 @@ impl Vm {
         return Ok(true);
       }
     }
+    if is_byte_view(obj)
+      && let Some(numeric_index) = canonical_numeric_index_from_key(&key)
+    {
+      let Some(info) = byte_view_index_info(obj) else {
+        return Ok(false);
+      };
+      if numeric_index.is_nan()
+        || !numeric_index.is_finite()
+        || numeric_index.is_sign_negative()
+        || numeric_index.fract() != 0.0
+        || numeric_index >= usize_to_f64(info.length)
+      {
+        return Ok(false);
+      }
+      if desc.has_get
+        || desc.has_set
+        || desc.configurable == Some(false)
+        || desc.enumerable == Some(false)
+        || desc.writable == Some(false)
+      {
+        return Ok(false);
+      }
+      if let Some(value) = &desc.value {
+        write_byte_view_index(self, &info, numeric_index as usize, value)?;
+        self.bump_object_generation(obj);
+      }
+      return Ok(true);
+    }
     if let Value::Array(arr, props) = obj
       && matches!(key, PropertyKey::String(ref name) if name == "length")
     {

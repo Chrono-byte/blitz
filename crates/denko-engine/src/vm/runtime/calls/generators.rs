@@ -38,7 +38,21 @@ impl Vm {
       child.execution.active.this_value.clone(),
       child.execution.active.chunk.risc_spill_count as usize,
     );
-    match child.run_risc_state(&mut risc_state, true)? {
+    let initialization = match child.run_risc_state(&mut risc_state, true) {
+      Ok(outcome) => outcome,
+      Err(error) => {
+        let Some(thrown) = child.exceptions.last_uncaught.take() else {
+          return Err(error);
+        };
+        return match self.throw_value(thrown) {
+          Err(error) => Err(error),
+          Ok(()) => Err(RuntimeError::from(
+            "generator initialization exception did not remain abrupt",
+          )),
+        };
+      }
+    };
+    match initialization {
       RiscRunOutcome::Initialized => {}
       RiscRunOutcome::Return(_) | RiscRunOutcome::Yield(_) | RiscRunOutcome::YieldStar(_) => {
         return Err(RuntimeError::from(

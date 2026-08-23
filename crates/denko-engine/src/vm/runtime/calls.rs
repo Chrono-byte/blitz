@@ -4,7 +4,7 @@ use crate::ecmascript::semantics::properties::own_property_descriptor;
 use crate::environment::EnvironmentRecord;
 use crate::errors::RuntimeError;
 use crate::gc;
-use crate::runtime_utils::{to_length, usize_to_decimal_string, usize_to_f64};
+use crate::runtime_utils::{strict_equal, to_length, usize_to_decimal_string, usize_to_f64};
 use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, SharedValue, Value};
 use crate::vm::Vm;
 use crate::vm::state::{
@@ -26,9 +26,9 @@ impl Vm {
     // Native integrations can still hold object backing stores for legacy
     // construction APIs. Treat every native callback as a cache coherency
     // boundary until all external object mutation is opaque and VM-owned.
-    self.caches.property_get.clear();
+    self.caches.property_get_epoch = self.caches.property_get_epoch.wrapping_add(1);
     let result = (function.as_ref())(self, args);
-    self.caches.property_get.clear();
+    self.caches.property_get_epoch = self.caches.property_get_epoch.wrapping_add(1);
     result
   }
 
@@ -281,9 +281,11 @@ impl Vm {
           let mut combined = bound_args;
           combined.extend_from_slice(args);
           let prev_new_target = self.construction.new_target.clone();
-          let active_new_target = prev_new_target
-            .clone()
-            .unwrap_or_else(|| target.clone());
+          let active_new_target = match prev_new_target.clone() {
+            Some(new_target) if strict_equal(&new_target, callee) => target.clone(),
+            Some(new_target) => new_target,
+            None => target.clone(),
+          };
           self.construction.new_target = Some(active_new_target);
           let result = self.construct_value(&target, &combined);
           self.construction.new_target = prev_new_target;
@@ -291,32 +293,42 @@ impl Vm {
           return result;
         }
 
-        let proto_source = self
-          .construction
-          .new_target
-          .clone()
-          .unwrap_or_else(|| callee.clone());
-        let proto = match self.get_property_value(
-          &proto_source,
-          &PropertyKey::String("prototype".to_string().into()),
-        ) {
-          Ok(proto) => proto,
-          Err(error) => {
-            self.roots.temporary.truncate(temp_root_base);
-            return Err(error);
-          }
+        let defers_instance_allocation = matches!(
+          props
+            .borrow()
+            .internal_slot("[[DefersInstanceAllocation]]"),
+          Some(Value::Bool(true))
+        );
+        let instance = if defers_instance_allocation {
+          Value::Undefined
+        } else {
+          let proto_source = self
+            .construction
+            .new_target
+            .clone()
+            .unwrap_or_else(|| callee.clone());
+          let proto = match self.get_property_value(
+            &proto_source,
+            &PropertyKey::String("prototype".to_string().into()),
+          ) {
+            Ok(proto) => proto,
+            Err(error) => {
+              self.roots.temporary.truncate(temp_root_base);
+              return Err(error);
+            }
+          };
+          let instance_proto = match proto {
+            Value::Object(_)
+            | Value::Array(..)
+            | Value::Closure { .. }
+            | Value::BuiltinObject(_, _) => proto,
+            _ => Value::Null,
+          };
+          let instance_obj = gc::track_object(Rc::new(RefCell::new(ObjectData::with_prototype(
+            instance_proto,
+          ))));
+          Value::Object(instance_obj)
         };
-        let instance_proto = match proto {
-          Value::Object(_)
-          | Value::Array(..)
-          | Value::Closure { .. }
-          | Value::BuiltinObject(_, _) => proto,
-          _ => Value::Null,
-        };
-        let instance_obj = gc::track_object(Rc::new(RefCell::new(ObjectData::with_prototype(
-          instance_proto,
-        ))));
-        let instance = Value::Object(instance_obj);
         // Builtin constructors receive:
         // args[0] = new instance (via call_with_this)
         // args[1..] = user-provided arguments
@@ -480,7 +492,9 @@ impl Vm {
         let result = (|| {
           let result = result?;
           self.roots.temporary.push(result.clone());
-          self.run_microtasks_if_needed()?;
+          if self.execution.interpreter_depth == 0 {
+            self.run_microtasks_if_needed()?;
+          }
           self.construction.recent_return_value = matches!(
             result,
             Value::Object(_)
@@ -565,7 +579,9 @@ impl Vm {
           let result_root_base = self.roots.temporary.len();
           self.roots.temporary.push(result.clone());
           let post_call = (|| {
-            self.run_microtasks_if_needed()?;
+            if self.execution.interpreter_depth == 0 {
+              self.run_microtasks_if_needed()?;
+            }
             Ok::<(), RuntimeError>(())
           })();
           self.roots.temporary.truncate(result_root_base);
@@ -604,7 +620,9 @@ impl Vm {
           let result_root_base = self.roots.temporary.len();
           self.roots.temporary.push(result.clone());
           let post_call = (|| {
-            self.run_microtasks_if_needed()?;
+            if self.execution.interpreter_depth == 0 {
+              self.run_microtasks_if_needed()?;
+            }
             Ok::<(), RuntimeError>(())
           })();
           self.roots.temporary.truncate(result_root_base);
@@ -627,9 +645,7 @@ impl Vm {
           if proto.is_class_constructor && self.construction.new_target.is_none() {
             return Err(self.throw_class_constructor_call_error(proto));
           }
-          let mut call_args: Vec<Value> = Vec::with_capacity(args.len());
-          call_args.extend_from_slice(args);
-          let call_args = self.prepare_call_args(&call_args, proto)?;
+          let call_args = self.prepare_call_args(args.to_vec(), proto)?;
           let closure_env = match callee {
             Value::Closure { env, .. } => Rc::clone(env),
             _ => {

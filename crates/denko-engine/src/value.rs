@@ -652,6 +652,8 @@ impl PropertyDescriptor {
 pub struct ObjectData {
   /// Stable object identity token used by runtime caches.
   pub identity: u64,
+  /// Mutation generation used by property inline caches.
+  pub(crate) mutation_generation: u64,
   /// Property table
   pub properties: IndexMap<PropertyKey, PropertyDescriptor>,
   /// Strong reference to the current prototype value.
@@ -701,6 +703,7 @@ impl ObjectData {
   pub fn new() -> Self {
     Self {
       identity: Self::next_identity(),
+      mutation_generation: 0,
       properties: IndexMap::new(),
       strong_prototype: None,
       weak_prototype: None,
@@ -729,6 +732,7 @@ impl ObjectData {
   pub fn with_weak_prototype(prototype: &Rc<RefCell<ObjectData>>) -> Self {
     Self {
       identity: Self::next_identity(),
+      mutation_generation: 0,
       properties: IndexMap::new(),
       strong_prototype: None,
       weak_prototype: Some(WeakObject::new(prototype)),

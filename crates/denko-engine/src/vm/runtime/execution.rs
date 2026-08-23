@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use crate::bytecode::{
-  Chunk, Op, decode_aux8, decode_compare_jump, decode_rd, decode_risc_aux16,
+  Chunk, Op, VerifiedChunk, decode_aux8, decode_compare_jump, decode_rd, decode_risc_aux16,
   decode_risc_cond_offset, decode_rs,
 };
 use crate::environment::EnvironmentRecord;
@@ -40,7 +40,7 @@ impl Vm {
     chunk
       .verify()
       .map_err(|error| RuntimeError::from(format!("Invalid bytecode: {}", error)))?;
-    self.run_risc_root(chunk)
+    self.run_risc_root(Arc::new(chunk))
   }
 
   /// Execute one interactive submission and retain its top-level bindings.
@@ -55,16 +55,23 @@ impl Vm {
     chunk
       .verify()
       .map_err(|error| RuntimeError::from(format!("Invalid bytecode: {}", error)))?;
-    let result = self.run_risc_root(chunk)?;
+    let result = self.run_risc_root(Arc::new(chunk))?;
     self.persist_root_bindings();
     Ok(result)
   }
 
+  /// Execute bytecode that has already passed structural verification.
+  pub fn run_verified(
+    &mut self,
+    chunk: &VerifiedChunk,
+  ) -> Result<Value, RuntimeError> {
+    self.run_risc_root(chunk.chunk())
+  }
+
   fn run_risc_root(
     &mut self,
-    chunk: Chunk,
+    chunk_rc: Arc<Chunk>,
   ) -> Result<Value, RuntimeError> {
-    let chunk_rc = Arc::new(chunk);
     self.execution.root_chunk = Some(Arc::clone(&chunk_rc));
     self.execution.active.chunk = chunk_rc;
     self.execution.active.ip = 0;
@@ -142,9 +149,9 @@ impl Vm {
       .and_then(|frame| frame.risc_state.take())
     {
       self.execute_return(result.clone())?;
-      registers.clone_from(&caller_state.registers);
+      *registers = caller_state.registers;
       registers[0] = result;
-      spills.clone_from(&caller_state.spills);
+      *spills = caller_state.spills;
       *resume_register = caller_state.resume_register;
       return Ok(None);
     }
@@ -153,7 +160,7 @@ impl Vm {
       self.roots.temporary.push(result.clone());
       self.roots.kept_alive.clear();
       self.run_microtasks_if_needed()?;
-      let _ = self.collect_garbage_prototype();
+      self.maybe_collect_garbage_prototype();
       self.roots.temporary.truncate(temp_root_base);
       self.roots.kept_alive.clear();
       self.finish_opcode_profile_run("risc-return");
@@ -166,9 +173,23 @@ impl Vm {
     state: &mut RiscExecutionState,
     stop_at_generator_init: bool,
   ) -> Result<RiscRunOutcome, RuntimeError> {
+    self.execution.interpreter_depth += 1;
+    let result = self.run_risc_state_inner(state, stop_at_generator_init);
+    self.execution.interpreter_depth -= 1;
+    result
+  }
+
+  fn run_risc_state_inner(
+    &mut self,
+    state: &mut RiscExecutionState,
+    stop_at_generator_init: bool,
+  ) -> Result<RiscRunOutcome, RuntimeError> {
+    const GC_POLL_INTERVAL: u8 = 64;
+
     let boundary_frame_count = self.execution.call_stack.len();
     let registers = &mut state.registers;
     let spills = &mut state.spills;
+    let mut gc_poll_countdown = GC_POLL_INTERVAL;
 
     if self
       .exceptions
@@ -675,7 +696,7 @@ impl Vm {
             let key = self.to_property_key(&registers[rs])?;
             let value = registers[(decode_aux8(word) & 0xF) as usize].clone();
             if receiver.is_object() {
-              self.set_property_tracked(&receiver, &key, value.clone())?;
+              self.set_property_with_receiver(&receiver, &key, value.clone(), &receiver)?;
             } else {
               let object = self.to_object_value(receiver.clone())?;
               self.set_primitive_property(&object, &key, value.clone(), &receiver)?;
@@ -752,6 +773,7 @@ impl Vm {
             let callee = registers[rd].clone();
             let values = registers[rs].clone();
             let mut mask = registers[(decode_aux8(word) & 0xF) as usize].clone();
+            let mut super_construct = false;
             let receiver = match &mask {
               Value::Array(mask_values, _) => {
                 let marker = mask_values.borrow().first().cloned().flatten();
@@ -760,6 +782,12 @@ impl Vm {
                     let marker_values = marker_values.borrow();
                     let receiver = marker_values.first().cloned().flatten();
                     let spread = marker_values.get(1).cloned().flatten();
+                    super_construct = matches!(
+                      marker_values
+                        .get(2)
+                        .and_then(|value| value.as_ref()),
+                      Some(Value::Bool(true))
+                    );
                     drop(marker_values);
                     if let (Some(receiver), Some(spread)) = (receiver, spread) {
                       let mut normalized = mask_values.borrow().to_vec();
@@ -781,7 +809,9 @@ impl Vm {
               _ => None,
             };
             let arguments = self.flatten_spread_values(values, mask)?;
-            registers[rd] = if let Some(receiver) = receiver {
+            registers[rd] = if super_construct {
+              self.construct_super_value(arguments)?
+            } else if let Some(receiver) = receiver {
               self.call_with_this(&callee, &receiver, &arguments)?
             } else {
               self.call_value(&callee, &arguments)?
@@ -810,7 +840,7 @@ impl Vm {
               if proto.is_class_constructor && self.construction.new_target.is_none() {
                 return Err(self.throw_class_constructor_call_error(proto));
               }
-              let call_args = self.prepare_call_args(&args, proto)?;
+              let call_args = self.prepare_call_args(args, proto)?;
               let receiver = if op == Op::CallBuiltin {
                 registers[1].clone()
               } else {
@@ -822,25 +852,21 @@ impl Vm {
               } else {
                 this_arg
               };
+              self.push_call_frame(proto, env, call_args, this_arg, callee.clone())?;
+              let callee_this = self.execution.active.this_value.clone();
+              let callee_spill_count = self.execution.active.chunk.risc_spill_count as usize;
               let caller_state = RiscExecutionState {
-                registers: registers.clone(),
-                spills: spills.clone(),
+                registers: std::mem::replace(registers, std::array::from_fn(|_| Value::Undefined)),
+                spills: std::mem::replace(spills, vec![Value::Undefined; callee_spill_count]),
                 resume_register: state.resume_register,
               };
-              self.push_call_frame(proto, env, call_args, this_arg, callee.clone())?;
               self
                 .execution
                 .call_stack
                 .last_mut()
                 .expect("call frame was just pushed")
                 .risc_state = Some(caller_state);
-              registers.fill(Value::Undefined);
-              registers[1] = self.execution.active.this_value.clone();
-              spills.clear();
-              spills.resize(
-                self.execution.active.chunk.risc_spill_count as usize,
-                Value::Undefined,
-              );
+              registers[1] = callee_this;
               state.resume_register = None;
               switched_risc_context = true;
             } else if op != Op::TailCall {
@@ -857,7 +883,7 @@ impl Vm {
               if proto.is_class_constructor && self.construction.new_target.is_none() {
                 return Err(self.throw_class_constructor_call_error(proto));
               }
-              let call_args = self.prepare_call_args(&args, proto)?;
+              let call_args = self.prepare_call_args(args, proto)?;
               let this_arg = Self::closure_lexical_this(&callee).unwrap_or(Value::Undefined);
               let this_arg = if proto.is_derived_constructor {
                 Value::Uninitialized
@@ -909,7 +935,7 @@ impl Vm {
               })?);
             }
             let callee = registers[0].clone();
-            registers[0] = self.construct_value(&callee, &args)?;
+            registers[0] = self.construct_value_with_new_target(&callee, &args, callee.clone())?;
           }
           Op::SuperConstruct => {
             let count = decode_risc_aux16(word) as usize;
@@ -1041,8 +1067,8 @@ impl Vm {
               .is_some_and(|target| target >= boundary_frame_count) =>
         {
           if let Some(caller_state) = self.exceptions.unwound_risc_state.take() {
-            registers.clone_from(&caller_state.registers);
-            spills.clone_from(&caller_state.spills);
+            *registers = caller_state.registers;
+            *spills = caller_state.spills;
             state.resume_register = caller_state.resume_register;
           }
           self.exceptions.pending_frame_count = None;
@@ -1055,18 +1081,22 @@ impl Vm {
         }
         Err(error) => return Err(error),
       }
-      if gc::allocation_pressure() >= gc_allocation_pressure_threshold() {
-        let temp_root_base = self.roots.temporary.len();
-        self
-          .roots
-          .temporary
-          .extend(registers.iter().cloned());
-        self
-          .roots
-          .temporary
-          .extend(spills.iter().cloned());
-        self.maybe_collect_garbage_prototype();
-        self.roots.temporary.truncate(temp_root_base);
+      gc_poll_countdown -= 1;
+      if gc_poll_countdown == 0 {
+        gc_poll_countdown = GC_POLL_INTERVAL;
+        if gc::allocation_pressure() >= gc_allocation_pressure_threshold() {
+          let temp_root_base = self.roots.temporary.len();
+          self
+            .roots
+            .temporary
+            .extend(registers.iter().cloned());
+          self
+            .roots
+            .temporary
+            .extend(spills.iter().cloned());
+          self.maybe_collect_garbage_prototype();
+          self.roots.temporary.truncate(temp_root_base);
+        }
       }
     }
   }

@@ -80,6 +80,7 @@ impl Vm {
           },
           strict: false,
         },
+        interpreter_depth: 0,
         builtin_this_arg_prepended: false,
         pending_closure_env: None,
         call_stack: CallStack::with_capacity(FRAMES_INITIAL_CAPACITY),
@@ -111,8 +112,8 @@ impl Vm {
         unhandled_rejection_hook: None,
       },
       caches: CacheState {
-        object_generations: HashMap::new(),
         property_get: HashMap::new(),
+        property_get_epoch: 0,
       },
       profiling: ProfilingState {
         enabled: std::env::var("BLITZ_VM_PROFILE")
@@ -172,6 +173,7 @@ impl Vm {
           },
           strict: self.execution.active.strict,
         },
+        interpreter_depth: 0,
         builtin_this_arg_prepended: false,
         pending_closure_env: None,
         call_stack: CallStack::with_capacity(FRAMES_INITIAL_CAPACITY),
@@ -203,8 +205,8 @@ impl Vm {
         unhandled_rejection_hook: self.jobs.unhandled_rejection_hook.clone(),
       },
       caches: CacheState {
-        object_generations: HashMap::new(),
         property_get: HashMap::new(),
+        property_get_epoch: 0,
       },
       profiling: ProfilingState {
         enabled: self.profiling.enabled,
@@ -396,14 +398,15 @@ impl Vm {
 
   /// Return the current `[[NewTarget]]` value.
   pub fn current_new_target(&self) -> Option<Value> {
-    self
-      .execution
-      .call_stack
-      .last()
-      .and_then(|frame| frame.new_target.clone())
-      // During constructor entry the pending value has not yet been moved
-      // into the suspended caller frame.
-      .or_else(|| self.construction.new_target.clone())
+    // A nested construction temporarily overrides the suspended caller's
+    // `new.target`; builtin constructors must observe that pending value.
+    self.construction.new_target.clone().or_else(|| {
+      self
+        .execution
+        .call_stack
+        .last()
+        .and_then(|frame| frame.new_target.clone())
+    })
   }
 
   /// Return the dynamic eval context flags for the currently executing code.
@@ -1162,7 +1165,6 @@ impl Vm {
     self.execution.active.arguments.mapped_count = 0;
     self.execution.active.ip = 0;
     self.execution.active.chunk = Arc::new(Chunk::new(Arc::new(String::new())));
-    self.caches.object_generations.clear();
     self.caches.property_get.clear();
     gc::reset_allocation_pressure();
     let mut g = self.realm_state.globals.borrow_mut();

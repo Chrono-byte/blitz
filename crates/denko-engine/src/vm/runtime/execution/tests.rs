@@ -5377,6 +5377,24 @@ mod test {
   }
 
   #[test]
+  fn promise_jobs_wait_for_the_current_script_to_finish() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        var promise_job_order = "";
+        Promise.resolve().then(function() {
+          promise_job_order += "microtask";
+        });
+        promise_job_order += "sync:";
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("promise_job_order"),
+      Some(Value::String("sync:microtask".to_string().into()))
+    );
+  }
+
+  #[test]
   fn array_reduce_without_initial_value_throws_on_empty_array() {
     let src = crate::js!(r#"[].reduce(function(acc, value) { return acc + value; });"#);
     let session = Parser::parse_source(src).expect("parse ok");

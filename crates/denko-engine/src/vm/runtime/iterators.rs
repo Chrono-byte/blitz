@@ -145,6 +145,9 @@ impl Vm {
     let next_fn =
       self.get_property_host(&iterator, &PropertyKey::String("next".to_string().into()))?;
     let result = self.call_value_with_this(&next_fn, &iterator, &[])?;
+    if !result.is_object() {
+      return Err(self.throw_type_error("Iterator result must be an object"));
+    }
     let done = self.get_property_host(&result, &PropertyKey::String("done".to_string().into()))?;
     if self.to_boolean(&done) {
       let done_key = PropertyKey::String("__tsblitz_iter_done".to_string().into());
