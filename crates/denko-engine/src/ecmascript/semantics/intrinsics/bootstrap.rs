@@ -21,6 +21,15 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   let array_values_builtin = array_intrinsics.values;
   let array_keys_builtin = array_intrinsics.keys;
   let array_entries_builtin = array_intrinsics.entries;
+  let array_to_string_builtin = array_proto_map
+    .borrow()
+    .properties
+    .get(&PropertyKey::String("toString".into()))
+    .and_then(|descriptor| match descriptor {
+      PropertyDescriptor::Data { value, .. } => Some(value.clone()),
+      _ => None,
+    })
+    .expect("Array.prototype.toString is installed");
 
   let function_intrinsics = builtins::function::create_function_intrinsics(
     globals,
@@ -48,6 +57,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     array_values_builtin,
     array_keys_builtin,
     array_entries_builtin,
+    array_to_string_builtin,
   );
   let arraybuffer_ctor_val = binary_data.arraybuffer_ctor_val;
   let arraybuffer_proto_map = binary_data.arraybuffer_proto_map;

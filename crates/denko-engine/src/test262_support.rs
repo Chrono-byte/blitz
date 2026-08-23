@@ -107,8 +107,9 @@ fn make_test262_object(
   );
   data.properties.insert(
     PropertyKey::String("detachArrayBuffer".to_string().into()),
-    PropertyDescriptor::ordinary_data(host_builtin(Rc::new(|_vm, args| {
-      if let Some(Value::Object(obj)) = args.first() {
+    PropertyDescriptor::ordinary_data(host_builtin(Rc::new(|vm, args| {
+      let offset = usize::from(vm.builtin_this_arg_prepended());
+      if let Some(Value::Object(obj)) = args.get(offset) {
         let mut obj_data = obj.borrow_mut();
         obj_data.set_internal_slot(ARRAY_BUFFER_DATA_SLOT, Value::Null);
         obj_data.properties.insert(

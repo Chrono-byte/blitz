@@ -314,6 +314,41 @@ pub(crate) fn install_string_boolean_symbol_builtins(
     PKey::String("valueOf".to_string().into()),
     PropertyDescriptor::builtin_data(symbol_value_of),
   );
+  let symbol_to_primitive = builtin_object(
+    Rc::new(|vm, args| {
+      let this = args.first().unwrap_or(&Value::Undefined);
+      match this {
+        Value::Symbol(_, _) => Ok(this.clone()),
+        Value::Object(object) => object
+          .borrow()
+          .internal_slot("[[SymbolData]]")
+          .and_then(|value| match value {
+            Value::Symbol(id, description) => Some(Value::Symbol(id.clone(), description.clone())),
+            _ => None,
+          })
+          .ok_or_else(|| {
+            vm.throw_type_error(
+              "Symbol.prototype[Symbol.toPrimitive] called on incompatible receiver",
+            )
+          }),
+        _ => Err(vm.throw_type_error(
+          "Symbol.prototype[Symbol.toPrimitive] called on incompatible receiver",
+        )),
+      }
+    }),
+    function_proto_map,
+  );
+  set_builtin_name(&symbol_to_primitive, "[Symbol.toPrimitive]");
+  set_builtin_length(&symbol_to_primitive, 1.0);
+  symbol_proto_map.borrow_mut().properties.insert(
+    PKey::Symbol(SymbolId::well_known_to_primitive()),
+    PropertyDescriptor::Data {
+      value: symbol_to_primitive,
+      writable: false,
+      enumerable: false,
+      configurable: true,
+    },
+  );
   let symbol_description = builtin_object(
     Rc::new(|vm, args| {
       let this = args.first().unwrap_or(&Value::Undefined);
@@ -1046,6 +1081,93 @@ pub(crate) fn install_string_boolean_symbol_builtins(
     PKey::String("substring".into()),
     PropertyDescriptor::builtin_data(string_substring),
   );
+
+  let string_substr = builtin_object(
+    Rc::new(|vm, args| {
+      let receiver = args.first().unwrap_or(&Value::Undefined);
+      require_object_coercible(vm, receiver)?;
+      let string = vm.to_string(receiver)?;
+      let length = string.len();
+      let start_number = vm.to_number_value(args.get(1).unwrap_or(&Value::Undefined))?;
+      let start_integer = if start_number.is_nan() {
+        0.0
+      } else {
+        start_number.trunc()
+      };
+      let start = if start_integer < 0.0 {
+        (length as f64 + start_integer).max(0.0) as usize
+      } else {
+        start_integer.min(length as f64) as usize
+      };
+      let count = match args.get(2) {
+        None | Some(Value::Undefined) => length - start,
+        Some(value) => {
+          let number = vm.to_number_value(value)?;
+          let integer = if number.is_nan() { 0.0 } else { number.trunc() };
+          integer.max(0.0).min((length - start) as f64) as usize
+        }
+      };
+      Ok(Value::String(
+        string
+          .slice(start..start + count)
+          .expect("substr bounds were clamped"),
+      ))
+    }),
+    function_proto_map,
+  );
+  set_builtin_name(&string_substr, "substr");
+  set_builtin_length(&string_substr, 2.0);
+  string_proto_map.borrow_mut().properties.insert(
+    PKey::String("substr".into()),
+    PropertyDescriptor::builtin_data(string_substr),
+  );
+
+  for (name, open, close, argument_name) in [
+    ("anchor", "<a name=\"", "</a>", Some("name")),
+    ("big", "<big>", "</big>", None),
+    ("blink", "<blink>", "</blink>", None),
+    ("bold", "<b>", "</b>", None),
+    ("fixed", "<tt>", "</tt>", None),
+    ("fontcolor", "<font color=\"", "</font>", Some("color")),
+    ("fontsize", "<font size=\"", "</font>", Some("size")),
+    ("italics", "<i>", "</i>", None),
+    ("link", "<a href=\"", "</a>", Some("href")),
+    ("small", "<small>", "</small>", None),
+    ("strike", "<strike>", "</strike>", None),
+    ("sub", "<sub>", "</sub>", None),
+    ("sup", "<sup>", "</sup>", None),
+  ] {
+    let method = builtin_object(
+      Rc::new(move |vm, args| {
+        let receiver = args.first().unwrap_or(&Value::Undefined);
+        require_object_coercible(vm, receiver)?;
+        let string = vm.to_string(receiver)?;
+        let mut result = js_string::JsStringBuilder::new();
+        result.push_str(open);
+        if argument_name.is_some() {
+          let argument = vm.to_string(args.get(1).unwrap_or(&Value::Undefined))?;
+          for unit in argument.code_units() {
+            if unit == u16::from(b'"') {
+              result.push_str("&quot;");
+            } else {
+              result.push_code_unit(unit);
+            }
+          }
+          result.push_str("\">");
+        }
+        result.push_string(&string);
+        result.push_str(close);
+        Ok(Value::String(result.finish()))
+      }),
+      function_proto_map,
+    );
+    set_builtin_name(&method, name);
+    set_builtin_length(&method, f64::from(argument_name.is_some()));
+    string_proto_map.borrow_mut().properties.insert(
+      PKey::String(name.into()),
+      PropertyDescriptor::builtin_data(method),
+    );
+  }
 
   let string_repeat = builtin_object(
     Rc::new(|vm, args| {

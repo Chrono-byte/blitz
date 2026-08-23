@@ -83,51 +83,39 @@ pub(crate) fn collect_iterable_values(
   vm: &mut Vm,
   iterable: &Value,
 ) -> Result<Vec<Value>, RuntimeError> {
-  match iterable {
-    Value::Array(arr, _) => Ok(
-      arr
+  if let Value::Array(array, _) = iterable {
+    return Ok(
+      array
         .borrow()
         .iter()
-        .map(|v| v.clone().unwrap_or(Value::Undefined))
+        .map(|value| value.clone().unwrap_or(Value::Undefined))
         .collect(),
-    ),
-    other => {
-      let iterator_method =
-        vm.get_property_host(other, &PropertyKey::Symbol(SymbolId::well_known_iterator()))?;
-
-      let is_callable = Vm::is_callable_value(&iterator_method);
-      if is_callable {
-        let iter_obj = vm.call_value_with_this(&iterator_method, other, &[])?;
-        let mut items = Vec::new();
-        loop {
-          let next_fn =
-            vm.get_property_host(&iter_obj, &PropertyKey::String("next".to_string().into()))?;
-          let result = vm.call_value_with_this(&next_fn, &iter_obj, &[])?;
-          let done_val =
-            vm.get_property_host(&result, &PropertyKey::String("done".to_string().into()))?;
-          if vm.to_boolean(&done_val) {
-            break;
-          }
-          let val =
-            vm.get_property_host(&result, &PropertyKey::String("value".to_string().into()))?;
-          items.push(val);
-        }
-        Ok(items)
-      } else {
-        let len_val =
-          vm.get_property_host(other, &PropertyKey::String("length".to_string().into()))?;
-        let len = to_length(vm, &len_val)?;
-        let mut items = Vec::with_capacity(len);
-        for idx in 0..len {
-          let item = vm.get_property_host(
-            other,
-            &PropertyKey::String(usize_to_decimal_string(idx).into()),
-          )?;
-          items.push(item);
-        }
-        Ok(items)
-      }
+    );
+  }
+  let iterator_method = get_method(
+    vm,
+    iterable,
+    &PropertyKey::Symbol(SymbolId::well_known_iterator()),
+  )?;
+  if let Some(iterator_method) = iterator_method {
+    let (iterator, next) = get_iterator_record(vm, iterable, &iterator_method)?;
+    let mut items = Vec::new();
+    while let Some(value) = iterator_step(vm, &iterator, &next)? {
+      items.push(value);
     }
+    Ok(items)
+  } else {
+    let len_val = vm.get_property_host(iterable, &PropertyKey::String("length".into()))?;
+    let len = to_length(vm, &len_val)?;
+    let mut items = Vec::with_capacity(len);
+    for idx in 0..len {
+      let item = vm.get_property_host(
+        iterable,
+        &PropertyKey::String(usize_to_decimal_string(idx).into()),
+      )?;
+      items.push(item);
+    }
+    Ok(items)
   }
 }
 

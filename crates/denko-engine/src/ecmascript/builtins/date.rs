@@ -923,17 +923,37 @@ pub(crate) fn create_date_intrinsics(
     1,
     Rc::new(|vm, args| {
       let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-      let hint = vm.to_string(args.get(1).unwrap_or(&Value::Undefined))?;
-      let hint = hint.as_str_lossy();
-      match hint {
-        "number" => Ok(Value::Number(date_number(vm, &receiver)?)),
-        "string" | "default" => Ok(Value::String(
-          readable_string(date_number(vm, &receiver)?).into(),
-        )),
-        _ => Err(vm.throw_type_error("Invalid hint for Date @@toPrimitive")),
+      if !receiver.is_object() {
+        return Err(vm.throw_type_error("Date @@toPrimitive receiver must be an object"));
       }
+      let Some(Value::String(hint)) = args.get(1) else {
+        return Err(vm.throw_type_error("Invalid hint for Date @@toPrimitive"));
+      };
+      let order = match hint.as_str_lossy() {
+        "number" => ["valueOf", "toString"],
+        "string" | "default" => ["toString", "valueOf"],
+        _ => return Err(vm.throw_type_error("Invalid hint for Date @@toPrimitive")),
+      };
+      for name in order {
+        let method =
+          vm.get_property_host(&receiver, &PropertyKey::String(name.to_string().into()))?;
+        if Vm::is_callable_value(&method) {
+          let result = vm.call_value_with_this(&method, &receiver, &[])?;
+          if !result.is_object() {
+            return Ok(result);
+          }
+        }
+      }
+      Err(vm.throw_type_error("Date @@toPrimitive could not produce a primitive"))
     }),
   );
+  if let Some(PropertyDescriptor::Data { writable, .. }) = prototype
+    .borrow_mut()
+    .properties
+    .get_mut(&PropertyKey::Symbol(SymbolId::well_known_to_primitive()))
+  {
+    *writable = false;
+  }
 
   DateIntrinsics {
     constructor,

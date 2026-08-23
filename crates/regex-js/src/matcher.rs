@@ -6,7 +6,9 @@ use crate::ast::{Assertion, CharacterClass, ClassTerm, Node};
 use crate::canonical::{range_contains, symbols_equal};
 use crate::{Flags, Input, Regex};
 
-const MAX_MATCH_STEPS: usize = 1_000_000;
+const MIN_MATCH_STEPS: usize = 1_000_000;
+const MAX_MATCH_STEPS: usize = 10_000_000;
+const MATCH_STEPS_PER_INPUT_UNIT: usize = 32;
 const MAX_MATCH_DEPTH: usize = 2_048;
 
 /// A regular-expression match exceeded a host-safety resource limit.
@@ -30,9 +32,11 @@ struct MatchContext {
 }
 
 impl MatchContext {
-  const fn new() -> Self {
+  fn new(input_length: usize) -> Self {
     Self {
-      remaining_steps: MAX_MATCH_STEPS,
+      remaining_steps: input_length
+        .saturating_mul(MATCH_STEPS_PER_INPUT_UNIT)
+        .clamp(MIN_MATCH_STEPS, MAX_MATCH_STEPS),
       depth: 0,
     }
   }
@@ -112,7 +116,7 @@ pub(crate) fn find(
   if start > input.len() {
     return Ok(None);
   }
-  let mut context = MatchContext::new();
+  let mut context = MatchContext::new(input.len());
   let initial = start;
   let mut candidate = start;
   loop {

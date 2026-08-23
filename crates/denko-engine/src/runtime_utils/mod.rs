@@ -230,10 +230,13 @@ pub(crate) fn to_index(
   if num.is_nan() {
     return Ok(0);
   }
-  if !num.is_finite() || num < 0.0_f64 {
+  if !num.is_finite() {
     return Err(vm.throw_range_error("Invalid array index"));
   }
   let int_val = num.trunc();
+  if int_val < 0.0 {
+    return Err(vm.throw_range_error("Invalid array index"));
+  }
   if int_val > MAX_ARRAY_LENGTH_F {
     return Err(vm.throw_range_error("Invalid array index"));
   }

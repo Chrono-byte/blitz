@@ -27,11 +27,13 @@ fn rejects(source: &str) {
   compiler::compile_session(&session).expect_err("fixture must be rejected during compilation");
 }
 
-const ASSERT: &str = r#"
+const ASSERT: &str = crate::js!(
+  r#"
   function assert(condition, label) {
     if (!condition) throw new Error(label);
   }
-"#;
+"#
+);
 
 #[test]
 fn declaration_instantiation_and_early_errors() {
@@ -51,14 +53,28 @@ fn declaration_instantiation_and_early_errors() {
       let loopTdz = false;
       try {{ for (let outer = outer; false;) {{}} }} catch (_) {{ loopTdz = true; }}
       assert(loopTdz, "for lexical initializer observes its own TDZ");
+
+      class ReservedProperty {{
+        \u0069mplements() {{ return 20; }}
+        *yield() {{ yield 22; }}
+      }}
+      const reserved = new ReservedProperty();
+      assert(reserved.implements() === 20 && reserved.yield().next().value === 22,
+        "reserved words remain valid literal property names in strict class bodies");
+
+      var yield = 23;
+      const nonStrictArrow = (value = yield) => value;
+      assert(nonStrictArrow() === 23,
+        "yield remains an identifier in non-strict arrow parameters outside generators");
     "#
   ));
 
   for source in [
-    r#"const f = () => { let duplicate; let duplicate; };"#,
-    r#"try {} catch (error) { const error = 1; }"#,
-    r#"function value() {} let value;"#,
-    r#""use strict"; let value; delete value;"#,
+    crate::js!(r#"const f = () => { let duplicate; let duplicate; };"#),
+    crate::js!(r#"try {} catch (error) { const error = 1; }"#),
+    crate::js!(r#"function value() {} let value;"#),
+    crate::js!(r#""use strict"; let value; delete value;"#),
+    crate::js!(r#"function *outer() { (value = yield) => value; }"#),
   ] {
     rejects(source);
   }
@@ -189,6 +205,23 @@ fn classes_evaluate_keys_fields_and_super_in_spec_order() {
       assert(order === "ki", "field initializer runs during construction");
       assert(value.method() === 5, "super method uses home object and lexical this");
 
+      const objectBase = {{ method() {{ return this.amount; }} }};
+      const objectDerived = {{
+        amount: 9,
+        method() {{ return (() => super.method())(); }},
+        *generator() {{ yield super.method(); }}
+      }};
+      Object.setPrototypeOf(objectDerived, objectBase);
+      assert(objectDerived.method() === 9 && objectDerived.generator().next().value === 9,
+        "object methods and nested arrows retain their home object for super properties");
+
+      class SpreadBase {{ constructor(first, second) {{ this.total = first + second; }} }}
+      class SpreadDerived extends SpreadBase {{
+        constructor(values) {{ super(...values); }}
+      }}
+      assert(new SpreadDerived([4, 6]).total === 10,
+        "spread super calls construct the base and initialize derived this");
+
       let immutable = false;
       try {{ Derived = 1; }} catch (_) {{ immutable = true; }}
       assert(immutable, "class declaration binding is immutable");
@@ -272,6 +305,11 @@ fn parameter_environments_precede_function_body_instantiation() {
       const result = rest(1, 2, 3);
       assert(result[0] === 1 && result[1] === 2 && result[2] === 3,
         "rest parameters collect remaining arguments");
+      assert(rest.length === 1, "rest parameter is excluded from function length");
+      assert((function (a, b = 1, c) {{}}).length === 1,
+        "function length stops before first default parameter");
+      assert(((a, b = 1, c) => 0).length === 1,
+        "arrow length stops before first default parameter");
     "#
   ));
 }
@@ -335,6 +373,12 @@ fn property_descriptors_accessors_and_key_order_follow_ecmascript() {
       try {{ (function () {{ "use strict"; delete receiver.fixed; }})(); }}
       catch (error) {{ strictDelete = error instanceof TypeError; }}
       assert(strictDelete, "strict delete throws for non-configurable property");
+
+      const protoTarget = {{ marker: 11 }};
+      const protoReceiver = {{}};
+      protoReceiver.__proto__ = protoTarget;
+      assert(protoReceiver.marker === 11 && protoReceiver.__proto__ === protoTarget,
+        "legacy __proto__ accessor delegates to prototype internal methods");
     "#
   ));
 }
@@ -448,6 +492,33 @@ fn primitive_coercion_uses_to_primitive_once_with_the_correct_hint() {
       assert(Object.is(-0, -0) && !Object.is(-0, 0), "SameValue distinguishes signed zero");
       assert(Object.is(NaN, NaN), "SameValue considers NaN equal to itself");
       assert(1n + 2n === 3n && 2n ** 3n === 8n, "BigInt arithmetic remains in BigInt domain");
+    "#
+  ));
+}
+
+#[test]
+fn generator_parameter_initialization_is_synchronous_and_propagates_abrupt_completion() {
+  run(&format!(
+    r#"
+      {ASSERT}
+      const sentinel = {{}};
+      const iterable = {{
+        [Symbol.iterator]() {{ throw sentinel; }}
+      }};
+      function* binding([value]) {{ yield value; }}
+
+      let thrown;
+      try {{ binding(iterable); }} catch (error) {{ thrown = error; }}
+      assert(thrown === sentinel,
+        "generator call propagates parameter iterator failure synchronously");
+
+      let typeError = false;
+      try {{ binding([null]); }} catch (error) {{ typeError = error instanceof TypeError; }}
+      assert(!typeError, "flat binding accepts null as its element value");
+
+      function* nested([[value]]) {{ yield value; }}
+      try {{ nested([null]); }} catch (error) {{ typeError = error instanceof TypeError; }}
+      assert(typeError, "nested parameter binding fails during generator call");
     "#
   ));
 }
@@ -586,6 +657,77 @@ fn instanceof_honors_prototypes_and_symbol_has_instance() {
       const matcher = {{ [Symbol.hasInstance](value) {{ return value && value.accepted === true; }} }};
       assert(({{ accepted: true }}) instanceof matcher, "custom @@hasInstance is called");
       assert(!(({{ accepted: false }}) instanceof matcher), "custom @@hasInstance result is booleanized");
+    "#
+  ));
+}
+
+#[test]
+fn typed_array_construction_prefers_iterators_over_array_like_length() {
+  run(&format!(
+    r#"
+      {ASSERT}
+      let reads = 0;
+      const source = {{
+        length: 99,
+        *[Symbol.iterator]() {{ reads += 1; yield 3; yield 5; }}
+      }};
+      const values = new Float64Array(source);
+      assert(reads === 1, "typed array constructor consumes iterable once");
+      assert(values.length === 2 && values[0] === 3 && values[1] === 5,
+        "iterable takes precedence over array-like length");
+
+      const sentinel = {{}};
+      const abrupt = {{ [Symbol.iterator]() {{ throw sentinel; }} }};
+      let thrown;
+      try {{ new Float64Array(abrupt); }} catch (error) {{ thrown = error; }}
+      assert(thrown === sentinel, "iterator acquisition failure propagates");
+
+      const target = new Float64Array([1, 2]);
+      assert(Reflect.defineProperty(target, "0", {{ value: 7 }}),
+        "integer-indexed define succeeds for valid index");
+      assert(target[0] === 7, "integer-indexed define writes backing storage");
+      assert(!Reflect.defineProperty(target, "-0", {{ value: 9 }}),
+        "negative zero is an invalid integer index");
+      assert(target["-0"] === undefined && target["0.1"] === undefined,
+        "invalid canonical numeric indices do not fall through to ordinary properties");
+      const ownKeys = Reflect.ownKeys(target);
+      assert(ownKeys.length === 2 && ownKeys[0] === "0" && ownKeys[1] === "1",
+        "typed-array own keys expose indices without internal metadata");
+      assert(Object.prototype.toString.call(target) === "[object Float64Array]",
+        "typed-array toStringTag reports the element kind");
+
+      const subarray = new Float64Array([10, 20, 30]).subarray(-0.6, undefined);
+      assert(subarray.length === 3 && subarray[2] === 30,
+        "subarray applies ToIntegerOrInfinity and treats undefined end as length");
+
+      const writes = [];
+      const setTarget = new Float64Array(3);
+      setTarget.set({{
+        length: 3,
+        get 0() {{ writes.push(0); return 4; }},
+        get 1() {{ writes.push(1); return 5; }},
+        get 2() {{ writes.push(2); return 6; }}
+      }});
+      assert(writes.join("") === "012" && setTarget[1] === 5,
+        "TypedArray set reads and writes array-like values in order");
+
+      let conversions = 0;
+      const fillValue = {{ valueOf() {{ conversions += 1; return 2; }} }};
+      new Uint8ClampedArray(3).fill(fillValue);
+      assert(conversions === 1, "TypedArray fill converts its value once");
+
+      let invalidIteratorReceiver = false;
+      try {{ Float64Array.prototype.values.call({{}}); }}
+      catch (error) {{ invalidIteratorReceiver = error instanceof TypeError; }}
+      assert(invalidIteratorReceiver, "TypedArray iterators validate their receiver");
+
+      function Species(buffer, offset, length) {{
+        return new Float64Array(buffer, offset, length);
+      }}
+      const backing = new ArrayBuffer(24);
+      const nestedConstruct = new Species(backing, 8, 2);
+      assert(nestedConstruct.length === 2 && Object.getPrototypeOf(nestedConstruct) === Float64Array.prototype,
+        "nested construction uses the inner constructor as new.target");
     "#
   ));
 }

@@ -11,7 +11,6 @@ use std::rc::Rc;
 use num_bigint::{BigInt, Sign};
 use num_traits::ToPrimitive;
 
-use crate::runtime_utils::canonical_index_key;
 use crate::value::{
   ArrayData, ObjectData, PropertyDescriptor, PropertyKey, Uint8ArrayByteView, Value,
 };
@@ -141,23 +140,31 @@ pub(crate) fn new_byte_view(
     TYPED_ARRAY_BYTE_OFFSET_SLOT,
     Value::Number(byte_offset as f64),
   );
-  object.set_internal_slot(TYPED_ARRAY_BUFFER_SLOT, buffer.clone());
+  object.set_internal_slot(TYPED_ARRAY_BUFFER_SLOT, buffer);
 
-  for (name, value) in [
-    ("length", Value::Number(length as f64)),
-    (
-      "byteLength",
-      Value::Number((length * bytes_per_element) as f64),
-    ),
-    ("byteOffset", Value::Number(byte_offset as f64)),
-    ("buffer", buffer),
-  ] {
-    object.properties.insert(
-      PropertyKey::String(name.to_string().into()),
-      PropertyDescriptor::ordinary_data(value),
-    );
-  }
   Value::Object(Rc::new(RefCell::new(object)))
+}
+
+pub(crate) fn byte_view_metadata(value: &Value) -> Option<(Value, String, usize, usize)> {
+  let Value::Object(object) = value else {
+    return None;
+  };
+  let kind = match internal_slot(object, TYPED_ARRAY_KIND_SLOT)? {
+    Value::String(kind) if typed_array_bytes_per_element(kind.as_str_lossy()).is_some() => {
+      kind.to_string()
+    }
+    _ => return None,
+  };
+  let buffer = internal_slot(object, TYPED_ARRAY_BUFFER_SLOT)?;
+  let length = match internal_slot(object, TYPED_ARRAY_LENGTH_SLOT)? {
+    Value::Number(length) => length.to_usize()?,
+    _ => return None,
+  };
+  let byte_offset = match internal_slot(object, TYPED_ARRAY_BYTE_OFFSET_SLOT)? {
+    Value::Number(offset) => offset.to_usize()?,
+    _ => return None,
+  };
+  Some((buffer, kind, length, byte_offset))
 }
 
 pub(crate) fn byte_view_details(value: &Value) -> Option<ByteViewDetails> {
@@ -340,7 +347,7 @@ pub(crate) fn encode_typed_element(
   let bytes = match kind {
     "Uint8Array" => vec![number.trunc().rem_euclid(256.0) as u8],
     "Int8Array" => vec![number.trunc().rem_euclid(256.0) as u8],
-    "Uint8ClampedArray" => vec![encode_byte(vm, kind, value)?],
+    "Uint8ClampedArray" => vec![encode_uint8_clamped(number)],
     "Uint16Array" => (number.trunc().rem_euclid(65_536.0) as u16)
       .to_le_bytes()
       .to_vec(),
@@ -360,38 +367,53 @@ pub(crate) fn encode_typed_element(
   Ok(bytes)
 }
 
-pub(crate) fn encode_byte(
-  vm: &mut Vm,
-  kind: &str,
-  value: &Value,
-) -> Result<u8, RuntimeError> {
-  let number = vm.to_number_value(value)?;
-  if number.is_nan() || number == 0.0 {
-    return Ok(0);
+fn encode_uint8_clamped(number: f64) -> u8 {
+  if number.is_nan() || number <= 0.0 {
+    return 0;
   }
-  if kind == "Uint8ClampedArray" {
-    if number <= 0.0 {
-      return Ok(0);
-    }
-    if number >= 255.0 {
-      return Ok(255);
-    }
-    let floor = number.floor();
-    let fraction = number - floor;
-    return Ok(
-      if fraction > 0.5 || (fraction == 0.5 && (floor as u8) % 2 == 1) {
-        floor as u8 + 1
-      } else {
-        floor as u8
-      },
-    );
+  if number >= 255.0 {
+    return 255;
   }
-  Ok(number.trunc().rem_euclid(256.0) as u8)
+  let floor = number.floor();
+  let fraction = number - floor;
+  if fraction > 0.5 || (fraction == 0.5 && (floor as u8) % 2 == 1) {
+    floor as u8 + 1
+  } else {
+    floor as u8
+  }
 }
 
-pub(crate) fn byte_view_index_from_key(key: &PropertyKey) -> Option<usize> {
+pub(crate) fn is_byte_view(value: &Value) -> bool {
+  let Value::Object(object) = value else {
+    return false;
+  };
+  matches!(
+    internal_slot(object, TYPED_ARRAY_KIND_SLOT),
+    Some(Value::String(kind)) if typed_array_bytes_per_element(kind.as_str_lossy()).is_some()
+  )
+}
+
+pub(crate) fn canonical_numeric_index_from_key(key: &PropertyKey) -> Option<f64> {
   let PropertyKey::String(name) = key else {
     return None;
   };
-  canonical_index_key(name)?.to_usize()
+  let name = name.as_str_lossy();
+  if name == "-0" {
+    return Some(-0.0);
+  }
+  let number = match name {
+    "NaN" => f64::NAN,
+    "Infinity" => f64::INFINITY,
+    "-Infinity" => f64::NEG_INFINITY,
+    source => source.parse::<f64>().ok()?,
+  };
+  (crate::runtime_utils::js_number_to_string(number) == name).then_some(number)
+}
+
+pub(crate) fn byte_view_index_from_key(key: &PropertyKey) -> Option<usize> {
+  let number = canonical_numeric_index_from_key(key)?;
+  if !number.is_finite() || number.is_sign_negative() || number.fract() != 0.0 {
+    return None;
+  }
+  number.to_usize()
 }

@@ -5,7 +5,7 @@ use std::rc::Rc;
 
 use super::*;
 use crate::ecmascript::semantics::builtin_object;
-use crate::runtime_utils::{same_value_zero, strict_equal};
+use crate::runtime_utils::{collect_iterable_values, same_value_zero, strict_equal};
 use crate::value::BuiltinFn;
 
 pub(crate) struct TypedArrayIntrinsics {
@@ -33,15 +33,13 @@ fn typed_array_length(
     .ok_or_else(|| vm.throw_type_error("TypedArray method called on incompatible receiver"))
 }
 
-fn typed_array_create_same(
+fn typed_array_species_constructor(
   vm: &mut Vm,
   receiver: &Value,
-  length: usize,
+  source_kind: &str,
 ) -> Result<Value, RuntimeError> {
-  let (_, _, _, source_kind, _, _, _) = typed_view_details(receiver)
-    .ok_or_else(|| vm.throw_type_error("TypedArray method called on incompatible receiver"))?;
   let default_constructor = vm
-    .get_global(&source_kind)
+    .get_global(source_kind)
     .ok_or_else(|| vm.throw_type_error("TypedArray constructor is unavailable"))?;
   let constructor = vm.get_property_host(receiver, &PropertyKey::String("constructor".into()))?;
   let constructor = match constructor {
@@ -61,14 +59,45 @@ fn typed_array_create_same(
   if !constructor.is_constructable() {
     return Err(vm.throw_type_error("TypedArray constructor is not constructable"));
   }
-  let result = vm.construct_value(&constructor, &[Value::Number(usize_to_f64(length))])?;
+  Ok(constructor)
+}
+
+fn validate_typed_array_species_result(
+  vm: &mut Vm,
+  result: Value,
+  source_kind: &str,
+  minimum_length: Option<usize>,
+) -> Result<Value, RuntimeError> {
   let Some((_, _, _, result_kind, result_length, _, _)) = typed_view_details(&result) else {
     return Err(vm.throw_type_error("TypedArray constructor returned an incompatible value"));
   };
-  if source_kind.starts_with("Big") != result_kind.starts_with("Big") || result_length < length {
+  if source_kind.starts_with("Big") != result_kind.starts_with("Big")
+    || minimum_length.is_some_and(|length| result_length < length)
+  {
     return Err(vm.throw_type_error("TypedArray species created an incompatible value"));
   }
   Ok(result)
+}
+
+fn typed_array_create_with_kind(
+  vm: &mut Vm,
+  receiver: &Value,
+  source_kind: &str,
+  length: usize,
+) -> Result<Value, RuntimeError> {
+  let constructor = typed_array_species_constructor(vm, receiver, source_kind)?;
+  let result = vm.construct_value(&constructor, &[Value::Number(usize_to_f64(length))])?;
+  validate_typed_array_species_result(vm, result, source_kind, Some(length))
+}
+
+fn typed_array_create_same(
+  vm: &mut Vm,
+  receiver: &Value,
+  length: usize,
+) -> Result<Value, RuntimeError> {
+  let (_, _, _, source_kind, _, _, _) = typed_view_details(receiver)
+    .ok_or_else(|| vm.throw_type_error("TypedArray method called on incompatible receiver"))?;
+  typed_array_create_with_kind(vm, receiver, &source_kind, length)
 }
 
 fn typed_array_relative_start(
@@ -120,6 +149,7 @@ pub(crate) fn install_typed_arrays(
   array_values_builtin: Value,
   array_keys_builtin: Value,
   array_entries_builtin: Value,
+  array_to_string_builtin: Value,
 ) -> TypedArrayIntrinsics {
   let typedarray_proto_map = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
     Rc::clone(object_proto_map),
@@ -159,12 +189,14 @@ pub(crate) fn install_typed_arrays(
         configurable: true,
       },
     );
-  let typedarray_ctor_fn: BuiltinFn = Rc::new(move |_vm, _args| {
-    Err(RuntimeError::from(
-      "TypeError: TypedArray constructor is not directly callable",
-    ))
+  typedarray_ctor_map
+    .borrow_mut()
+    .set_internal_slot("[[DefersInstanceAllocation]]", Value::Bool(true));
+  let typedarray_ctor_fn: BuiltinFn = Rc::new(move |vm, _args| {
+    Err(vm.throw_type_error("TypedArray constructor is not directly callable"))
   });
-  let typedarray_ctor_val = Value::BuiltinObject(typedarray_ctor_fn, typedarray_ctor_map);
+  let typedarray_ctor_val =
+    Value::BuiltinObject(typedarray_ctor_fn, Rc::clone(&typedarray_ctor_map));
   crate::ecmascript::semantics::set_builtin_length(&typedarray_ctor_val, 0.0);
   typedarray_proto_map
     .borrow_mut()
@@ -173,45 +205,57 @@ pub(crate) fn install_typed_arrays(
       PropertyKey::String("constructor".to_string().into()),
       PropertyDescriptor::builtin_data(typedarray_ctor_val.clone()),
     );
-  typedarray_proto_map
-    .borrow_mut()
-    .properties
-    .insert(
-      PropertyKey::String("values".to_string().into()),
-      PropertyDescriptor::builtin_data(array_values_builtin.clone()),
+  let make_iterator_method = |name: &'static str, array_method: Value| {
+    let method = builtin_object(
+      Rc::new(move |vm, args| {
+        let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+        if typed_view_details(&receiver).is_none() {
+          return Err(vm.throw_type_error("TypedArray iterator called on incompatible receiver"));
+        }
+        vm.call_value_with_this(&array_method, &receiver, &[])
+      }),
+      function_proto_map,
     );
-  typedarray_proto_map
-    .borrow_mut()
-    .properties
-    .insert(
-      PropertyKey::String("keys".to_string().into()),
-      PropertyDescriptor::builtin_data(array_keys_builtin),
-    );
-  typedarray_proto_map
-    .borrow_mut()
-    .properties
-    .insert(
-      PropertyKey::String("entries".to_string().into()),
-      PropertyDescriptor::builtin_data(array_entries_builtin),
-    );
+    crate::ecmascript::semantics::set_builtin_name(&method, name);
+    crate::ecmascript::semantics::set_builtin_length(&method, 0.0);
+    method
+  };
+  let values_builtin = make_iterator_method("values", array_values_builtin);
+  let keys_builtin = make_iterator_method("keys", array_keys_builtin);
+  let entries_builtin = make_iterator_method("entries", array_entries_builtin);
+  for (name, method) in [
+    ("values", values_builtin.clone()),
+    ("keys", keys_builtin),
+    ("entries", entries_builtin),
+  ] {
+    typedarray_proto_map
+      .borrow_mut()
+      .properties
+      .insert(
+        PropertyKey::String(name.into()),
+        PropertyDescriptor::builtin_data(method),
+      );
+  }
   for name in ["buffer", "byteLength", "byteOffset", "length"] {
     let getter_name = name.to_string();
     let getter = builtin_object(
       Rc::new(move |vm, args| {
         let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-        let (_, buffer, _, kind, length, byte_offset, _) = typed_view_details(&receiver)
-          .ok_or_else(|| {
+        let (buffer, kind, length, byte_offset) =
+          byte_view_metadata(&receiver).ok_or_else(|| {
             vm.throw_type_error("TypedArray accessor called on incompatible receiver")
           })?;
+        let detached = array_buffer_backing(&buffer).is_none();
         Ok(match getter_name.as_str() {
           "buffer" => buffer,
-          "byteLength" => Value::Number(usize_to_f64(
+          "byteLength" if !detached => Value::Number(usize_to_f64(
             length
               * crate::ecmascript::semantics::byte_views::typed_array_bytes_per_element(&kind)
                 .unwrap_or(1),
           )),
-          "byteOffset" => Value::Number(usize_to_f64(byte_offset)),
-          _ => Value::Number(usize_to_f64(length)),
+          "byteOffset" if !detached => Value::Number(usize_to_f64(byte_offset)),
+          "length" if !detached => Value::Number(usize_to_f64(length)),
+          _ => Value::Number(0.0),
         })
       }),
       function_proto_map,
@@ -231,66 +275,114 @@ pub(crate) fn install_typed_arrays(
         },
       );
   }
+  let to_string_tag_getter = builtin_object(
+    Rc::new(|_vm, args| {
+      let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+      Ok(
+        byte_view_metadata(&receiver)
+          .map(|(_, kind, _, _)| Value::String(kind.into()))
+          .unwrap_or(Value::Undefined),
+      )
+    }),
+    function_proto_map,
+  );
+  crate::ecmascript::semantics::set_builtin_name(&to_string_tag_getter, "get [Symbol.toStringTag]");
+  crate::ecmascript::semantics::set_builtin_length(&to_string_tag_getter, 0.0);
+  typedarray_proto_map
+    .borrow_mut()
+    .properties
+    .insert(
+      PropertyKey::Symbol(SymbolId::well_known_to_string_tag()),
+      PropertyDescriptor::Accessor {
+        get: Some(to_string_tag_getter),
+        set: None,
+        enumerable: false,
+        configurable: true,
+      },
+    );
   typedarray_proto_map
     .borrow_mut()
     .properties
     .insert(
       PropertyKey::Symbol(SymbolId::well_known_iterator()),
-      PropertyDescriptor::builtin_data(array_values_builtin),
+      PropertyDescriptor::builtin_data(values_builtin),
     );
+  let fill_builtin = builtin_object(
+    Rc::new(|vm, args| {
+      let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+      let fill_value = args.get(1).cloned().unwrap_or(Value::Undefined);
+      let (_, _, _, kind, length, _, _) = typed_view_details(&receiver).ok_or_else(|| {
+        vm.throw_type_error("TypedArray.prototype.fill called on incompatible receiver")
+      })?;
+      let encoded =
+        crate::ecmascript::semantics::byte_views::encode_typed_element(vm, &kind, &fill_value)?;
+      let converted =
+        crate::ecmascript::semantics::byte_views::decode_typed_element(&kind, &encoded)
+          .ok_or_else(|| vm.throw_type_error("Invalid typed array element kind"))?;
+      let start = typed_array_relative_start(vm, args.get(2).unwrap_or(&Value::Undefined), length)?;
+      let end = match args
+        .get(3)
+        .filter(|value| !matches!(value, Value::Undefined))
+      {
+        Some(value) => typed_array_relative_start(vm, value, length)?,
+        None => length,
+      };
+      if typed_view_details(&receiver).is_none() {
+        return Err(vm.throw_type_error("TypedArray buffer is detached"));
+      }
+      for index in start..end.max(start) {
+        set_typed_element(vm, &receiver, index, converted.clone())?;
+      }
+      Ok(receiver)
+    }),
+    function_proto_map,
+  );
+  crate::ecmascript::semantics::set_builtin_name(&fill_builtin, "fill");
+  crate::ecmascript::semantics::set_builtin_length(&fill_builtin, 1.0);
   typedarray_proto_map
     .borrow_mut()
     .properties
     .insert(
       PropertyKey::String("fill".to_string().into()),
-      PropertyDescriptor::builtin_data(builtin_object(
-        Rc::new(|vm, args| {
-          let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-          let fill_value = args.get(1).cloned().unwrap_or(Value::Undefined);
-          let length = typed_array_length(vm, &receiver)?;
-          let start =
-            typed_array_relative_start(vm, args.get(2).unwrap_or(&Value::Undefined), length)?;
-          let end = args.get(3).map_or(Ok(length), |value| {
-            typed_array_relative_start(vm, value, length)
-          })?;
-          for index in start..end.max(start) {
-            set_typed_element(vm, &receiver, index, fill_value.clone())?;
-          }
-          Ok(receiver)
-        }),
-        function_proto_map,
-      )),
+      PropertyDescriptor::builtin_data(fill_builtin),
     );
 
   let subarray_builtin = builtin_object(
     Rc::new(move |vm, args| {
       let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-      let (_, buffer, data, kind, length, byte_offset, prototype) = typed_view_details(&receiver)
-        .ok_or_else(|| {
+      let (buffer, kind, length, byte_offset) = byte_view_metadata(&receiver).ok_or_else(|| {
         vm.throw_type_error("TypedArray.prototype.subarray called on incompatible receiver")
       })?;
       let begin_value = args.get(1).cloned().unwrap_or(Value::Number(0.0));
       let begin = typed_array_relative_index(vm, &begin_value, length)?;
-      let end_value = args
+      let end = match args
         .get(2)
-        .cloned()
-        .unwrap_or(Value::Number(usize_to_f64(length)));
-      let end = typed_array_relative_index(vm, &end_value, length)?;
+        .filter(|value| !matches!(value, Value::Undefined))
+      {
+        Some(value) => typed_array_relative_index(vm, value, length)?,
+        None => length,
+      };
       let final_end = end.max(begin);
-      Ok(new_typed_array_view(
-        prototype,
-        buffer,
-        data,
-        &kind,
-        final_end.saturating_sub(begin),
-        byte_offset
-          + begin
-            * crate::ecmascript::semantics::byte_views::typed_array_bytes_per_element(&kind)
-              .unwrap_or(1),
-      ))
+      let new_length = final_end.saturating_sub(begin);
+      let new_byte_offset = byte_offset
+        + begin
+          * crate::ecmascript::semantics::byte_views::typed_array_bytes_per_element(&kind)
+            .unwrap_or(1);
+      let constructor = typed_array_species_constructor(vm, &receiver, &kind)?;
+      let result = vm.construct_value(
+        &constructor,
+        &[
+          buffer,
+          Value::Number(usize_to_f64(new_byte_offset)),
+          Value::Number(usize_to_f64(new_length)),
+        ],
+      )?;
+      validate_typed_array_species_result(vm, result, &kind, None)
     }),
     function_proto_map,
   );
+  crate::ecmascript::semantics::set_builtin_name(&subarray_builtin, "subarray");
+  crate::ecmascript::semantics::set_builtin_length(&subarray_builtin, 2.0);
   typedarray_proto_map
     .borrow_mut()
     .properties
@@ -307,11 +399,13 @@ pub(crate) fn install_typed_arrays(
       })?;
       let begin_value = args.get(1).cloned().unwrap_or(Value::Number(0.0));
       let begin = typed_array_relative_index(vm, &begin_value, length)?;
-      let end_value = args
+      let end = match args
         .get(2)
-        .cloned()
-        .unwrap_or(Value::Number(usize_to_f64(length)));
-      let end = typed_array_relative_index(vm, &end_value, length)?;
+        .filter(|value| !matches!(value, Value::Undefined))
+      {
+        Some(value) => typed_array_relative_index(vm, value, length)?,
+        None => length,
+      };
       let copy_length = end.max(begin).saturating_sub(begin);
       let result = typed_array_create_same(vm, &receiver, copy_length)?;
       for index in 0..copy_length {
@@ -322,6 +416,8 @@ pub(crate) fn install_typed_arrays(
     }),
     function_proto_map,
   );
+  crate::ecmascript::semantics::set_builtin_name(&slice_builtin, "slice");
+  crate::ecmascript::semantics::set_builtin_length(&slice_builtin, 2.0);
   typedarray_proto_map
     .borrow_mut()
     .properties
@@ -339,31 +435,54 @@ pub(crate) fn install_typed_arrays(
         })?;
       let source = args.get(1).cloned().unwrap_or(Value::Undefined);
       let offset_value = args.get(2).cloned().unwrap_or(Value::Number(0.0));
-      let offset = to_index(vm, &offset_value)?;
-      let source_length =
-        vm.get_property_host(&source, &PropertyKey::String("length".to_string().into()))?;
-      let source_length = to_length(vm, &source_length)?;
-      if offset.saturating_add(source_length) > target_length {
-        return Err(vm.throw_range_error("Source is too large"));
+      let offset_number = vm.to_number_value(&offset_value)?;
+      let offset_number = if offset_number.is_nan() {
+        0.0
+      } else {
+        offset_number.trunc()
+      };
+      if offset_number < 0.0 || !offset_number.is_finite() {
+        return Err(vm.throw_range_error("Invalid typed array offset"));
       }
-      let mut values = Vec::with_capacity(source_length);
-      for index in 0..source_length {
-        values.push(vm.get_property_host(
-          &source,
-          &PropertyKey::String(usize_to_decimal_string(index).into()),
-        )?);
+      let offset = offset_number as usize;
+      if typed_view_details(&receiver).is_none() {
+        return Err(vm.throw_type_error("TypedArray buffer is detached"));
       }
-      for (index, value) in values.into_iter().enumerate() {
-        vm.set_property_host(
-          &receiver,
-          &Value::String(usize_to_decimal_string(offset + index).into()),
-          value,
-        )?;
+
+      if byte_view_metadata(&source).is_some() {
+        let (_, _, _, _, source_length, _, _) = typed_view_details(&source)
+          .ok_or_else(|| vm.throw_type_error("Source TypedArray buffer is detached"))?;
+        if offset.saturating_add(source_length) > target_length {
+          return Err(vm.throw_range_error("Source is too large"));
+        }
+        let mut values = Vec::with_capacity(source_length);
+        for index in 0..source_length {
+          values.push(typed_element(vm, &source, index)?);
+        }
+        for (index, value) in values.into_iter().enumerate() {
+          set_typed_element(vm, &receiver, offset + index, value)?;
+        }
+      } else {
+        let source_length =
+          vm.get_property_host(&source, &PropertyKey::String("length".to_string().into()))?;
+        let source_length = to_length(vm, &source_length)?;
+        if offset.saturating_add(source_length) > target_length {
+          return Err(vm.throw_range_error("Source is too large"));
+        }
+        for index in 0..source_length {
+          let value = vm.get_property_host(
+            &source,
+            &PropertyKey::String(usize_to_decimal_string(index).into()),
+          )?;
+          set_typed_element(vm, &receiver, offset + index, value)?;
+        }
       }
       Ok(Value::Undefined)
     }),
     function_proto_map,
   );
+  crate::ecmascript::semantics::set_builtin_name(&set_builtin, "set");
+  crate::ecmascript::semantics::set_builtin_length(&set_builtin, 1.0);
   typedarray_proto_map
     .borrow_mut()
     .properties
@@ -472,9 +591,16 @@ pub(crate) fn install_typed_arrays(
       let length = typed_array_length(vm, &receiver)?;
       let to = typed_array_relative_start(vm, args.get(1).unwrap_or(&Value::Undefined), length)?;
       let from = typed_array_relative_start(vm, args.get(2).unwrap_or(&Value::Undefined), length)?;
-      let end = args.get(3).map_or(Ok(length), |value| {
-        typed_array_relative_start(vm, value, length)
-      })?;
+      let end = match args
+        .get(3)
+        .filter(|value| !matches!(value, Value::Undefined))
+      {
+        Some(value) => typed_array_relative_start(vm, value, length)?,
+        None => length,
+      };
+      if typed_view_details(&receiver).is_none() {
+        return Err(vm.throw_type_error("TypedArray buffer is detached"));
+      }
       let count = length
         .saturating_sub(to)
         .min(end.saturating_sub(from));
@@ -615,29 +741,37 @@ pub(crate) fn install_typed_arrays(
             Value::Number(-1.0)
           });
         }
-        let from = args.get(2).map_or(
-          Ok::<usize, RuntimeError>(if mode == 2 {
-            length.saturating_sub(1)
-          } else {
-            0
-          }),
-          |value| {
+        let from = match args.get(2) {
+          None if mode == 2 => Some(length - 1),
+          None => Some(0),
+          Some(value) => {
             let number = vm.to_number_value(value)?;
+            let integer = if number.is_nan() { 0.0 } else { number.trunc() };
             if mode == 2 {
-              if number.is_nan() {
-                Ok::<usize, RuntimeError>(length.saturating_sub(1))
-              } else if number < 0.0 {
-                Ok::<usize, RuntimeError>(length.saturating_sub((-number).trunc() as usize))
+              if integer == f64::NEG_INFINITY {
+                None
+              } else if integer < 0.0 {
+                let index = length as f64 + integer;
+                (index >= 0.0).then_some(index as usize)
               } else {
-                Ok::<usize, RuntimeError>((number.trunc() as usize).min(length.saturating_sub(1)))
+                Some((integer as usize).min(length - 1))
               }
-            } else if number.is_nan() || number <= 0.0 {
-              Ok::<usize, RuntimeError>(0)
+            } else if integer == f64::INFINITY {
+              None
+            } else if integer < 0.0 {
+              Some((length as f64 + integer).max(0.0) as usize)
             } else {
-              Ok::<usize, RuntimeError>((number.trunc() as usize).min(length))
+              Some((integer as usize).min(length))
             }
-          },
-        )?;
+          }
+        };
+        let Some(from) = from else {
+          return Ok(if mode == 0 {
+            Value::Bool(false)
+          } else {
+            Value::Number(-1.0)
+          });
+        };
         let indices: Box<dyn Iterator<Item = usize>> = if mode == 2 {
           Box::new((0..=from).rev())
         } else {
@@ -673,11 +807,11 @@ pub(crate) fn install_typed_arrays(
     1.0,
     Rc::new(|vm, args| {
       let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+      let length = typed_array_length(vm, &receiver)?;
       let separator = match args.get(1) {
         None | Some(Value::Undefined) => ",".into(),
         Some(value) => vm.to_string(value)?,
       };
-      let length = typed_array_length(vm, &receiver)?;
       let mut output = js_string::JsStringBuilder::new();
       for index in 0..length {
         if index > 0 {
@@ -689,17 +823,13 @@ pub(crate) fn install_typed_arrays(
       Ok(Value::String(output.finish()))
     }),
   );
-  install_typed_method(
-    &typedarray_proto_map,
-    function_proto_map,
-    "toString",
-    0.0,
-    Rc::new(|vm, args| {
-      let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-      let join = vm.get_property_host(&receiver, &PropertyKey::String("join".into()))?;
-      vm.call_value_with_this(&join, &receiver, &[])
-    }),
-  );
+  typedarray_proto_map
+    .borrow_mut()
+    .properties
+    .insert(
+      PropertyKey::String("toString".into()),
+      PropertyDescriptor::builtin_data(array_to_string_builtin),
+    );
   install_typed_method(
     &typedarray_proto_map,
     function_proto_map,
@@ -738,7 +868,20 @@ pub(crate) fn install_typed_arrays(
           return Err(vm.throw_type_error("TypedArray callback is not callable"));
         }
         let this_arg = args.get(2).cloned().unwrap_or(Value::Undefined);
-        let length = typed_array_length(vm, &receiver)?;
+        let (_, _, _, source_kind, length, _, _) =
+          typed_view_details(&receiver).ok_or_else(|| {
+            vm.throw_type_error("TypedArray method called on incompatible receiver")
+          })?;
+        let map_result = if filter {
+          None
+        } else {
+          Some(typed_array_create_with_kind(
+            vm,
+            &receiver,
+            &source_kind,
+            length,
+          )?)
+        };
         let mut values = Vec::with_capacity(length);
         for index in 0..length {
           let value = typed_element(vm, &receiver, index)?;
@@ -755,7 +898,10 @@ pub(crate) fn install_typed_arrays(
             values.push(if filter { value } else { mapped });
           }
         }
-        let result = typed_array_create_same(vm, &receiver, values.len())?;
+        let result = match map_result {
+          Some(result) => result,
+          None => typed_array_create_with_kind(vm, &receiver, &source_kind, values.len())?,
+        };
         for (index, value) in values.into_iter().enumerate() {
           set_typed_element(vm, &result, index, value)?;
         }
@@ -846,7 +992,15 @@ pub(crate) fn install_typed_arrays(
           let order = if matches!(compare, Value::Undefined) {
             let a = vm.to_number_value(&values[left])?;
             let b = vm.to_number_value(&values[right])?;
-            a.is_nan() || (!b.is_nan() && a <= b)
+            if a.is_nan() {
+              b.is_nan()
+            } else if b.is_nan() {
+              true
+            } else if a == 0.0 && b == 0.0 {
+              a.is_sign_negative() || !b.is_sign_negative()
+            } else {
+              a <= b
+            }
           } else {
             let comparison = vm.call_value_with_this(
               &compare,
@@ -875,11 +1029,17 @@ pub(crate) fn install_typed_arrays(
       let ctor_map = Rc::new(RefCell::new(ObjectData::with_prototype(
         typedarray_ctor_val.clone(),
       )));
+      ctor_map
+        .borrow_mut()
+        .set_internal_slot("[[DefersInstanceAllocation]]", Value::Bool(true));
       let arraybuffer_proto_rc = Rc::clone(arraybuffer_proto_map);
       let ctor_fn: BuiltinFn = {
         let proto_map_rc = proto_map.clone();
         let ctor_name = $name.to_string();
         Rc::new(move |vm, args| {
+          if vm.current_new_target().is_none() {
+            return Err(vm.throw_type_error("TypedArray constructor requires new"));
+          }
           let off = static_builtin_arg_offset(vm, args, $name);
           let init = args.get(off).cloned().unwrap_or(Value::Undefined);
           let byte_offset_arg = args
@@ -890,23 +1050,11 @@ pub(crate) fn install_typed_arrays(
             .get(off + 2)
             .cloned()
             .unwrap_or(Value::Undefined);
-          let instance_proto = vm
-            .current_new_target()
-            .and_then(|new_target| {
-              vm.get_property_host(
-                &new_target,
-                &PropertyKey::String("prototype".to_string().into()),
-              )
-              .ok()
-            })
-            .and_then(|proto| match proto {
-              Value::Object(_)
-              | Value::Array(..)
-              | Value::Closure { .. }
-              | Value::BuiltinObject(_, _) => Some(proto),
-              _ => None,
-            })
-            .unwrap_or_else(|| Value::Object(proto_map_rc.clone()));
+          if let Some((_, source_kind, _, _)) = byte_view_metadata(&init)
+            && source_kind.starts_with("Big") != ctor_name.starts_with("Big")
+          {
+            return Err(vm.throw_type_error("Incompatible TypedArray content types"));
+          }
           let (length, initial_values, byte_offset, view_byte_length, mut buffer_slot): (
             usize,
             Vec<Value>,
@@ -914,37 +1062,25 @@ pub(crate) fn install_typed_arrays(
             usize,
             Value,
           ) = match &init {
-            Value::Number(_) => {
-              let length = to_length(vm, &init)?;
-              let view_byte_length = length * $element_count;
-              (length, Vec::new(), 0, view_byte_length, Value::Undefined)
-            }
-            Value::String(s) => {
-              let length = s.parse::<usize>().unwrap_or(0);
-              let view_byte_length = length * $element_count;
-              (length, Vec::new(), 0, view_byte_length, Value::Undefined)
-            }
-            Value::Array(arr, _) => {
-              let initial_values = arr
-                .borrow()
-                .iter()
-                .map(|slot| slot.clone().unwrap_or(Value::Undefined))
-                .collect::<Vec<Value>>();
-              let length = initial_values.len();
-              let view_byte_length = length * $element_count;
-              (
-                length,
-                initial_values,
-                0,
-                view_byte_length,
-                Value::Undefined,
-              )
-            }
-            Value::Object(_) => {
+            object if object.is_object() => {
               let buffer_value = init.clone();
-              if is_array_buffer(&buffer_value) {
+              if byte_view_metadata(&buffer_value).is_some() {
+                let (_, _, _, _, source_length, _, _) = typed_view_details(&buffer_value)
+                  .ok_or_else(|| vm.throw_type_error("Source TypedArray buffer is detached"))?;
+                let mut initial_values = Vec::with_capacity(source_length);
+                for index in 0..source_length {
+                  initial_values.push(typed_element(vm, &buffer_value, index)?);
+                }
+                (
+                  source_length,
+                  initial_values,
+                  0,
+                  source_length * $element_count,
+                  Value::Undefined,
+                )
+              } else if is_array_buffer(&buffer_value) {
                 let backing = array_buffer_backing(&buffer_value)
-                  .ok_or_else(|| vm.throw_range_error("Invalid typed array length"))?;
+                  .ok_or_else(|| vm.throw_type_error("ArrayBuffer is detached"))?;
                 let buffer_byte_length = backing.borrow().len();
                 let byte_offset = if matches!(byte_offset_arg, Value::Undefined) {
                   0
@@ -955,7 +1091,9 @@ pub(crate) fn install_typed_arrays(
                   return Err(vm.throw_range_error("Invalid typed array offset"));
                 }
                 let length_from_spec = if matches!(length_arg, Value::Undefined) {
-                  if buffer_byte_length < byte_offset {
+                  if buffer_byte_length < byte_offset
+                    || !is_byte_offset_aligned(buffer_byte_length - byte_offset, $element_count)
+                  {
                     return Err(vm.throw_range_error("Invalid typed array length"));
                   }
                   (buffer_byte_length - byte_offset) / $element_count
@@ -974,18 +1112,33 @@ pub(crate) fn install_typed_arrays(
                   buffer_value,
                 )
               } else {
-                let length_value = vm.get_property_host(
-                  &buffer_value,
-                  &PropertyKey::String("length".to_string().into()),
-                )?;
-                let length = to_length(vm, &length_value)?;
-                let mut initial_values = Vec::with_capacity(length);
-                for idx in 0..length {
-                  initial_values.push(vm.get_property_host(
+                let initial_values = if let Value::Array(array, _) = &buffer_value {
+                  let iterator = crate::runtime_utils::get_method(
+                    vm,
                     &buffer_value,
-                    &PropertyKey::String(usize_to_decimal_string(idx).into()),
-                  )?);
-                }
+                    &PropertyKey::Symbol(SymbolId::well_known_iterator()),
+                  )?;
+                  if let Some(iterator) = iterator {
+                    let (iterator, next) =
+                      crate::runtime_utils::get_iterator_record(vm, &buffer_value, &iterator)?;
+                    let mut values = Vec::new();
+                    while let Some(value) =
+                      crate::runtime_utils::iterator_step(vm, &iterator, &next)?
+                    {
+                      values.push(value);
+                    }
+                    values
+                  } else {
+                    array
+                      .borrow()
+                      .iter()
+                      .map(|value| value.clone().unwrap_or(Value::Undefined))
+                      .collect()
+                  }
+                } else {
+                  collect_iterable_values(vm, &buffer_value)?
+                };
+                let length = initial_values.len();
                 (
                   length,
                   initial_values,
@@ -995,7 +1148,30 @@ pub(crate) fn install_typed_arrays(
                 )
               }
             }
-            _ => (0, Vec::new(), 0, 0, Value::Undefined),
+            _ => {
+              let length = to_index(vm, &init)?;
+              let view_byte_length = length
+                .checked_mul($element_count)
+                .ok_or_else(|| vm.throw_range_error("Invalid typed array length"))?;
+              (length, Vec::new(), 0, view_byte_length, Value::Undefined)
+            }
+          };
+
+          let instance_proto = if let Some(new_target) = vm.current_new_target() {
+            let prototype = vm.get_property_host(
+              &new_target,
+              &PropertyKey::String("prototype".to_string().into()),
+            )?;
+            match prototype {
+              Value::Object(_)
+              | Value::Array(..)
+              | Value::Closure { .. }
+              | Value::BuiltinObject(_, _)
+              | Value::Proxy(_) => prototype,
+              _ => Value::Object(proto_map_rc.clone()),
+            }
+          } else {
+            Value::Object(proto_map_rc.clone())
           };
 
           let backing_data = if is_array_buffer(&buffer_slot) {
@@ -1062,22 +1238,27 @@ pub(crate) fn install_typed_arrays(
             } else {
               fallback_constructor.clone()
             };
+            let map_fn = if static_name == "from" {
+              args
+                .get(off + 1)
+                .cloned()
+                .unwrap_or(Value::Undefined)
+            } else {
+              Value::Undefined
+            };
+            if !matches!(map_fn, Value::Undefined) && !Vm::is_callable_value(&map_fn) {
+              return Err(vm.throw_type_error("TypedArray.from mapfn is not callable"));
+            }
+            let this_arg = args
+              .get(off + 2)
+              .cloned()
+              .unwrap_or(Value::Undefined);
+            let mut mapped_during_iteration = false;
             let values = if static_name == "of" {
               args.iter().skip(off).cloned().collect::<Vec<_>>()
             } else {
               let source =
                 vm.to_object_value(args.get(off).cloned().unwrap_or(Value::Undefined))?;
-              let map_fn = args
-                .get(off + 1)
-                .cloned()
-                .unwrap_or(Value::Undefined);
-              if !matches!(map_fn, Value::Undefined) && !Vm::is_callable_value(&map_fn) {
-                return Err(vm.throw_type_error("TypedArray.from mapfn is not callable"));
-              }
-              let this_arg = args
-                .get(off + 2)
-                .cloned()
-                .unwrap_or(Value::Undefined);
               let iterator_method = crate::runtime_utils::get_method(
                 vm,
                 &source,
@@ -1087,31 +1268,27 @@ pub(crate) fn install_typed_arrays(
                 let (iterator, next) =
                   crate::runtime_utils::get_iterator_record(vm, &source, &iterator_method)?;
                 let mut values = Vec::new();
-                loop {
-                  let value = match crate::runtime_utils::iterator_step(vm, &iterator, &next) {
-                    Ok(Some(value)) => value,
-                    Ok(None) => break,
-                    Err(error) => {
-                      drop(crate::runtime_utils::iterator_close(vm, &iterator));
-                      return Err(error);
-                    }
-                  };
-                  let value = if matches!(map_fn, Value::Undefined) {
-                    value
-                  } else {
-                    match vm.call_value_with_this(
+                while let Some(value) = crate::runtime_utils::iterator_step(vm, &iterator, &next)? {
+                  if !matches!(source, Value::Array(..))
+                    && byte_view_metadata(&source).is_none()
+                    && !matches!(map_fn, Value::Undefined)
+                  {
+                    let mapped = match vm.call_value_with_this(
                       &map_fn,
                       &this_arg,
                       &[value, Value::Number(usize_to_f64(values.len()))],
                     ) {
-                      Ok(value) => value,
+                      Ok(mapped) => mapped,
                       Err(error) => {
                         drop(crate::runtime_utils::iterator_close(vm, &iterator));
                         return Err(error);
                       }
-                    }
-                  };
-                  values.push(value);
+                    };
+                    values.push(mapped);
+                    mapped_during_iteration = true;
+                  } else {
+                    values.push(value);
+                  }
                 }
                 values
               } else {
@@ -1120,30 +1297,34 @@ pub(crate) fn install_typed_arrays(
                 let length = to_length(vm, &length)?;
                 let mut values = Vec::with_capacity(length);
                 for index in 0..length {
-                  let value =
-                    vm.get_property_host(&source, &PropertyKey::String(index.to_string().into()))?;
-                  values.push(if matches!(map_fn, Value::Undefined) {
-                    value
-                  } else {
-                    vm.call_value_with_this(
-                      &map_fn,
-                      &this_arg,
-                      &[value, Value::Number(usize_to_f64(index))],
-                    )?
-                  });
+                  values.push(
+                    vm.get_property_host(&source, &PropertyKey::String(index.to_string().into()))?,
+                  );
                 }
                 values
               }
             };
             let result =
               vm.construct_value(&constructor, &[Value::Number(usize_to_f64(values.len()))])?;
-            if typed_view_details(&result).is_none() {
+            let Some((_, _, _, _, result_length, _, _)) = typed_view_details(&result) else {
               return Err(
                 vm.throw_type_error("TypedArray constructor returned an incompatible value"),
               );
+            };
+            if result_length < values.len() {
+              return Err(vm.throw_type_error("TypedArray constructor returned a short result"));
             }
             for (index, value) in values.into_iter().enumerate() {
-              set_typed_element(vm, &result, index, value)?;
+              let mapped = if mapped_during_iteration || matches!(map_fn, Value::Undefined) {
+                value
+              } else {
+                vm.call_value_with_this(
+                  &map_fn,
+                  &this_arg,
+                  &[value, Value::Number(usize_to_f64(index))],
+                )?
+              };
+              set_typed_element(vm, &result, index, mapped)?;
             }
             Ok(result)
           }),
@@ -1163,7 +1344,7 @@ pub(crate) fn install_typed_arrays(
     }};
   }
 
-  let (uint8array_ctor_val, _) =
+  let (uint8array_ctor_val, uint8array_ctor_map) =
     create_typed_array_ctor!("Uint8Array", 1, Value::Number(0.0), true);
   let (int8array_ctor_val, _) = create_typed_array_ctor!("Int8Array", 1, Value::Number(0.0), true);
   let (uint16array_ctor_val, _) =
@@ -1192,6 +1373,62 @@ pub(crate) fn install_typed_arrays(
   );
   let (uint8clampedarray_ctor_val, _) =
     create_typed_array_ctor!("Uint8ClampedArray", 1, Value::Number(0.0), true);
+
+  for (name, length) in [("from", 1.0), ("of", 0.0)] {
+    let concrete_method = uint8array_ctor_map
+      .borrow()
+      .properties
+      .get(&PropertyKey::String(name.into()))
+      .and_then(|descriptor| match descriptor {
+        PropertyDescriptor::Data { value, .. } => Some(value.clone()),
+        _ => None,
+      })
+      .expect("concrete TypedArray static method is installed");
+    let method = builtin_object(
+      Rc::new(move |vm, args| {
+        let constructor = vm.this_value();
+        if !constructor.is_constructable() {
+          return Err(
+            vm.throw_type_error("TypedArray static method receiver is not a constructor"),
+          );
+        }
+        let offset = usize::from(vm.builtin_this_arg_prepended());
+        vm.call_value_with_this(&concrete_method, &constructor, &args[offset..])
+      }),
+      function_proto_map,
+    );
+    crate::ecmascript::semantics::set_builtin_name(&method, name);
+    crate::ecmascript::semantics::set_builtin_length(&method, length);
+    typedarray_ctor_map
+      .borrow_mut()
+      .properties
+      .insert(
+        PropertyKey::String(name.into()),
+        PropertyDescriptor::builtin_data(method),
+      );
+  }
+  for constructor in [
+    &uint8array_ctor_val,
+    &int8array_ctor_val,
+    &uint16array_ctor_val,
+    &int16array_ctor_val,
+    &uint32array_ctor_val,
+    &int32array_ctor_val,
+    &float32array_ctor_val,
+    &float64array_ctor_val,
+    &bigint64array_ctor_val,
+    &biguint64array_ctor_val,
+    &uint8clampedarray_ctor_val,
+  ] {
+    if let Value::BuiltinObject(_, properties) = constructor {
+      for name in ["from", "of"] {
+        properties
+          .borrow_mut()
+          .properties
+          .shift_remove(&PropertyKey::String(name.into()));
+      }
+    }
+  }
 
   TypedArrayIntrinsics {
     typedarray_ctor_val,

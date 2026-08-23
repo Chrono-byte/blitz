@@ -7,7 +7,7 @@ use std::rc::Rc;
 use crate::ecmascript::builtins::collections::consume_collection_iterable;
 use crate::runtime_utils::{
   array_from_values, builtin_object, set_builtin_length, set_builtin_name,
-  static_builtin_arg_offset,
+  static_builtin_arg_offset, strict_equal,
 };
 use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
 
@@ -94,10 +94,7 @@ fn create_named_error_constructor(
       || instance_name.clone(),
       |message| format!("{instance_name}: {message}"),
     );
-    instance.properties.insert(
-      string_key("stack"),
-      PropertyDescriptor::builtin_data(Value::String(stack.into())),
-    );
+    instance.set_internal_slot("[[ErrorData]]", Value::String(stack.into()));
     Ok(Value::Object(Rc::new(RefCell::new(instance))))
   });
   let constructor = Value::BuiltinObject(constructor_function, Rc::clone(&constructor_properties));
@@ -163,10 +160,7 @@ pub(crate) fn create_error_intrinsics(
     let offset = static_builtin_arg_offset(vm, args, "Error");
     let message = install_error_data(vm, &mut instance, args.get(offset), args.get(offset + 1))?;
     let stack = message.map_or_else(|| "Error".to_owned(), |message| format!("Error: {message}"));
-    instance.properties.insert(
-      string_key("stack"),
-      PropertyDescriptor::builtin_data(Value::String(stack.into())),
-    );
+    instance.set_internal_slot("[[ErrorData]]", Value::String(stack.into()));
     Ok(Value::Object(Rc::new(RefCell::new(instance))))
   });
   let error_constructor = Value::BuiltinObject(
@@ -196,6 +190,91 @@ pub(crate) fn create_error_intrinsics(
       string_key("message"),
       PropertyDescriptor::builtin_data(Value::String("".into())),
     );
+  let stack_getter = builtin_object(
+    Rc::new(|vm, args| {
+      let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+      let Value::Object(object) = receiver else {
+        if !receiver.is_object() {
+          return Err(vm.throw_type_error("Error.prototype.stack getter requires an object"));
+        }
+        return Ok(Value::Undefined);
+      };
+      Ok(
+        object
+          .borrow()
+          .internal_slot("[[ErrorData]]")
+          .cloned()
+          .unwrap_or(Value::Undefined),
+      )
+    }),
+    function_prototype,
+  );
+  set_builtin_name(&stack_getter, "get stack");
+  set_builtin_length(&stack_getter, 0.0);
+  let stack_home = prototype_value(&error_prototype_map);
+  let stack_setter = builtin_object(
+    Rc::new(move |vm, args| {
+      let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+      if !receiver.is_object() {
+        return Err(vm.throw_type_error("Error.prototype.stack setter requires an object"));
+      }
+      let value = args.get(1).cloned().unwrap_or(Value::Undefined);
+      if !matches!(value, Value::String(_)) {
+        return Err(vm.throw_type_error("Error stack must be a string"));
+      }
+      if strict_equal(&receiver, &stack_home) {
+        return Err(vm.throw_type_error("Cannot set stack on Error.prototype"));
+      }
+      let object_constructor = vm
+        .get_global("Object")
+        .unwrap_or(Value::Undefined);
+      let get_descriptor = vm.get_property_host(
+        &object_constructor,
+        &PropertyKey::String("getOwnPropertyDescriptor".into()),
+      )?;
+      let current = vm.call_value_with_this(
+        &get_descriptor,
+        &object_constructor,
+        &[receiver.clone(), Value::String("stack".into())],
+      )?;
+      if !matches!(current, Value::Undefined) {
+        vm.set_property_host(&receiver, &Value::String("stack".into()), value)?;
+        return Ok(Value::Undefined);
+      }
+      let mut descriptor = ObjectData::new();
+      for (name, field) in [
+        ("value", value),
+        ("writable", Value::Bool(true)),
+        ("enumerable", Value::Bool(true)),
+        ("configurable", Value::Bool(true)),
+      ] {
+        descriptor
+          .properties
+          .insert(string_key(name), PropertyDescriptor::ordinary_data(field));
+      }
+      let descriptor = Value::Object(Rc::new(RefCell::new(descriptor)));
+      if !vm.define_property_value(&receiver, &Value::String("stack".into()), &descriptor)? {
+        return Err(vm.throw_type_error("Cannot define stack property"));
+      }
+      Ok(Value::Undefined)
+    }),
+    function_prototype,
+  );
+  set_builtin_name(&stack_setter, "set stack");
+  set_builtin_length(&stack_setter, 1.0);
+  error_prototype_map
+    .borrow_mut()
+    .properties
+    .insert(
+      string_key("stack"),
+      PropertyDescriptor::Accessor {
+        get: Some(stack_getter),
+        set: Some(stack_setter),
+        enumerable: false,
+        configurable: true,
+      },
+    );
+
   let error_to_string = builtin_object(
     Rc::new(|vm, args| {
       let this = args.first().cloned().unwrap_or(Value::Undefined);
@@ -268,10 +347,7 @@ pub(crate) fn create_error_intrinsics(
       || "AggregateError".to_owned(),
       |message| format!("AggregateError: {message}"),
     );
-    instance.properties.insert(
-      string_key("stack"),
-      PropertyDescriptor::builtin_data(Value::String(stack.into())),
-    );
+    instance.set_internal_slot("[[ErrorData]]", Value::String(stack.into()));
     Ok(Value::Object(Rc::new(RefCell::new(instance))))
   });
   let aggregate_error_constructor = Value::BuiltinObject(

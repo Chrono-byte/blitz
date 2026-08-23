@@ -65,6 +65,51 @@ pub(crate) fn install_object_intrinsics(
     PropertyDescriptor::builtin_data(constructor.clone()),
   );
 
+  let proto_getter = builtin_object(
+    Rc::new(|vm, args| {
+      let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+      if matches!(receiver, Value::Undefined | Value::Null) {
+        return Err(vm.throw_type_error("Object.prototype.__proto__ called on nullish value"));
+      }
+      let object = vm.to_object_value(receiver)?;
+      vm.get_prototype_of_value(&object)
+    }),
+    function_prototype,
+  );
+  set_builtin_name(&proto_getter, "get __proto__");
+  set_builtin_length(&proto_getter, 0.0);
+  let proto_setter = builtin_object(
+    Rc::new(|vm, args| {
+      let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+      if matches!(receiver, Value::Undefined | Value::Null) {
+        return Err(vm.throw_type_error("Object.prototype.__proto__ called on nullish value"));
+      }
+      let prototype = args.get(1).cloned().unwrap_or(Value::Undefined);
+      if !matches!(prototype, Value::Null) && !prototype.is_object() {
+        return Ok(Value::Undefined);
+      }
+      if !receiver.is_object() {
+        return Ok(Value::Undefined);
+      }
+      if !vm.set_prototype_of_value(&receiver, &prototype)? {
+        return Err(vm.throw_type_error("Object prototype mutation was rejected"));
+      }
+      Ok(Value::Undefined)
+    }),
+    function_prototype,
+  );
+  set_builtin_name(&proto_setter, "set __proto__");
+  set_builtin_length(&proto_setter, 1.0);
+  object_prototype.borrow_mut().properties.insert(
+    PKey::String("__proto__".to_string().into()),
+    PropertyDescriptor::Accessor {
+      get: Some(proto_getter),
+      set: Some(proto_setter),
+      enumerable: false,
+      configurable: true,
+    },
+  );
+
   let object_to_string = builtin_object(
     Rc::new(|vm, args| {
       let this = args.first().cloned().unwrap_or(Value::Null);
@@ -661,11 +706,21 @@ pub(crate) fn install_object_intrinsics(
             let off = static_builtin_arg_offset(vm, args, "Object");
             let target = args.get(off).cloned().unwrap_or(Value::Undefined);
             let target = vm.to_object_value(target)?;
-            let values = vm
-              .own_enumerable_keys_value(&target)?
-              .into_iter()
-              .map(|key| vm.get_property_host(&target, &key))
-              .collect::<Result<Vec<_>, _>>()?;
+            let mut values = Vec::new();
+            for key in vm.own_property_keys_value(&target)? {
+              if !matches!(key, PropertyKey::String(_)) {
+                continue;
+              }
+              let enumerable = vm
+                .get_own_property_value(&target, &key)?
+                .is_some_and(|descriptor| match descriptor {
+                  PropertyDescriptor::Data { enumerable, .. }
+                  | PropertyDescriptor::Accessor { enumerable, .. } => enumerable,
+                });
+              if enumerable {
+                values.push(vm.get_property_host(&target, &key)?);
+              }
+            }
             Ok(vm.new_array(values.into_iter().map(Some).collect()))
           }),
           function_prototype,
@@ -686,15 +741,23 @@ pub(crate) fn install_object_intrinsics(
             let off = static_builtin_arg_offset(vm, args, "Object");
             let target = args.get(off).cloned().unwrap_or(Value::Undefined);
             let target = vm.to_object_value(target)?;
-            let entries = vm
-              .own_enumerable_keys_value(&target)?
-              .into_iter()
-              .map(|key| {
-                let key_val = property_key_to_value(&key);
-                let val = vm.get_property_host(&target, &key)?;
-                Ok(vm.new_array(vec![Some(key_val), Some(val)]))
-              })
-              .collect::<Result<Vec<_>, RuntimeError>>()?;
+            let mut entries = Vec::new();
+            for key in vm.own_property_keys_value(&target)? {
+              if !matches!(key, PropertyKey::String(_)) {
+                continue;
+              }
+              let enumerable = vm
+                .get_own_property_value(&target, &key)?
+                .is_some_and(|descriptor| match descriptor {
+                  PropertyDescriptor::Data { enumerable, .. }
+                  | PropertyDescriptor::Accessor { enumerable, .. } => enumerable,
+                });
+              if enumerable {
+                let key_value = property_key_to_value(&key);
+                let value = vm.get_property_host(&target, &key)?;
+                entries.push(vm.new_array(vec![Some(key_value), Some(value)]));
+              }
+            }
             Ok(vm.new_array(entries.into_iter().map(Some).collect()))
           }),
           function_prototype,

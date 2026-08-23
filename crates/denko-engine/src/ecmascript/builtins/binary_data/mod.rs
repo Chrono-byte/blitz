@@ -11,8 +11,8 @@ use std::rc::Rc;
 
 use crate::Vm;
 use crate::ecmascript::semantics::{
-  array_buffer_backing, byte_view_details, is_array_buffer, is_byte_offset_aligned,
-  new_array_buffer, new_byte_view, usize_to_decimal_string, usize_to_f64,
+  array_buffer_backing, byte_view_details, byte_view_metadata, is_array_buffer,
+  is_byte_offset_aligned, new_array_buffer, new_byte_view, usize_to_decimal_string, usize_to_f64,
 };
 use crate::errors::RuntimeError;
 use crate::runtime_utils::{static_builtin_arg_offset, to_index, to_length};
@@ -54,6 +54,7 @@ pub(crate) fn install_binary_data_intrinsics(
   array_values_builtin: Value,
   array_keys_builtin: Value,
   array_entries_builtin: Value,
+  array_to_string_builtin: Value,
 ) -> BinaryDataIntrinsics {
   let (arraybuffer_ctor_val, arraybuffer_proto_map) =
     install_array_buffer(object_proto_map, function_proto_map);
@@ -66,6 +67,7 @@ pub(crate) fn install_binary_data_intrinsics(
     array_values_builtin,
     array_keys_builtin,
     array_entries_builtin,
+    array_to_string_builtin,
   );
   let (dataview_ctor_val, dataview_proto_map) =
     install_data_view(object_proto_map, function_proto_map);
@@ -117,17 +119,6 @@ fn typed_view_details(
   ))
 }
 
-fn new_typed_array_view(
-  prototype: Value,
-  buffer: Value,
-  data: Rc<RefCell<ArrayData>>,
-  kind: &str,
-  length: usize,
-  byte_offset: usize,
-) -> Value {
-  new_byte_view(prototype, buffer, data, kind, length, byte_offset)
-}
-
 fn typed_array_relative_index(
   vm: &mut Vm,
   value: &Value,
@@ -140,8 +131,9 @@ fn typed_array_relative_index(
   if number == f64::INFINITY {
     return Ok(length);
   }
-  if number < 0.0 {
-    return Ok(length.saturating_sub((-number).trunc() as usize));
+  let integer = number.trunc();
+  if integer < 0.0 {
+    return Ok(length.saturating_sub((-integer) as usize));
   }
-  Ok(number.trunc().min(length as f64) as usize)
+  Ok(integer.min(length as f64) as usize)
 }

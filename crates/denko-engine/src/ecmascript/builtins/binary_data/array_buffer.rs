@@ -68,6 +68,24 @@ pub(crate) fn install_array_buffer(
     );
   set_builtin_name(&arraybuffer_ctor_val, "ArrayBuffer");
   set_builtin_length(&arraybuffer_ctor_val, 1.0);
+  let species_getter = crate::ecmascript::semantics::builtin_object(
+    Rc::new(|_vm, args| Ok(args.first().cloned().unwrap_or(Value::Undefined))),
+    function_proto_map,
+  );
+  set_builtin_name(&species_getter, "get [Symbol.species]");
+  set_builtin_length(&species_getter, 0.0);
+  arraybuffer_ctor_map
+    .borrow_mut()
+    .properties
+    .insert(
+      PropertyKey::Symbol(crate::value::SymbolId::well_known_species()),
+      PropertyDescriptor::Accessor {
+        get: Some(species_getter),
+        set: None,
+        enumerable: false,
+        configurable: true,
+      },
+    );
   let slice_proto = Rc::clone(&arraybuffer_proto_map);
   let slice = crate::ecmascript::semantics::builtin_object(
     Rc::new(move |vm, args| {

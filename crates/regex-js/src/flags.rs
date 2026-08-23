@@ -19,7 +19,8 @@ impl fmt::Display for Flags {
       (self.ignore_case(), 'i'),
       (self.multiline(), 'm'),
       (self.dot_all(), 's'),
-      (self.unicode(), 'u'),
+      (self.unicode() && !self.unicode_sets(), 'u'),
+      (self.unicode_sets(), 'v'),
       (self.sticky(), 'y'),
     ] {
       if enabled {
@@ -38,6 +39,7 @@ impl Flags {
   const UNICODE: u16 = 1 << 4;
   const STICKY: u16 = 1 << 5;
   const HAS_INDICES: u16 = 1 << 6;
+  const UNICODE_SETS: u16 = 1 << 7;
 
   /// Parse a JavaScript flag string.
   pub fn parse(flags: &str) -> Result<Self, Error> {
@@ -51,6 +53,7 @@ impl Flags {
         value if value == u16::from(b'u') => Self::UNICODE,
         value if value == u16::from(b'y') => Self::STICKY,
         value if value == u16::from(b'd') => Self::HAS_INDICES,
+        value if value == u16::from(b'v') => Self::UNICODE_SETS,
         _ => {
           return Err(Error::new(
             ErrorKind::InvalidFlag,
@@ -67,6 +70,13 @@ impl Flags {
         ));
       }
       parsed.bits |= bit;
+      if parsed.bits & Self::UNICODE != 0 && parsed.bits & Self::UNICODE_SETS != 0 {
+        return Err(Error::new(
+          ErrorKind::InvalidFlag,
+          offset,
+          "regular expression cannot use both 'u' and 'v' flags",
+        ));
+      }
     }
     Ok(parsed)
   }
@@ -98,7 +108,13 @@ impl Flags {
   /// Whether Unicode code-point matching is enabled.
   #[must_use]
   pub const fn unicode(self) -> bool {
-    self.bits & Self::UNICODE != 0
+    self.bits & (Self::UNICODE | Self::UNICODE_SETS) != 0
+  }
+
+  /// Whether Unicode sets mode (`v`) is enabled.
+  #[must_use]
+  pub const fn unicode_sets(self) -> bool {
+    self.bits & Self::UNICODE_SETS != 0
   }
 
   /// Whether matching is sticky.

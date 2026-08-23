@@ -66,6 +66,21 @@ pub(super) fn install(
   let array_ctor_val = Value::BuiltinObject(Rc::clone(&array_ctor_fn), Rc::clone(&array_ctor_map));
   set_builtin_name(&array_ctor_val, "Array");
   set_builtin_length(&array_ctor_val, 1.0);
+  let species_getter = builtin_object(
+    Rc::new(|_vm, args| Ok(args.first().cloned().unwrap_or(Value::Undefined))),
+    function_proto_map,
+  );
+  set_builtin_name(&species_getter, "get [Symbol.species]");
+  set_builtin_length(&species_getter, 0.0);
+  array_ctor_map.borrow_mut().properties.insert(
+    PKey::Symbol(SymbolId::well_known_species()),
+    PropertyDescriptor::Accessor {
+      get: Some(species_getter),
+      set: None,
+      enumerable: false,
+      configurable: true,
+    },
+  );
   array_ctor_map.borrow_mut().properties.insert(
     PKey::String("isArray".to_string().into()),
     PropertyDescriptor::builtin_data({
