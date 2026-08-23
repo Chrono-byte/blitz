@@ -297,6 +297,14 @@ impl ModuleLoader {
           .and_then(|b| b.as_array())
           .ok_or_else(|| BundlerError::from("Expected program body"))?;
         for item in body {
+          let type_only = item
+            .get("importKind")
+            .or_else(|| item.get("exportKind"))
+            .and_then(JsonValue::as_str)
+            == Some("type");
+          if type_only {
+            continue;
+          }
           if let Some(typ) = item.get("type").and_then(|t| t.as_str()) {
             match typ {
               "ExportNamedDeclaration" => {
@@ -307,18 +315,10 @@ impl ModuleLoader {
                 {
                   if let Some(specs) = item.get("specifiers").and_then(|s| s.as_array()) {
                     for sp in specs {
-                      let exported = sp
-                        .get("exported")
-                        .and_then(|e| e.get("name"))
-                        .and_then(|n| n.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                      let imported = sp
-                        .get("local")
-                        .and_then(|e| e.get("name"))
-                        .and_then(|n| n.as_str())
-                        .unwrap_or(&exported)
-                        .to_string();
+                      let exported =
+                        estree_module_export_name(sp.get("exported")).unwrap_or_default();
+                      let imported = estree_module_export_name(sp.get("local"))
+                        .unwrap_or_else(|| exported.clone());
                       rec
                         .indirect_exports
                         .push((exported, imported, source.to_string()));
@@ -328,15 +328,10 @@ impl ModuleLoader {
                 }
                 if let Some(specs) = item.get("specifiers").and_then(|s| s.as_array()) {
                   for sp in specs {
-                    if let Some(exported) = sp
-                      .get("exported")
-                      .and_then(|e| e.get("name"))
-                      .and_then(|n| n.as_str())
-                    {
-                      rec.exports.insert(
-                        exported.to_string(),
-                        Rc::new(RefCell::new(Value::Undefined)),
-                      );
+                    if let Some(exported) = estree_module_export_name(sp.get("exported")) {
+                      rec
+                        .exports
+                        .insert(exported, Rc::new(RefCell::new(Value::Undefined)));
                     }
                   }
                 }
@@ -349,33 +344,48 @@ impl ModuleLoader {
                       .and_then(|i| i.get("name"))
                       .and_then(|n| n.as_str())
                   {
+                    let initial = if decl_type == "ClassDeclaration" {
+                      Value::Uninitialized
+                    } else {
+                      Value::Undefined
+                    };
                     rec
                       .exports
-                      .insert(id.to_string(), Rc::new(RefCell::new(Value::Undefined)));
+                      .insert(id.to_string(), Rc::new(RefCell::new(initial)));
                   } else if decl_type == "VariableDeclaration"
                     && let Some(decls) = decl
                       .get("declarations")
                       .and_then(|d| d.as_array())
                   {
+                    let initial = if decl.get("kind").and_then(JsonValue::as_str) == Some("var") {
+                      Value::Undefined
+                    } else {
+                      Value::Uninitialized
+                    };
                     for var_decl in decls {
-                      if let Some(name) = var_decl
-                        .get("id")
-                        .and_then(|id| id.get("name"))
-                        .and_then(|n| n.as_str())
-                      {
+                      let mut names = Vec::new();
+                      estree_binding_names(var_decl.get("id"), &mut names);
+                      for name in names {
                         rec
                           .exports
-                          .insert(name.to_string(), Rc::new(RefCell::new(Value::Undefined)));
+                          .insert(name, Rc::new(RefCell::new(initial.clone())));
                       }
                     }
                   }
                 }
               }
               "ExportDefaultDeclaration" => {
-                rec.exports.insert(
-                  "default".to_string(),
-                  Rc::new(RefCell::new(Value::Undefined)),
-                );
+                let initial = match item
+                  .get("declaration")
+                  .and_then(|declaration| declaration.get("type"))
+                  .and_then(JsonValue::as_str)
+                {
+                  Some("FunctionDeclaration") => Value::Undefined,
+                  _ => Value::Uninitialized,
+                };
+                rec
+                  .exports
+                  .insert("default".to_string(), Rc::new(RefCell::new(initial)));
               }
               "ExportAllDeclaration" => {
                 if let Some(source) = item
@@ -485,6 +495,9 @@ impl ModuleLoader {
         .and_then(|b| b.as_array())
         .ok_or_else(|| BundlerError::from("Expected program body"))?;
       for item in body {
+        if item.get("importKind").and_then(JsonValue::as_str) == Some("type") {
+          continue;
+        }
         if let Some(typ) = item.get("type").and_then(|t| t.as_str()) {
           if typ != "ImportDeclaration" {
             continue;
@@ -524,17 +537,9 @@ impl ModuleLoader {
             if let Some(sptype) = sp.get("type").and_then(|t| t.as_str()) {
               match sptype {
                 "ImportSpecifier" => {
-                  let local = sp
-                    .get("local")
-                    .and_then(|l| l.get("name"))
-                    .and_then(|n| n.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                  let imported = sp
-                    .get("imported")
-                    .and_then(|i| i.get("name"))
-                    .and_then(|n| n.as_str())
-                    .map_or_else(|| Clone::clone(&local), ToString::to_string);
+                  let local = estree_module_export_name(sp.get("local")).unwrap_or_default();
+                  let imported =
+                    estree_module_export_name(sp.get("imported")).unwrap_or_else(|| local.clone());
                   let dep_path = dep_rec_rc.borrow().path.clone();
                   let mut resolve_set = HashSet::new();
                   let slot_opt = self.resolve_export(&dep_path, &imported, &mut resolve_set)?;

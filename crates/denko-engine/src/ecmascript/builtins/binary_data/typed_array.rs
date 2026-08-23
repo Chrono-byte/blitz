@@ -165,6 +165,7 @@ pub(crate) fn install_typed_arrays(
     ))
   });
   let typedarray_ctor_val = Value::BuiltinObject(typedarray_ctor_fn, typedarray_ctor_map);
+  crate::ecmascript::semantics::set_builtin_length(&typedarray_ctor_val, 0.0);
   typedarray_proto_map
     .borrow_mut()
     .properties

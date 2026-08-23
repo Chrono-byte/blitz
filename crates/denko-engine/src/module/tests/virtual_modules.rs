@@ -545,3 +545,85 @@ fn virtual_cycles_keep_shared_import_export_slots() {
     a.exports.get("value").expect("a export")
   ));
 }
+
+#[test]
+fn destructuring_and_string_named_exports_link() {
+  let mut loader = ModuleLoader::new();
+  loader
+    .register_virtual_module(VirtualModule::javascript(
+      "exports:dependency",
+      crate::js!(
+        module,
+        "export const { value } = { value: 7 }; const other = 9; export { other as \"named value\" };"
+      ),
+      SourceType::mjs(),
+      None,
+    ))
+    .expect("dependency registers");
+  loader
+    .register_virtual_module(VirtualModule::javascript(
+      "exports:entry",
+      crate::js!(
+        module,
+        "import { value, \"named value\" as named } from 'exports:dependency'; globalThis.exportResult = value + named;"
+      ),
+      SourceType::mjs(),
+      None,
+    ))
+    .expect("entry registers");
+
+  let entry = loader
+    .construct(Path::new("."), "exports:entry")
+    .expect("graph constructs");
+  loader
+    .instantiate_all()
+    .expect("graph instantiates");
+  let globals = Rc::new(RefCell::new(ObjectData::new()));
+  let mut vm = Vm::new(globals);
+  let entry_path = entry.borrow().path.clone();
+  loader
+    .evaluate_entry(&entry_path, &mut vm, false)
+    .expect("graph evaluates");
+
+  assert_eq!(vm.get_global("exportResult"), Some(Value::Number(16.0)));
+}
+
+#[test]
+fn cyclic_lexical_imports_preserve_the_tdz() {
+  let mut loader = ModuleLoader::new();
+  loader
+    .register_virtual_module(VirtualModule::javascript(
+      "tdz:a",
+      crate::js!(module, "import { b } from 'tdz:b'; export const a = 1;"),
+      SourceType::mjs(),
+      None,
+    ))
+    .expect("a registers");
+  loader
+    .register_virtual_module(VirtualModule::javascript(
+      "tdz:b",
+      crate::js!(module, "import { a } from 'tdz:a'; export const b = a;"),
+      SourceType::mjs(),
+      None,
+    ))
+    .expect("b registers");
+
+  let entry = loader
+    .construct(Path::new("."), "tdz:a")
+    .expect("cycle constructs");
+  loader
+    .instantiate_all()
+    .expect("cycle instantiates");
+  let globals = Rc::new(RefCell::new(ObjectData::new()));
+  let mut vm = Vm::new(globals);
+  let entry_path = entry.borrow().path.clone();
+  let error = loader
+    .evaluate_entry(&entry_path, &mut vm, false)
+    .expect_err("cyclic lexical read throws");
+
+  assert!(
+    error
+      .to_string()
+      .contains("before initialization")
+  );
+}

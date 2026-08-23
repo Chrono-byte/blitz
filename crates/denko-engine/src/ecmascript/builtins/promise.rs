@@ -217,6 +217,9 @@ pub(crate) fn create_promise_intrinsics(
       let off = static_builtin_arg_offset(vm, args, "Promise");
       let undefined = Value::Undefined;
       let executor = args.get(off).unwrap_or(&undefined);
+      if !Vm::is_callable_value(executor) {
+        return Err(vm.throw_type_error("Promise executor is not callable"));
+      }
 
       let promise = crate::gc::track_promise(Rc::new(RefCell::new(PromiseState::Pending {
         on_fulfilled: Vec::new(),

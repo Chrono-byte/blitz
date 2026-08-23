@@ -102,12 +102,12 @@ pub(crate) fn create_function_intrinsics(
     let chunk = crate::typecheck::with_strict_override(None, || {
       let session =
         Parser::parse_source(&source).map_err(|e| syntax_error(vm, format!("parse: {}", e)))?;
-      let prog = session.program();
-      compiler::compile_oxc_repl(prog, &source)
+      compiler::compile_repl_session(&session)
         .map_err(|e| syntax_error(vm, format!("compile: {}", e)))
     })?;
     let mut child = vm.fork_execution();
     let result = child.run(chunk)?;
+    set_builtin_name(&result, "anonymous");
     match &result {
       Value::Closure { props, .. } | Value::BuiltinObject(_, props) => {
         props.borrow_mut().properties.insert(

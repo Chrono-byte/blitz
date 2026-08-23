@@ -51,6 +51,7 @@ use tokio::runtime::Builder;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use denko::compiler;
+use denko::test262_support::{self, AsyncCompletion as AsyncDoneMarker};
 use denko::value::{
   NativeFn, ObjectData, PropertyDescriptor, PropertyKey, Value, define_native_global,
 };
@@ -1961,245 +1962,19 @@ fn parse_source_for_path(
   Parser::parse_source_with_type(source, source_type)
 }
 
-/// Return `true` if the given string is an async done marker.
-enum AsyncDoneMarker {
-  /// The async test has completed successfully.
-  Complete,
-  /// The async test has failed with the given error message.
-  Failure(String),
-}
-
 /// Return `Some(marker)` if the given string is an async done marker,
 /// otherwise `None`.
 fn is_async_done_marker(s: &str) -> Option<AsyncDoneMarker> {
-  if s == "Test262:AsyncTestComplete" {
-    Some(AsyncDoneMarker::Complete)
-  } else {
-    s.strip_prefix("Test262:AsyncTestFailure:")
-      .map(|rest| AsyncDoneMarker::Failure(rest.to_string()))
-  }
+  test262_support::async_completion_marker(s)
 }
 
-/// A simple `$262.evalScript` implementation that evaluates the provided
-/// source in the current realm (not a fresh realm). Per Test262 spec:
-/// ParseScript → ScriptEvaluation in current realm.
-///
-/// The key fix: uses `Rc::clone` (shared handle) instead of deep cloning
-/// globals, so mutations in evalScript are visible to the caller.
-fn eval_script_in_vm(
-  vm: &mut Vm,
-  args: &[Value],
-) -> Result<Value, String> {
-  let Some(src) = args.iter().find_map(|value| match value {
-    Value::String(src) => Some(src.clone()),
-    _ => None,
-  }) else {
-    return Ok(Value::Null);
-  };
-  let chunk = typecheck::with_strict_override(None, || {
-    let src = src.as_str_lossy();
-    let session = Parser::parse_source(src).map_err(|e| format!("evalScript parse: {}", e))?;
-    let prog = session.program();
-    compiler::compile_oxc(prog, src).map_err(|e| format!("evalScript compile: {}", e))
-  })?;
-  vm.run(chunk)
-    .map_err(|e| format!("evalScript runtime: {}", e))
-}
-
-fn builtin_eval_script(
-  globals: &Rc<RefCell<ObjectData>>,
-  args: &[Value],
-) -> Result<Value, String> {
-  let mut eval_vm = Vm::new(Rc::clone(globals));
-  eval_script_in_vm(&mut eval_vm, args)
-}
-
-/// Returns a new test globals object with the default global properties set.
+/// Returns a new realm using the engine-owned Test262 host adapter.
 fn make_test_globals() -> Rc<RefCell<ObjectData>> {
-  let globals: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
-
-  let global_this = Value::Object(Clone::clone(&globals));
-  globals.borrow_mut().properties.insert(
-    PropertyKey::String("globalThis".to_string().into()),
-    PropertyDescriptor::ordinary_data(global_this),
-  );
-  let default_print: NativeFn = Rc::new(|vm, _this, args| {
+  let print: NativeFn = Rc::new(|vm, _this, args| {
     eprintln!("[test262 print] {}", print_args(vm, args));
     Ok(Value::Null)
   });
-  define_native_global(&globals, "print", default_print);
-  globals.borrow_mut().properties.insert(
-    PropertyKey::String("NaN".to_string().into()),
-    PropertyDescriptor::ordinary_data(Value::Number(f64::NAN)),
-  );
-  globals.borrow_mut().properties.insert(
-    PropertyKey::String("Infinity".to_string().into()),
-    PropertyDescriptor::ordinary_data(Value::Number(f64::INFINITY)),
-  );
-
-  runtime_utils::install_minimal_kernel_constructors(&globals);
-
-  let test262_obj = make_test262_object(&globals);
-  globals.borrow_mut().properties.insert(
-    PropertyKey::String("$262".to_string().into()),
-    PropertyDescriptor::ordinary_data(test262_obj),
-  );
-
-  globals
-}
-
-/// Create a `$262` object for a realm, with proper createRealm that builds
-/// fresh intrinsics (not a heap clone) and evalScript that shares globals.
-fn make_test262_object(globals: &Rc<RefCell<ObjectData>>) -> Value {
-  let mut data = ObjectData::new();
-  let function_proto = globals
-    .borrow()
-    .properties
-    .get(&PropertyKey::String("Function".to_string().into()))
-    .and_then(|desc| match desc {
-      PropertyDescriptor::Data { value, .. } => Some(value.clone()),
-      _ => None,
-    })
-    .and_then(|function_ctor| match function_ctor {
-      Value::Object(obj) => obj
-        .borrow()
-        .properties
-        .get(&PropertyKey::String("prototype".to_string().into()))
-        .and_then(|desc| match desc {
-          PropertyDescriptor::Data { value, .. } => Some(value.clone()),
-          _ => None,
-        }),
-      Value::BuiltinObject(_, props) => props
-        .borrow()
-        .properties
-        .get(&PropertyKey::String("prototype".to_string().into()))
-        .and_then(|desc| match desc {
-          PropertyDescriptor::Data { value, .. } => Some(value.clone()),
-          _ => None,
-        }),
-      _ => None,
-    })
-    .unwrap_or(Value::Null);
-
-  let host_builtin = |f: denko::value::BuiltinFn| {
-    let props = Rc::new(RefCell::new(ObjectData::with_prototype(
-      function_proto.clone(),
-    )));
-    Value::BuiltinObject(f, props)
-  };
-
-  // evalScript: shares globals via Rc::clone (not deep clone)
-  let eval_globals = Rc::clone(globals);
-  data.properties.insert(
-    PropertyKey::String("evalScript".to_string().into()),
-    PropertyDescriptor::ordinary_data(host_builtin(Rc::new(move |_vm, args| {
-      builtin_eval_script(&eval_globals, args).map_err(denko::errors::RuntimeError::from)
-    }))),
-  );
-
-  // IsHTMLDDA: plain object placeholder (full implementation requires exotic object semantics)
-  data.properties.insert(
-    PropertyKey::String("IsHTMLDDA".to_string().into()),
-    PropertyDescriptor::ordinary_data(Value::Object(Rc::new(RefCell::new(ObjectData::new())))),
-  );
-
-  // detachArrayBuffer: null out [[ArrayBufferData]] and set byteLength to 0
-  data.properties.insert(
-    PropertyKey::String("detachArrayBuffer".to_string().into()),
-    PropertyDescriptor::ordinary_data(host_builtin(Rc::new(|_vm, args| {
-      if let Some(Value::Object(obj)) = args.first() {
-        let mut obj_data = obj.borrow_mut();
-        // Per spec: [[ArrayBufferData]] = null
-        obj_data.set_internal_slot("[[ArrayBufferData]]", Value::Null);
-        obj_data.properties.insert(
-          PropertyKey::String("byteLength".to_string().into()),
-          PropertyDescriptor::ordinary_data(Value::Number(0.0)),
-        );
-      }
-      Ok(Value::Undefined)
-    }))),
-  );
-  data.properties.insert(
-    PropertyKey::String("gc".to_string().into()),
-    PropertyDescriptor::ordinary_data(host_builtin(Rc::new(|vm, _args| {
-      let _ = vm.collect_garbage_prototype();
-      Ok(Value::Undefined)
-    }))),
-  );
-  data.properties.insert(
-    PropertyKey::String("AbstractModuleSource".to_string().into()),
-    PropertyDescriptor::ordinary_data(Value::Undefined),
-  );
-
-  let noop_agent_method: denko::value::BuiltinFn =
-    Rc::new(|_: &mut Vm, _: &[Value]| Ok(Value::Undefined));
-  let agent_obj = Rc::new(RefCell::new(ObjectData::new()));
-  for name in &[
-    "getReport",
-    "sleep",
-    "broadcast",
-    "receiveBroadcast",
-    "report",
-  ] {
-    agent_obj.borrow_mut().properties.insert(
-      PropertyKey::String(name.to_string().into()),
-      PropertyDescriptor::ordinary_data(host_builtin(Clone::clone(&noop_agent_method))),
-    );
-  }
-  data.properties.insert(
-    PropertyKey::String("agent".to_string().into()),
-    PropertyDescriptor::ordinary_data(Value::Object(agent_obj)),
-  );
-
-  // createRealm: builds a FRESH realm with fresh intrinsics, NOT a heap clone.
-  // Per spec: each realm gets distinct intrinsic identities.
-  data.properties.insert(
-    PropertyKey::String("createRealm".to_string().into()),
-    PropertyDescriptor::ordinary_data(host_builtin(Rc::new(|_vm, _args| {
-      let realm_global = Rc::new(RefCell::new(ObjectData::new()));
-      realm_global.borrow_mut().properties.insert(
-        PropertyKey::String("globalThis".to_string().into()),
-        PropertyDescriptor::ordinary_data(Value::Object(Rc::clone(&realm_global))),
-      );
-
-      // Construct the VM before exposing its globals so the installed globals
-      // and the realm's intrinsic table share the same object identities.
-      let realm_vm = Rc::new(RefCell::new(Vm::new(Rc::clone(&realm_global))));
-      let new_262 = make_test262_object(&realm_global);
-
-      realm_global.borrow_mut().properties.insert(
-        PropertyKey::String("$262".to_string().into()),
-        PropertyDescriptor::ordinary_data(new_262.clone()),
-      );
-
-      if let Value::Object(obj) = &new_262 {
-        obj.borrow_mut().properties.insert(
-          PropertyKey::String("global".to_string().into()),
-          PropertyDescriptor::ordinary_data(Value::Object(Rc::clone(&realm_global))),
-        );
-      }
-
-      // Keep the VM alive so intrinsic mutations survive across indirect eval calls.
-      let eval_vm = Rc::clone(&realm_vm);
-      realm_global.borrow_mut().properties.insert(
-        PropertyKey::String("eval".to_string().into()),
-        PropertyDescriptor::ordinary_data(Value::Builtin(Rc::new(move |_vm, args| {
-          eval_script_in_vm(&mut eval_vm.borrow_mut(), args)
-            .map_err(denko::errors::RuntimeError::from)
-        }))),
-      );
-
-      Ok(new_262)
-    }))),
-  );
-
-  // global: the realm's global object
-  data.properties.insert(
-    PropertyKey::String("global".to_string().into()),
-    PropertyDescriptor::ordinary_data(Value::Object(Rc::clone(globals))),
-  );
-
-  Value::Object(Rc::new(RefCell::new(data)))
+  test262_support::make_test262_globals_with_print(print)
 }
 
 /// Recursively gather `.js` test files under the given directory while skipping
@@ -2530,8 +2305,7 @@ fn run_test_file(
               ));
             }
           };
-          let prog = session.program();
-          let chunk = match compiler::compile_oxc(prog, &hsrc) {
+          let chunk = match compiler::compile_session(&session) {
             Ok(c) => c,
             Err(e) => {
               eprintln!(
@@ -2587,8 +2361,7 @@ fn run_test_file(
         let fix_path = test262_root.join("test262Error-fix.js");
         let session = parse_source_for_path(FIX_SCRIPT, &fix_path)
           .map_err(|e| format!("Failed to parse Test262Error fixer: {}", e))?;
-        let prog = session.program();
-        let chunk = compiler::compile_oxc(prog, FIX_SCRIPT)
+        let chunk = compiler::compile_session(&session)
           .map_err(|e| format!("Failed to compile Test262Error fixer: {}", e))?;
         if let Err(e) = vm.run(chunk) {
           eprintln!(
@@ -2629,8 +2402,7 @@ fn run_test_file(
             ));
           }
         };
-        let prog = session.program();
-        let chunk = match compiler::compile_oxc(prog, &inc_src) {
+        let chunk = match compiler::compile_session(&session) {
           Ok(c) => c,
           Err(e) => {
             eprintln!(
@@ -2674,8 +2446,7 @@ fn run_test_file(
       {
         match Parser::parse_source_with_type(&src, SourceType::mjs()) {
           Ok(session) => {
-            let prog = session.program();
-            if let Err(e) = compiler::compile_oxc(prog, &src) {
+            if let Err(e) = compiler::compile_session(&session) {
               let err_str = e.to_string();
               if err_str.contains("SyntaxError") || err_str.contains("redeclaration") {
                 continue;
@@ -2746,8 +2517,7 @@ fn run_test_file(
         match Parser::parse_source(&run_src) {
           Ok(session) => {
             // Parser succeeded, but check if compiler would catch this as a SyntaxError
-            let prog = session.program();
-            if let Err(e) = compiler::compile_oxc(prog, &run_src) {
+            if let Err(e) = compiler::compile_session(&session) {
               let err_str = e.to_string();
               // If the compiler caught a SyntaxError, treat this as the parser catching it
               if err_str.contains("SyntaxError") || err_str.contains("redeclaration") {
@@ -2790,10 +2560,8 @@ fn run_test_file(
           );
         }
       };
-      let prog = session.program();
-
       // Compile the JS source directly; Test262 should not be gated on TS-only checks.
-      let chunk = match compiler::compile_oxc(prog, &run_src) {
+      let chunk = match compiler::compile_session(&session) {
         Ok(c) => c,
         Err(e) => {
           return Err(
@@ -3061,8 +2829,7 @@ fn run_harness_only(
         .map_err(|e| format!("Failed to read harness {}: {}", p.display(), e))?;
       let session = parse_source_for_path(&hsrc, &p)
         .map_err(|e| format!("Harness {} parse failed: {}", h, e))?;
-      let prog = session.program();
-      let chunk = compiler::compile_oxc(prog, &hsrc)
+      let chunk = compiler::compile_session(&session)
         .map_err(|e| format!("Harness {} compile failed: {}", h, e))?;
       let run_result = vm.run(chunk);
 
@@ -3136,8 +2903,7 @@ fn run_scope_dump_test(
       let src = read_harness_source(&path)?;
       let session = parse_source_for_path(&src, &path)
         .map_err(|e| format!("Harness {} parse failed: {}", harness, e))?;
-      let prog = session.program();
-      let chunk = compiler::compile_oxc(prog, &src)
+      let chunk = compiler::compile_session(&session)
         .map_err(|e| format!("Harness {} compile failed: {}", harness, e))?;
       vm.run(chunk)
         .map_err(|e| format!("Harness {} runtime failed: {}", harness, e))?;
@@ -3155,8 +2921,7 @@ fn run_scope_dump_test(
       let fix_path = test262_root.join("test262Error-fix.js");
       let session = parse_source_for_path(FIX_SCRIPT, &fix_path)
         .map_err(|e| format!("Failed to parse Test262Error fixer: {}", e))?;
-      let prog = session.program();
-      let chunk = compiler::compile_oxc(prog, FIX_SCRIPT)
+      let chunk = compiler::compile_session(&session)
         .map_err(|e| format!("Failed to compile Test262Error fixer: {}", e))?;
       drop(vm.run(chunk));
     }
@@ -3171,8 +2936,7 @@ fn run_scope_dump_test(
     })?;
     let session = parse_source_for_path(&src, &test_path)
       .map_err(|e| format!("Scope dump test parse failed: {}", e))?;
-    let prog = session.program();
-    let chunk = compiler::compile_oxc(prog, &src)
+    let chunk = compiler::compile_session(&session)
       .map_err(|e| format!("Scope dump test compile failed: {}", e))?;
     let run_result = vm.run(chunk);
 
@@ -3237,25 +3001,7 @@ fn main() {
 
   // Bootstrap shared globals for the harness-only and scope-dump modes.
   // Normal tests create fresh globals per mode in `run_test_file`.
-  let globals: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
-
-  // Provide globalThis reference
-  let global_this = Value::Object(Clone::clone(&globals));
-  globals.borrow_mut().properties.insert(
-    PropertyKey::String("globalThis".to_string().into()),
-    PropertyDescriptor::ordinary_data(global_this),
-  );
-
-  // Seed the realm with kernel constructors before running tests.
-  runtime_utils::install_minimal_kernel_constructors(&globals);
-
-  // Wire $262 test harness object with proper createRealm (fresh intrinsics,
-  // not heap clone) and evalScript (shares globals via Rc::clone).
-  let test262_obj = make_test262_object(&globals);
-  globals.borrow_mut().properties.insert(
-    PropertyKey::String("$262".to_string().into()),
-    PropertyDescriptor::ordinary_data(test262_obj),
-  );
+  let globals = make_test_globals();
 
   let _vm = Vm::new(Clone::clone(&globals));
 

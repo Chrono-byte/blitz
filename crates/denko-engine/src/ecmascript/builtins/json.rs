@@ -10,7 +10,7 @@ use super::json_parse::{self, ParsedJson, ParsedValue};
 use crate::ecmascript::semantics::{builtin_object, js_number_to_string};
 use crate::gc;
 use crate::runtime_utils::{set_builtin_length, set_builtin_name, syntax_error, to_length};
-use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
+use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value};
 use crate::{RuntimeError, Vm};
 
 fn value_identity(value: &Value) -> Option<usize> {
@@ -251,6 +251,17 @@ fn boxed_primitive(value: &Value) -> Option<Value> {
   {
     return Some(value);
   }
+  if let Some(value) = data
+    .borrow()
+    .internal_slot("[[PrimitiveValue]]")
+    .cloned()
+  {
+    return matches!(
+      value,
+      Value::Bool(_) | Value::Number(_) | Value::String(_) | Value::BigInt(_)
+    )
+    .then_some(value);
+  }
   let descriptor = data
     .borrow()
     .properties
@@ -473,6 +484,15 @@ pub(crate) fn create_json_object(
   let object = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
     Rc::clone(object_prototype),
   ))));
+  object.borrow_mut().properties.insert(
+    PropertyKey::Symbol(SymbolId::well_known_to_string_tag()),
+    PropertyDescriptor::Data {
+      value: Value::String("JSON".into()),
+      writable: false,
+      enumerable: false,
+      configurable: true,
+    },
+  );
   let parse = builtin_object(
     Rc::new(|vm, args| {
       let offset = usize::from(vm.builtin_this_arg_prepended());

@@ -418,6 +418,18 @@ impl Vm {
   }
 
   pub(super) fn get_new_target(&self) -> Value {
+    if let Some(crate::value::Value::Closure { proto, props, .. }) = self
+      .execution
+      .call_stack
+      .last()
+      .map(|frame| &frame.callee)
+      && proto.captures_this
+      && let Some(value) = props
+        .borrow()
+        .internal_slot("[[LexicalNewTarget]]")
+    {
+      return value.clone();
+    }
     self
       .current_new_target()
       .unwrap_or(Value::Undefined)
@@ -607,7 +619,10 @@ impl Vm {
           self.jobs.dynamic_imports.len()
         );
       }
-      return gc::GcStats::default();
+      return gc::GcStats {
+        deferred: Some(gc::GcDeferredReason::PendingJobs),
+        ..gc::GcStats::default()
+      };
     }
 
     let before = if Self::gc_trace_enabled() {

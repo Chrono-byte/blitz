@@ -259,14 +259,16 @@ pub(in crate::ecmascript::builtins::array) fn install_before_iterator(
         move |vm, args| {
           let receiver = args.first().cloned().unwrap_or(Value::Undefined);
           let compare_fn = args.get(1).cloned().unwrap_or(Value::Undefined);
-          let has_compare = matches!(
-            compare_fn,
-            Value::Builtin(_) | Value::BuiltinObject(_, _) | Value::Closure { .. }
-          );
+          let has_compare = !matches!(compare_fn, Value::Undefined);
+          if has_compare && !Vm::is_callable_value(&compare_fn) {
+            return Err(vm.throw_type_error("Array.prototype.toSorted comparator is not callable"));
+          }
           let len = array_like_length(vm, &receiver)?;
+          if len > u32::MAX as usize {
+            return Err(vm.throw_range_error("Invalid array length"));
+          }
           let mut values: Vec<Value> = Vec::new();
           let mut undefined_count = 0usize;
-          let mut hole_count = 0usize;
           for i in 0..len {
             let key = PKey::String(i.to_string().into());
             if vm.has_property_host(&receiver, &key)? {
@@ -276,7 +278,7 @@ pub(in crate::ecmascript::builtins::array) fn install_before_iterator(
                 v => values.push(v),
               }
             } else {
-              hole_count += 1;
+              undefined_count += 1;
             }
           }
           let n = values.len();
@@ -289,7 +291,7 @@ pub(in crate::ecmascript::builtins::array) fn install_before_iterator(
                   &[values[i].clone(), values[j].clone()],
                 )?;
                 let cmp_num = vm.to_number_value(&cmp)?;
-                cmp_num.is_finite() && cmp_num > 0.0
+                cmp_num > 0.0
               } else {
                 let ai = vm.to_string(&values[i])?;
                 let aj = vm.to_string(&values[j])?;
@@ -304,8 +306,7 @@ pub(in crate::ecmascript::builtins::array) fn install_before_iterator(
             values.push(Value::Undefined);
             undefined_count -= 1;
           }
-          let mut out: Vec<Option<Value>> = values.into_iter().map(Some).collect();
-          out.extend((0..hole_count).map(|_| None));
+          let out: Vec<Option<Value>> = values.into_iter().map(Some).collect();
           let arr_rc = Rc::new(RefCell::new(ArrayData::from(out)));
           let props = Rc::new(RefCell::new(ObjectData::new()));
           props

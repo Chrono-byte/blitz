@@ -250,19 +250,19 @@ impl Vm {
         let ctor = self
           .get_global("Boolean")
           .unwrap_or(Value::Undefined);
-        self.construct_value(&ctor, &[Value::Bool(b)])
+        self.construct_value_with_new_target(&ctor, &[Value::Bool(b)], ctor.clone())
       }
       Value::Number(n) => {
         let ctor = self
           .get_global("Number")
           .unwrap_or(Value::Undefined);
-        self.construct_value(&ctor, &[Value::Number(n)])
+        self.construct_value_with_new_target(&ctor, &[Value::Number(n)], ctor.clone())
       }
       Value::String(s) => {
         let ctor = self
           .get_global("String")
           .unwrap_or(Value::Undefined);
-        self.construct_value(&ctor, &[Value::String(s)])
+        self.construct_value_with_new_target(&ctor, &[Value::String(s)], ctor.clone())
       }
       Value::BigInt(n) => {
         let ctor = self
@@ -327,15 +327,15 @@ impl Vm {
           // object instance is visited during ToPrimitive calls.
           crate::trace::value_string("[trace] to_primitive value", v);
         }
-        // Try @@toPrimitive if present.
+        // GetMethod(value, @@toPrimitive) must perform an observable property
+        // access, including accessors and Proxy traps.
         let to_prim_key = PropertyKey::Symbol(SymbolId::well_known_to_primitive());
-        if let Some((desc, _holder)) = self.lookup_property_descriptor(v, &to_prim_key, 0)?
-          && let PropertyDescriptor::Data { value: method, .. } = desc
-          && matches!(
-            method,
-            Value::Closure { .. } | Value::Builtin(_) | Value::BuiltinObject(_, _)
-          )
-        {
+        let method = self.get_property_with_receiver(v, &to_prim_key, v)?;
+        if !matches!(method, Value::Undefined | Value::Null) {
+          if !Self::is_callable_value(&method) {
+            self.roots.temporary.truncate(temp_root_base);
+            return Err(self.throw_type_error("@@toPrimitive is not callable"));
+          }
           if crate::trace::enabled() {
             crate::trace::value_string("[trace] @@toPrimitive candidate method", &method);
             crate::trace::value_string("[trace] @@toPrimitive receiver", v);
@@ -367,9 +367,12 @@ impl Vm {
             }
             self.roots.temporary.truncate(temp_root_base);
             return Ok(rv);
-          } else if crate::trace::enabled() {
+          }
+          if crate::trace::enabled() {
             crate::trace::value_string("[trace] @@toPrimitive produced non-primitive", &rv);
           }
+          self.roots.temporary.truncate(temp_root_base);
+          return Err(self.throw_type_error("@@toPrimitive must return a primitive value"));
         }
 
         let order = match hint {
@@ -379,13 +382,8 @@ impl Vm {
         };
         for name in order {
           let key = PropertyKey::String(name.to_string().into());
-          if let Some((desc, _holder)) = self.lookup_property_descriptor(v, &key, 0)?
-            && let PropertyDescriptor::Data { value: method, .. } = desc
-            && matches!(
-              method,
-              Value::Closure { .. } | Value::Builtin(_) | Value::BuiltinObject(_, _)
-            )
-          {
+          let method = self.get_property_with_receiver(v, &key, v)?;
+          if Self::is_callable_value(&method) {
             if crate::trace::enabled() {
               crate::trace::value_string(&format!("[trace] candidate method '{}':", name), &method);
               crate::trace::value_string("[trace] candidate receiver", v);

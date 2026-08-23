@@ -10,9 +10,9 @@ pub mod host;
 pub mod modules;
 pub mod net;
 pub mod project;
-pub mod repl;
 pub mod rpc;
 pub mod runtime_graph;
+pub mod session;
 
 pub use app::{App, AppError, AppOptions, Layer, ServeConfig, ServeOptions};
 pub use rpc::{

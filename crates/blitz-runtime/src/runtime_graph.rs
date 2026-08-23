@@ -103,10 +103,8 @@ pub const RUNTIME_CONTROL_METHODS: &[&str] = &[
   "failRoot",
 ];
 
-const RUNTIME_GRAPH_ARTIFACT: &[u8] = include_bytes!(concat!(
-  env!("CARGO_MANIFEST_DIR"),
-  "/assets/runtime/v1/runtime.blitzbundle"
-));
+const RUNTIME_GRAPH_ARTIFACT: &[u8] =
+  include_bytes!(concat!(env!("OUT_DIR"), "/runtime.blitzbundle"));
 
 /// Normalize text manifest line endings before content-addressing them.
 ///

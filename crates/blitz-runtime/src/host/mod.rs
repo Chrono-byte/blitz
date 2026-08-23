@@ -4,8 +4,9 @@
 //! The ECMAScript engine is intentionally host-agnostic. This module is the
 //! boundary where the Blitz executable installs capabilities supplied by the
 //! operating system, such as process metadata, filesystem access, and async
-//! I/O. Keeping that boundary explicit lets embedders select a smaller or
-//! sandboxed host surface without changing VM semantics.
+//! I/O. `NodeCompatProfile` controls visible `node:*` roots and their paired
+//! filesystem/entropy primitives. The remaining Blitz host modules are
+//! installed together and are not a general-purpose sandbox policy.
 
 mod abort;
 mod console;
@@ -23,8 +24,9 @@ mod url;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::env;
+use std::io::{self, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::rc::{Rc, Weak};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -52,6 +54,54 @@ use event_loop::{EventRegistry, EventSender, ResourceHandle, ResourceRegistry};
 use root::{RootId, RootSupervisor};
 use scheduler::{TimerId, TimerKind, TimerScheduler, WakeupEvent};
 use terminal::TerminalEvent;
+
+/// Destination selected by a runtime console operation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OutputStream {
+  Stdout,
+  Stderr,
+}
+
+/// Console output adapter used by hosted embedders.
+pub trait Output {
+  /// Write one complete console line.
+  fn write_line(
+    &self,
+    stream: OutputStream,
+    line: &str,
+  ) -> Result<(), RuntimeError>;
+
+  /// Clear an interactive output device when supported.
+  fn clear(&self) -> Result<(), RuntimeError> {
+    Ok(())
+  }
+}
+
+/// Process stdout/stderr adapter used by the Blitz executable.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ProcessOutput;
+
+impl Output for ProcessOutput {
+  fn write_line(
+    &self,
+    stream: OutputStream,
+    line: &str,
+  ) -> Result<(), RuntimeError> {
+    let result = match stream {
+      OutputStream::Stdout => writeln!(io::stdout().lock(), "{line}"),
+      OutputStream::Stderr => writeln!(io::stderr().lock(), "{line}"),
+    };
+    result.map_err(|error| RuntimeError::from(format!("console output failed: {error}")))
+  }
+
+  fn clear(&self) -> Result<(), RuntimeError> {
+    let mut stdout = io::stdout().lock();
+    stdout
+      .write_all(b"\x1b[2J\x1b[H")
+      .and_then(|()| stdout.flush())
+      .map_err(|error| RuntimeError::from(format!("console output failed: {error}")))
+  }
+}
 
 /// Node compatibility modules exposed to an application realm.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -379,6 +429,45 @@ impl RuntimeHandle {
     let Some(event) = event else {
       return Ok(false);
     };
+    self.dispatch_event(vm, event)?;
+    Ok(true)
+  }
+
+  /// Process at most one event, waiting no longer than `timeout`.
+  ///
+  /// This lets interactive embedders interleave their own input source with
+  /// timers and other runtime resources without moving the VM off its thread.
+  pub fn run_once_timeout(
+    &mut self,
+    vm: &mut Vm,
+    timeout: Duration,
+  ) -> Result<bool, RuntimeError> {
+    if !self.server.has_resources() && !self.terminal.is_active() && !self.events.is_live() {
+      return Ok(false);
+    }
+    let Some(mut receiver) = self.events.take_receiver() else {
+      return Ok(false);
+    };
+    let (receiver, event) = vm.block_on(async move {
+      let event = tokio::time::timeout(timeout, receiver.recv())
+        .await
+        .ok()
+        .flatten();
+      (receiver, event)
+    })?;
+    self.events.put_receiver(receiver);
+    let Some(event) = event else {
+      return Ok(false);
+    };
+    self.dispatch_event(vm, event)?;
+    Ok(true)
+  }
+
+  fn dispatch_event(
+    &mut self,
+    vm: &mut Vm,
+    event: RuntimeEvent,
+  ) -> Result<(), RuntimeError> {
     match event {
       RuntimeEvent::Http(event) => self.server.dispatch(vm, *event)?,
       RuntimeEvent::WebSocket(event) => self.server.dispatch_websocket(vm, event)?,
@@ -386,7 +475,7 @@ impl RuntimeHandle {
       RuntimeEvent::Wakeup(event) => self.scheduler.dispatch(vm, event)?,
     }
     vm.flush_microtasks()?;
-    Ok(true)
+    Ok(())
   }
 
   /// Drive HTTP resources until the server is stopped or its channel closes.
@@ -497,11 +586,6 @@ impl std::fmt::Display for RuntimeInstallError {
 
 impl std::error::Error for RuntimeInstallError {}
 
-thread_local! {
-  static INSTALLED_GRAPHS: RefCell<Vec<Weak<RefCell<denko::ModuleLoader>>>> =
-    const { RefCell::new(Vec::new()) };
-}
-
 /// Install the default Blitz runtime APIs into an initialized VM.
 ///
 /// # Panics
@@ -513,6 +597,16 @@ pub fn install_runtime(
   options: RuntimeOptions,
 ) -> RuntimeHandle {
   try_install_runtime(vm, options)
+    .unwrap_or_else(|error| panic!("runtime installation failed: {error}"))
+}
+
+/// Install the runtime with a caller-selected console output adapter.
+pub fn install_runtime_with_output(
+  vm: &mut Vm,
+  options: RuntimeOptions,
+  output: Rc<dyn Output>,
+) -> RuntimeHandle {
+  try_install_runtime_with_output(vm, options, output)
     .unwrap_or_else(|error| panic!("runtime installation failed: {error}"))
 }
 
@@ -531,15 +625,20 @@ pub fn try_install_runtime(
   vm: &mut Vm,
   options: RuntimeOptions,
 ) -> Result<RuntimeHandle, RuntimeInstallError> {
+  try_install_runtime_with_output(vm, options, Rc::new(ProcessOutput))
+}
+
+/// Fallible installation with an embedder-selected console output adapter.
+pub fn try_install_runtime_with_output(
+  vm: &mut Vm,
+  options: RuntimeOptions,
+  output: Rc<dyn Output>,
+) -> Result<RuntimeHandle, RuntimeInstallError> {
   let loader_handle = vm.module_loader_handle();
-  let already_installed = INSTALLED_GRAPHS.with(|installed| {
-    let mut installed = installed.borrow_mut();
-    installed.retain(|loader| loader.strong_count() > 0);
-    installed
-      .iter()
-      .any(|loader| loader.ptr_eq(&Rc::downgrade(&loader_handle)))
-  });
-  if already_installed {
+  if loader_handle
+    .borrow()
+    .contains_prelinked_specifier("blitz-internal:host")
+  {
     return Err(RuntimeInstallError::AlreadyInstalled);
   }
   let timing_enabled = env::var_os("BLITZ_RUNTIME_TIMINGS").is_some();
@@ -627,11 +726,6 @@ pub fn try_install_runtime(
       "blitz runtime graph: decode+generic-validation={decode_and_validation:?} policy-validation={policy_validation:?} registration={graph_registration:?}"
     );
   }
-  INSTALLED_GRAPHS.with(|installed| {
-    installed
-      .borrow_mut()
-      .push(Rc::downgrade(&loader_handle));
-  });
   let event_sender = events.sender();
   let scheduler = install_scheduler(vm, events.resources(), event_sender.clone());
   forward_events(vm, requests_rx, event_sender.clone(), |event| {
@@ -655,7 +749,7 @@ pub fn try_install_runtime(
   *server_slot.borrow_mut() = Some(server.clone());
   let terminal = terminal::install(vm, terminal_events_tx);
   *terminal_slot.borrow_mut() = Some(terminal.clone());
-  console::install(vm);
+  console::install(vm, output);
   abort::install(vm);
   process::install(vm, options);
   url::install(vm);
@@ -2107,7 +2201,7 @@ mod tests {
     "#
     );
     let session = JsParser::parse_source(source).expect("parse host metadata script");
-    let chunk = compiler::compile_oxc(session.program(), source).expect("compile metadata script");
+    let chunk = compiler::compile_session(&session).expect("compile metadata script");
     vm.run(chunk)
       .expect("evaluate host metadata script");
 
@@ -2174,7 +2268,7 @@ mod tests {
     "#
     );
     let session = JsParser::parse_source(source).expect("parse timer script");
-    let chunk = compiler::compile_oxc(session.program(), source).expect("compile timer script");
+    let chunk = compiler::compile_session(&session).expect("compile timer script");
     vm.run(chunk).expect("evaluate timer script");
 
     assert!(runtime.is_live());
@@ -2224,8 +2318,7 @@ mod tests {
     "#
     );
     let session = JsParser::parse_source(source).expect("parse server handle script");
-    let chunk =
-      compiler::compile_oxc(session.program(), source).expect("compile server handle script");
+    let chunk = compiler::compile_session(&session).expect("compile server handle script");
     vm.run(chunk)
       .expect("evaluate server handle script");
     let address = runtime
@@ -2241,7 +2334,7 @@ mod tests {
     "#
     );
     let session = JsParser::parse_source(source).expect("parse server unref script");
-    let chunk = compiler::compile_oxc(session.program(), source).expect("compile unref script");
+    let chunk = compiler::compile_session(&session).expect("compile unref script");
     vm.run(chunk).expect("unref server");
     assert_eq!(vm.get_global("unrefCalled"), Some(Value::Bool(true)));
     assert!(!runtime.is_live());
@@ -2254,7 +2347,7 @@ mod tests {
     "#
     );
     let session = JsParser::parse_source(source).expect("parse server shutdown script");
-    let chunk = compiler::compile_oxc(session.program(), source).expect("compile shutdown script");
+    let chunk = compiler::compile_session(&session).expect("compile shutdown script");
     vm.run(chunk).expect("shut down server");
     vm.flush_microtasks()
       .expect("settle server completion");
@@ -2295,8 +2388,7 @@ mod tests {
       include_str!("../../compat/fixtures/server-lifecycle.js")
     );
     let session = JsParser::parse_source(&source).expect("parse Deno compatibility fixture");
-    let chunk =
-      compiler::compile_oxc(session.program(), &source).expect("compile compatibility fixture");
+    let chunk = compiler::compile_session(&session).expect("compile compatibility fixture");
     vm.run(chunk)
       .expect("evaluate compatibility fixture");
     vm.flush_microtasks()
@@ -2491,7 +2583,7 @@ mod tests {
     "#
     );
     let session = JsParser::parse_source(source).expect("parse server script");
-    let chunk = compiler::compile_oxc(session.program(), source).expect("compile server script");
+    let chunk = compiler::compile_session(&session).expect("compile server script");
     vm.run(chunk).expect("evaluate server script");
 
     let address = runtime.local_addr().expect("bound HTTP address");
@@ -2571,8 +2663,7 @@ mod tests {
     "#
     );
     let session = JsParser::parse_source(source).expect("parse WebSocket server script");
-    let chunk =
-      compiler::compile_oxc(session.program(), source).expect("compile WebSocket server script");
+    let chunk = compiler::compile_session(&session).expect("compile WebSocket server script");
     vm.run(chunk)
       .expect("evaluate WebSocket server script");
 
@@ -2705,8 +2796,7 @@ mod tests {
     "#
     );
     let session = JsParser::parse_source(source).expect("parse WebSocket client script");
-    let chunk =
-      compiler::compile_oxc(session.program(), source).expect("compile WebSocket client script");
+    let chunk = compiler::compile_session(&session).expect("compile WebSocket client script");
     vm.run(chunk)
       .expect("evaluate WebSocket client script");
     assert_eq!(
@@ -2739,7 +2829,7 @@ mod tests {
     let session =
       JsParser::parse_source_with_type(server, oxc_span::SourceType::ts().with_module(true))
         .expect("parse Effect IRC server module");
-    compiler::compile_oxc(session.program(), server).expect("compile Effect IRC server module");
+    compiler::compile_session(&session).expect("compile Effect IRC server module");
 
     for (name, source) in [
       (
@@ -2754,7 +2844,7 @@ mod tests {
       let session =
         JsParser::parse_source_with_type(source, oxc_span::SourceType::ts().with_module(true))
           .unwrap_or_else(|error| panic!("parse Effect IRC {name} client: {error}"));
-      compiler::compile_oxc(session.program(), source)
+      compiler::compile_session(&session)
         .unwrap_or_else(|error| panic!("compile Effect IRC {name} client: {error}"));
     }
   }

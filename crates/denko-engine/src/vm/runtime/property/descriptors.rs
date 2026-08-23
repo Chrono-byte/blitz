@@ -240,26 +240,50 @@ impl Vm {
         return Ok(false);
       }
 
-      let next_len = next_len.unwrap_or(current_len);
+      let mut next_len = next_len.unwrap_or(current_len);
       if next_len < current_len {
         if !current_writable {
           return Ok(false);
         }
+        let mut data = props.borrow_mut();
+        let mut indexed_properties = data
+          .properties
+          .iter()
+          .filter_map(|(prop_key, descriptor)| {
+            array_index_from_key(prop_key)
+              .filter(|index| *index >= next_len)
+              .map(|index| (index, prop_key.clone(), descriptor_configurable(descriptor)))
+          })
+          .collect::<Vec<_>>();
+        indexed_properties.sort_unstable_by_key(|(index, _, _)| std::cmp::Reverse(*index));
+        let mut shrink_failed = false;
+        for (index, prop_key, configurable) in indexed_properties {
+          if configurable {
+            data.properties.shift_remove(&prop_key);
+          } else {
+            next_len = index + 1;
+            shrink_failed = true;
+            break;
+          }
+        }
+        drop(data);
         {
           let mut arr_mut = arr.borrow_mut();
           if next_len < arr_mut.len() {
             arr_mut.truncate(next_len);
           }
         }
-        let mut data = props.borrow_mut();
-        let delete_keys: Vec<PropertyKey> = data
-          .properties
-          .keys()
-          .filter(|prop_key| array_index_from_key(prop_key).is_some_and(|idx| idx >= next_len))
-          .cloned()
-          .collect();
-        for prop_key in delete_keys {
-          data.properties.shift_remove(&prop_key);
+        if shrink_failed {
+          props.borrow_mut().properties.insert(
+            key,
+            PropertyDescriptor::Data {
+              value: Value::Number(usize_to_f64(next_len)),
+              writable: desc.writable.unwrap_or(current_writable),
+              enumerable: current_enumerable,
+              configurable: false,
+            },
+          );
+          return Ok(false);
         }
       }
       if next_len > current_len && !current_writable {
@@ -310,6 +334,28 @@ impl Vm {
     if current.is_none() && !data.extensible {
       return Ok(false);
     }
+
+    let array_length_growth = if let Value::Array(_, _) = obj
+      && let Some(index) = array_index_from_key(&key)
+    {
+      let current_len = array_length(&data);
+      if index >= current_len {
+        let length_writable = data
+          .properties
+          .get(&PropertyKey::String("length".into()))
+          .is_none_or(|descriptor| {
+            matches!(descriptor, PropertyDescriptor::Data { writable: true, .. })
+          });
+        if !length_writable {
+          return Ok(false);
+        }
+        Some(index + 1)
+      } else {
+        None
+      }
+    } else {
+      None
+    };
 
     if let Some(ref cur) = current {
       // Non-configurable restrictions.
@@ -407,6 +453,13 @@ impl Vm {
       arr.borrow_mut()[index] = None;
     }
     data.properties.insert(key.clone(), new_desc);
+    if let Some(new_length) = array_length_growth
+      && let Some(PropertyDescriptor::Data { value, .. }) = data
+        .properties
+        .get_mut(&PropertyKey::String("length".into()))
+    {
+      *value = Value::Number(usize_to_f64(new_length));
+    }
     if let Some(index) = array_index_from_key(&key)
       && index < self.execution.active.arguments.mapped_count
       && matches!(

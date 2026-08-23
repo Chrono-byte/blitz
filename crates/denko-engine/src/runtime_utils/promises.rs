@@ -405,7 +405,7 @@ pub(crate) fn shadowrealm_evaluate(
   };
   let session = Parser::parse_source(source)
     .map_err(|e| syntax_error(vm, format!("ShadowRealm evaluate parse: {}", e)))?;
-  let chunk = compiler::compile_oxc(session.program(), source)
+  let chunk = compiler::compile_session(&session)
     .map_err(|e| syntax_error(vm, format!("ShadowRealm evaluate compile: {}", e)))?;
 
   // Run the code inside the ShadowRealm VM and clone the resulting value
@@ -628,8 +628,20 @@ pub(crate) fn dynamic_import_value(
     }
   };
 
-  let base_dir = resolve_shadowrealm_base_dir(vm);
-  let importer_specifier = vm.current_module_specifier().map(str::to_owned);
+  let current_module = vm.current_module_specifier().map(str::to_owned);
+  let (base_dir, importer_specifier) = match current_module {
+    Some(specifier) if std::path::Path::new(&specifier).is_absolute() => {
+      let base = std::path::Path::new(&specifier)
+        .parent()
+        .map_or_else(
+          || resolve_shadowrealm_base_dir(vm),
+          std::path::Path::to_path_buf,
+        );
+      (base, None)
+    }
+    Some(specifier) => (resolve_shadowrealm_base_dir(vm), Some(specifier)),
+    None => (resolve_shadowrealm_base_dir(vm), None),
+  };
   // Keep the parent realm's loader explicit. Its prelinked public roots are
   // the selected compatibility profile, while its private records remain
   // inaccessible to source resolution in the child VM.

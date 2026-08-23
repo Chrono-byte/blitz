@@ -218,7 +218,13 @@ impl Parser {
     for item in body {
       // Treat `import ...` and re-export forms (`export * from`,
       // `export { ... } from`) as module dependencies for the module loader.
-      if let Some(typ) = item.get("type").and_then(|t| t.as_str())
+      let type_only = item
+        .get("importKind")
+        .or_else(|| item.get("exportKind"))
+        .and_then(Value::as_str)
+        == Some("type");
+      if !type_only
+        && let Some(typ) = item.get("type").and_then(|t| t.as_str())
         && (typ == "ImportDeclaration"
           || typ == "ExportAllDeclaration"
           || typ == "ExportNamedDeclaration")
@@ -274,7 +280,13 @@ impl Parser {
 
     let mut imports = Vec::new();
     for item in body {
-      if let Some(typ) = item.get("type").and_then(|t| t.as_str())
+      let type_only = item
+        .get("importKind")
+        .or_else(|| item.get("exportKind"))
+        .and_then(Value::as_str)
+        == Some("type");
+      if !type_only
+        && let Some(typ) = item.get("type").and_then(|t| t.as_str())
         && (typ == "ImportDeclaration"
           || typ == "ExportAllDeclaration"
           || typ == "ExportNamedDeclaration")
@@ -300,5 +312,28 @@ impl ParserSession {
   /// Access the underlying source text
   pub fn source(&self) -> &str {
     self.borrow_source()
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn type_only_imports_are_not_runtime_dependencies() {
+    let source = crate::js!(
+      typescript,
+      r#"
+        import type { Missing } from "./types.ts";
+        export type { AlsoMissing } from "./other-types.ts";
+        import { value, type Shape } from "./runtime.ts";
+      "#
+    );
+
+    let imports =
+      Parser::extract_imports_from_source_with_type(source, SourceType::ts().with_module(true))
+        .expect("extract TypeScript imports");
+
+    assert_eq!(imports, vec!["./runtime.ts"]);
   }
 }

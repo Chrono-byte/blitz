@@ -116,7 +116,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   let uri_error_ctor_val = error_intrinsics.uri_error_constructor;
   let error_proto_val = error_intrinsics.error_prototype;
 
-  let math = builtins::math::create_math_object(&function_proto_map);
+  let math = builtins::math::create_math_object(&object_proto_map, &function_proto_map);
 
   let shadowrealm_ctor_val =
     shadowrealm::build_shadowrealm_constructor(&object_proto_map, &function_proto_map);

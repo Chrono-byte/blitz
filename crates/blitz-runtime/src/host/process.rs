@@ -169,7 +169,7 @@ mod tests {
     "#
     );
     let session = JsParser::parse_source(source).expect("parse host API probe");
-    let chunk = compiler::compile_oxc(session.program(), source).expect("compile host API probe");
+    let chunk = compiler::compile_session(&session).expect("compile host API probe");
     vm.run(chunk).expect("run host API probe");
 
     assert_eq!(

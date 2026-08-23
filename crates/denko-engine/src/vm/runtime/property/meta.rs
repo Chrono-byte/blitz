@@ -268,14 +268,29 @@ impl Vm {
         "Proxy getOwnPropertyDescriptor trap returned an incompatible descriptor",
       ));
     }
-    if !descriptor_configurable(&result_desc)
-      && target_desc
+    if !descriptor_configurable(&result_desc) {
+      if target_desc
         .as_ref()
         .is_none_or(descriptor_configurable)
-    {
-      return Err(self.throw_type_error(
-        "Proxy getOwnPropertyDescriptor trap cannot report a new non-configurable property",
-      ));
+      {
+        return Err(self.throw_type_error(
+          "Proxy getOwnPropertyDescriptor trap cannot report a new non-configurable property",
+        ));
+      }
+      if matches!(
+        result_desc,
+        PropertyDescriptor::Data {
+          writable: false,
+          ..
+        }
+      ) && matches!(
+        target_desc,
+        Some(PropertyDescriptor::Data { writable: true, .. })
+      ) {
+        return Err(self.throw_type_error(
+          "Proxy getOwnPropertyDescriptor trap cannot report a non-writable property for a writable non-configurable target property",
+        ));
+      }
     }
     Ok(Some(result_desc))
   }

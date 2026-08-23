@@ -330,9 +330,7 @@ impl Compiler {
               self.compile_class_declaration_oast(c)?;
               self.emit_get_binding(id.name.as_str());
             } else {
-              return Err(crate::errors::CompilerError::from(
-                "unsupported anonymous export default class declaration",
-              ));
+              self.emit_class_from_oast(c, Some("default"))?;
             }
           }
           oast::ExportDefaultDeclarationKind::TSInterfaceDeclaration(_) => {
@@ -2307,8 +2305,8 @@ impl Compiler {
           upvalue_indices: HashMap::new(),
           captured_upvalues: Vec::new(),
           private_names: self.private_names.clone(),
-          object_expr_had_set_property: false,
           pending_instance_fields: prepared_fields.clone(),
+          emission_error: None,
         };
         inner.add_local_with_mirror("arguments".to_string(), None, false);
         inner.emit(Op::GetGlobal, LINE);
@@ -2619,8 +2617,8 @@ impl Compiler {
       upvalue_indices: HashMap::new(),
       captured_upvalues: Vec::new(),
       private_names: self.private_names.clone(),
-      object_expr_had_set_property: false,
       pending_instance_fields: instance_fields.to_vec(),
+      emission_error: None,
     };
     inner.strict_context = function_is_strict;
     inner.chunk.allow_new_target = inner.allow_new_target;
@@ -2889,8 +2887,8 @@ impl Compiler {
       upvalue_indices: HashMap::new(),
       captured_upvalues: Vec::new(),
       private_names: self.private_names.clone(),
-      object_expr_had_set_property: false,
       pending_instance_fields: Vec::new(),
+      emission_error: None,
     };
     inner.strict_context = function_is_strict;
     inner.chunk.allow_new_target = inner.allow_new_target;

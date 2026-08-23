@@ -30,111 +30,101 @@ pub(super) fn install(
         function_proto_map,
       )),
     );
+  let next = builtin_object(
+    Rc::new(|vm, args| {
+      let this = args.first().cloned().unwrap_or(Value::Undefined);
+      let Value::Object(iter_obj) = this else {
+        return Err(vm.throw_type_error("Array Iterator next called on incompatible receiver"));
+      };
+
+      let (iterated, index, kind) = {
+        let iterator = iter_obj.borrow();
+        let Some(iterated) = iterator
+          .internal_slot("[[IteratedObject]]")
+          .cloned()
+        else {
+          return Err(vm.throw_type_error("Array Iterator next called on incompatible receiver"));
+        };
+        let index = iterator
+          .internal_slot("[[ArrayIteratorNextIndex]]")
+          .cloned()
+          .and_then(|v| match v {
+            Value::Number(n) => Some(n.max(0.0) as usize),
+            _ => None,
+          })
+          .unwrap_or(0);
+        let kind = iterator
+          .internal_slot("[[ArrayIteratorKind]]")
+          .cloned()
+          .unwrap_or(Value::String("value".into()));
+        (iterated, index, kind)
+      };
+
+      let len = vm
+        .get_property_host(&iterated, &PKey::String("length".to_string().into()))
+        .ok()
+        .and_then(|v| match v {
+          Value::Number(n) => Some(n.max(0.0) as usize),
+          _ => None,
+        })
+        .unwrap_or(0);
+
+      let result = Rc::new(RefCell::new(ObjectData::new()));
+      if index >= len {
+        result.borrow_mut().properties.insert(
+          PKey::String("done".to_string().into()),
+          PropertyDescriptor::ordinary_data(Value::Bool(true)),
+        );
+        result.borrow_mut().properties.insert(
+          PKey::String("value".to_string().into()),
+          PropertyDescriptor::ordinary_data(Value::Undefined),
+        );
+      } else {
+        let element = vm.get_property_host(&iterated, &PKey::String(index.to_string().into()))?;
+        let value = match kind {
+          Value::String(ref s) if s == "key" => Value::Number(usize_to_f64(index)),
+          Value::String(ref s) if s == "key+value" => {
+            array_from_values(vec![Value::Number(usize_to_f64(index)), element])
+          }
+          _ => element,
+        };
+        iter_obj.borrow_mut().set_internal_slot(
+          "[[ArrayIteratorNextIndex]]",
+          Value::Number(usize_to_f64(index + 1)),
+        );
+        result.borrow_mut().properties.insert(
+          PKey::String("done".to_string().into()),
+          PropertyDescriptor::ordinary_data(Value::Bool(false)),
+        );
+        result.borrow_mut().properties.insert(
+          PKey::String("value".to_string().into()),
+          PropertyDescriptor::ordinary_data(value),
+        );
+      }
+      Ok(Value::Object(result))
+    }),
+    function_proto_map,
+  );
+  set_builtin_name(&next, "next");
+  set_builtin_length(&next, 0.0);
   array_iterator_proto
     .borrow_mut()
     .properties
     .insert(
       PKey::String("next".to_string().into()),
-      PropertyDescriptor::builtin_data(builtin_object(
-        Rc::new(|vm, args| {
-          let this = args.first().cloned().unwrap_or(Value::Undefined);
-          let iter_obj = match this {
-            Value::Object(obj) => obj,
-            _ => {
-              let result = Rc::new(RefCell::new(ObjectData::new()));
-              result.borrow_mut().properties.insert(
-                PKey::String("done".to_string().into()),
-                PropertyDescriptor::ordinary_data(Value::Bool(true)),
-              );
-              result.borrow_mut().properties.insert(
-                PKey::String("value".to_string().into()),
-                PropertyDescriptor::ordinary_data(Value::Undefined),
-              );
-              return Ok(Value::Object(result));
-            }
-          };
-
-          let iterated = iter_obj
-            .borrow()
-            .properties
-            .get(&PKey::String("[[IteratedObject]]".to_string().into()))
-            .and_then(|d| match d {
-              PropertyDescriptor::Data { value, .. } => Some(value.clone()),
-              _ => None,
-            })
-            .unwrap_or(Value::Undefined);
-          let index = iter_obj
-            .borrow()
-            .properties
-            .get(&PKey::String(
-              "[[ArrayIteratorNextIndex]]".to_string().into(),
-            ))
-            .and_then(|d| match d {
-              PropertyDescriptor::Data { value, .. } => Some(value.clone()),
-              _ => None,
-            })
-            .and_then(|v| match v {
-              Value::Number(n) => Some(n.max(0.0) as usize),
-              _ => None,
-            })
-            .unwrap_or(0);
-
-          let len = vm
-            .get_property_host(&iterated, &PKey::String("length".to_string().into()))
-            .ok()
-            .and_then(|v| match v {
-              Value::Number(n) => Some(n.max(0.0) as usize),
-              _ => None,
-            })
-            .unwrap_or(0);
-
-          let kind = iter_obj
-            .borrow()
-            .properties
-            .get(&PKey::String("[[ArrayIteratorKind]]".to_string().into()))
-            .and_then(|d| match d {
-              PropertyDescriptor::Data { value, .. } => Some(value.clone()),
-              _ => None,
-            })
-            .unwrap_or(Value::String("value".to_string().into()));
-
-          let result = Rc::new(RefCell::new(ObjectData::new()));
-          if index >= len {
-            result.borrow_mut().properties.insert(
-              PKey::String("done".to_string().into()),
-              PropertyDescriptor::ordinary_data(Value::Bool(true)),
-            );
-            result.borrow_mut().properties.insert(
-              PKey::String("value".to_string().into()),
-              PropertyDescriptor::ordinary_data(Value::Undefined),
-            );
-          } else {
-            let element =
-              vm.get_property_host(&iterated, &PKey::String(index.to_string().into()))?;
-            let value = match kind {
-              Value::String(ref s) if s == "key" => Value::Number(usize_to_f64(index)),
-              Value::String(ref s) if s == "key+value" => {
-                array_from_values(vec![Value::Number(usize_to_f64(index)), element])
-              }
-              _ => element,
-            };
-            iter_obj.borrow_mut().properties.insert(
-              PKey::String("[[ArrayIteratorNextIndex]]".to_string().into()),
-              PropertyDescriptor::ordinary_data(Value::Number(usize_to_f64(index + 1))),
-            );
-            result.borrow_mut().properties.insert(
-              PKey::String("done".to_string().into()),
-              PropertyDescriptor::ordinary_data(Value::Bool(false)),
-            );
-            result.borrow_mut().properties.insert(
-              PKey::String("value".to_string().into()),
-              PropertyDescriptor::ordinary_data(value),
-            );
-          }
-          Ok(Value::Object(result))
-        }),
-        function_proto_map,
-      )),
+      PropertyDescriptor::builtin_data(next),
+    );
+  array_iterator_proto
+    .borrow_mut()
+    .properties
+    .insert(
+      PKey::Symbol(SymbolId::well_known_to_string_tag()),
+      PropertyDescriptor::Data {
+        value: Value::String("Array Iterator".into()),
+        writable: false,
+        enumerable: false,
+        configurable: true,
+      },
     );
   let make_array_iterator_builtin = |kind: &'static str| {
     builtin_object(
@@ -145,18 +135,15 @@ pub(super) fn install(
           let iter = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
             Rc::clone(&array_iterator_proto),
           ))));
-          iter.borrow_mut().properties.insert(
-            PKey::String("[[IteratedObject]]".to_string().into()),
-            PropertyDescriptor::ordinary_data(this),
-          );
-          iter.borrow_mut().properties.insert(
-            PKey::String("[[ArrayIteratorNextIndex]]".to_string().into()),
-            PropertyDescriptor::ordinary_data(Value::Number(0.0)),
-          );
-          iter.borrow_mut().properties.insert(
-            PKey::String("[[ArrayIteratorKind]]".to_string().into()),
-            PropertyDescriptor::ordinary_data(Value::String(kind.to_string().into())),
-          );
+          {
+            let mut iterator = iter.borrow_mut();
+            iterator.set_internal_slot("[[IteratedObject]]", this);
+            iterator.set_internal_slot("[[ArrayIteratorNextIndex]]", Value::Number(0.0));
+            iterator.set_internal_slot(
+              "[[ArrayIteratorKind]]",
+              Value::String(kind.to_string().into()),
+            );
+          }
           Ok(Value::Object(iter))
         }
       }),

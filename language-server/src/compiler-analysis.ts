@@ -4,6 +4,8 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { TextDocument } from "vscode-languageserver-textdocument";
 
+export const ANALYSIS_PROTOCOL_VERSION = 1;
+
 export interface CompilerDiagnostic {
   readonly message: string;
   readonly start: number;
@@ -173,7 +175,7 @@ class CompilerProcess {
     return new Promise((resolveResult) => {
       this.#pending.set(id, resolveResult);
       this.#child.stdin.write(
-        `${JSON.stringify({ method: "analyze", id, path, source })}\n`,
+        `${JSON.stringify({ protocol_version: ANALYSIS_PROTOCOL_VERSION, method: "analyze", id, path, source })}\n`,
         (error) => {
           if (error === null || error === undefined) return;
           const resolvePending = this.#pending.get(id);
@@ -185,11 +187,15 @@ class CompilerProcess {
   }
 
   update(path: string, source: string): void {
-    this.#child.stdin.write(`${JSON.stringify({ method: "update", path, source })}\n`);
+    this.#child.stdin.write(
+      `${JSON.stringify({ protocol_version: ANALYSIS_PROTOCOL_VERSION, method: "update", path, source })}\n`,
+    );
   }
 
   close(path: string): void {
-    this.#child.stdin.write(`${JSON.stringify({ method: "close", path })}\n`);
+    this.#child.stdin.write(
+      `${JSON.stringify({ protocol_version: ANALYSIS_PROTOCOL_VERSION, method: "close", path })}\n`,
+    );
   }
 
   stop(): void {
@@ -221,7 +227,11 @@ class CompilerProcess {
       );
       return;
     }
-    if (!isRecord(value) || typeof value.id !== "number") {
+    if (!isRecord(value) || value.protocol_version !== ANALYSIS_PROTOCOL_VERSION) {
+      this.#fail("Unsupported Blitz analysis protocol response");
+      return;
+    }
+    if (typeof value.id !== "number") {
       this.#fail("Invalid Blitz analysis server response");
       return;
     }
@@ -293,7 +303,7 @@ function failedAnalysis(message: string): CompilerAnalysis {
   };
 }
 
-function isCompilerAnalysis(value: unknown): value is CompilerAnalysis {
+export function isCompilerAnalysis(value: unknown): value is CompilerAnalysis {
   return (
     isRecord(value) &&
     Array.isArray(value.diagnostics) &&

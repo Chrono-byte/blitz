@@ -7,7 +7,7 @@ use std::rc::Rc;
 use crate::ecmascript::semantics::{
   builtin_object, number_exponentiate, set_builtin_length, set_builtin_name,
 };
-use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
+use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value};
 
 fn install(
   object: &Rc<RefCell<ObjectData>>,
@@ -87,9 +87,21 @@ fn math_hypot(values: &[f64]) -> f64 {
 
 /// Creates the Math namespace object in the specified property order.
 pub(crate) fn create_math_object(
-  function_prototype: &Rc<RefCell<ObjectData>>
+  object_prototype: &Rc<RefCell<ObjectData>>,
+  function_prototype: &Rc<RefCell<ObjectData>>,
 ) -> Rc<RefCell<ObjectData>> {
-  let object = Rc::new(RefCell::new(ObjectData::new()));
+  let object = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
+    Rc::clone(object_prototype),
+  ))));
+  object.borrow_mut().properties.insert(
+    PropertyKey::Symbol(SymbolId::well_known_to_string_tag()),
+    PropertyDescriptor::Data {
+      value: Value::String("Math".into()),
+      writable: false,
+      enumerable: false,
+      configurable: true,
+    },
+  );
   install(
     &object,
     function_prototype,

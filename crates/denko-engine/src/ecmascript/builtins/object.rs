@@ -7,7 +7,7 @@ use std::rc::Rc;
 
 use crate::ecmascript::semantics::{descriptor_value_from_descriptor, property_key_to_value};
 use crate::runtime_utils::{
-  array_from_values, builtin_object, collect_iterable_values, set_builtin_length,
+  array_from_values, builtin_object, collect_iterable_values, set_builtin_length, set_builtin_name,
   static_builtin_arg_offset, to_length, usize_to_f64,
 };
 use crate::value::{
@@ -80,13 +80,17 @@ pub(crate) fn install_object_intrinsics(
       if let Value::String(tag) = tag {
         return Ok(Value::String(format!("[object {tag}]").into()));
       }
-      if let Value::Object(obj) = &this
-        && obj
-          .borrow()
-          .internal_slot("[[BooleanData]]")
+      if let Value::Object(obj) = &this {
+        let object = obj.borrow();
+        if object
+          .internal_slot("[[ArgumentsData]]")
           .is_some()
-      {
-        return Ok(Value::String("[object Boolean]".into()));
+        {
+          return Ok(Value::String("[object Arguments]".into()));
+        }
+        if object.internal_slot("[[BooleanData]]").is_some() {
+          return Ok(Value::String("[object Boolean]".into()));
+        }
       }
       if let Value::Object(obj) = &this
         && obj
@@ -96,15 +100,21 @@ pub(crate) fn install_object_intrinsics(
       {
         return Ok(Value::String("[object Symbol]".into()));
       }
-      if let Value::Object(obj) = &this
-        && let Some(PropertyDescriptor::Data { value, .. }) = obj
-          .borrow()
+      if let Value::Object(obj) = &this {
+        let object = obj.borrow();
+        if let Some(value) = object.internal_slot("[[PrimitiveValue]]") {
+          return Ok(Value::String(
+            format!("[object {}]", value.object_tag()).into(),
+          ));
+        }
+        if let Some(PropertyDescriptor::Data { value, .. }) = object
           .properties
           .get(&PKey::String("[[PrimitiveValue]]".to_string().into()))
-      {
-        return Ok(Value::String(
-          format!("[object {}]", value.object_tag()).into(),
-        ));
+        {
+          return Ok(Value::String(
+            format!("[object {}]", value.object_tag()).into(),
+          ));
+        }
       }
       Ok(Value::String(
         format!("[object {}]", this.object_tag()).into(),
@@ -625,6 +635,7 @@ pub(crate) fn install_object_intrinsics(
           Rc::new(|vm, args| {
             let off = static_builtin_arg_offset(vm, args, "Object");
             let target = args.get(off).cloned().unwrap_or(Value::Undefined);
+            let target = vm.to_object_value(target)?;
             let keys = vm
               .own_enumerable_keys_value(&target)?
               .into_iter()
@@ -632,11 +643,13 @@ pub(crate) fn install_object_intrinsics(
                 PropertyKey::String(s) => Some(Value::String(s)),
                 _ => None,
               })
-              .collect::<Vec<_>>();
-            Ok(array_from_values(keys))
+              .map(Some)
+              .collect();
+            Ok(vm.new_array(keys))
           }),
           function_prototype,
         );
+        set_builtin_name(&builtin, "keys");
         set_builtin_length(&builtin, 1.0);
         builtin
       }),
@@ -651,15 +664,17 @@ pub(crate) fn install_object_intrinsics(
           Rc::new(|vm, args| {
             let off = static_builtin_arg_offset(vm, args, "Object");
             let target = args.get(off).cloned().unwrap_or(Value::Undefined);
+            let target = vm.to_object_value(target)?;
             let values = vm
               .own_enumerable_keys_value(&target)?
               .into_iter()
               .map(|key| vm.get_property_host(&target, &key))
               .collect::<Result<Vec<_>, _>>()?;
-            Ok(array_from_values(values))
+            Ok(vm.new_array(values.into_iter().map(Some).collect()))
           }),
           function_prototype,
         );
+        set_builtin_name(&builtin, "values");
         set_builtin_length(&builtin, 1.0);
         builtin
       }),
@@ -674,19 +689,21 @@ pub(crate) fn install_object_intrinsics(
           Rc::new(|vm, args| {
             let off = static_builtin_arg_offset(vm, args, "Object");
             let target = args.get(off).cloned().unwrap_or(Value::Undefined);
+            let target = vm.to_object_value(target)?;
             let entries = vm
               .own_enumerable_keys_value(&target)?
               .into_iter()
               .map(|key| {
                 let key_val = property_key_to_value(&key);
                 let val = vm.get_property_host(&target, &key)?;
-                Ok(array_from_values(vec![key_val, val]))
+                Ok(vm.new_array(vec![Some(key_val), Some(val)]))
               })
               .collect::<Result<Vec<_>, RuntimeError>>()?;
-            Ok(array_from_values(entries))
+            Ok(vm.new_array(entries.into_iter().map(Some).collect()))
           }),
           function_prototype,
         );
+        set_builtin_name(&builtin, "entries");
         set_builtin_length(&builtin, 1.0);
         builtin
       }),
@@ -744,10 +761,17 @@ pub(crate) fn install_object_intrinsics(
             return Err(vm.throw_type_error("Object.defineProperties called on non-object"));
           }
           for key in vm.own_property_keys_value(&props)? {
-            let descriptor = vm.get_property_host(&props, &key)?;
-            if matches!(descriptor, Value::Undefined) {
+            let Some(property) = vm.get_own_property_value(&props, &key)? else {
+              continue;
+            };
+            let enumerable = match property {
+              PropertyDescriptor::Data { enumerable, .. }
+              | PropertyDescriptor::Accessor { enumerable, .. } => enumerable,
+            };
+            if !enumerable {
               continue;
             }
+            let descriptor = vm.get_property_host(&props, &key)?;
             let key_value = property_key_to_value(&key);
             let ok = vm.define_property_value(&target, &key_value, &descriptor)?;
             if !ok {

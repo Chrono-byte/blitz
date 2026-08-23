@@ -21,8 +21,7 @@ impl Vm {
     };
     let session = crate::parser::Parser::parse_source(&wrapped)
       .map_err(|e| RuntimeError::from(format!("parse: {}", e)))?;
-    let prog = session.program();
-    let chunk = crate::compiler::compile_oxc_repl(prog, &wrapped)
+    let chunk = crate::compiler::compile_repl_session(&session)
       .map_err(|e| RuntimeError::from(format!("compile: {}", e)))?;
     let mut child = self.fork_execution();
     child.adopt_eval_context(self);
@@ -60,8 +59,7 @@ impl Vm {
     };
     let session = crate::parser::Parser::parse_source(&wrapped)
       .map_err(|e| RuntimeError::from(format!("parse: {}", e)))?;
-    let prog = session.program();
-    let chunk = crate::compiler::compile_oxc_repl(prog, &wrapped)
+    let chunk = crate::compiler::compile_repl_session(&session)
       .map_err(|e| RuntimeError::from(format!("compile: {}", e)))?;
     match self.run_nested(chunk, true) {
       Ok(value) => Ok(value),

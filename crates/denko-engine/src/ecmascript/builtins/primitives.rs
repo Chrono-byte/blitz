@@ -718,8 +718,7 @@ mod tests {
 
   fn run(source: &str) -> crate::Vm {
     let session = Parser::parse_source(source).expect("parse numeric primitive test");
-    let chunk = compiler::compile_oxc(session.program(), session.source())
-      .expect("compile numeric primitive test");
+    let chunk = compiler::compile_session(&session).expect("compile numeric primitive test");
     let globals = Rc::new(RefCell::new(ObjectData::new()));
     globals.borrow_mut().properties.insert(
       PropertyKey::String("globalThis".into()),

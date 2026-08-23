@@ -145,6 +145,16 @@ impl super::Compiler {
       }
     };
 
+    let callee_nullish = if c.optional {
+      self.emit(Op::Copy, LINE);
+      self.emit(Op::JumpIfNullish, LINE);
+      let patch = self.current_ip();
+      self.emit_jump_placeholder();
+      Some(patch)
+    } else {
+      None
+    };
+
     let mut spread_flags = Vec::with_capacity(c.arguments.len());
     for arg in &c.arguments {
       match arg {
@@ -187,6 +197,17 @@ impl super::Compiler {
     self.emit_byte(arg_count, LINE);
     self.emit(Op::Spread, LINE);
     self.emit_byte(arg_count, LINE);
+
+    if let Some(callee_nullish) = callee_nullish {
+      self.emit(Op::Jump, LINE);
+      let end = self.current_ip();
+      self.emit_jump_placeholder();
+      self.patch_jump(callee_nullish);
+      self.emit(Op::Discard, LINE);
+      self.emit(Op::Undefined, LINE);
+      self.patch_jump(end);
+    }
+
     Ok(true)
   }
 

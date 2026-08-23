@@ -162,6 +162,9 @@ impl Vm {
   ) -> Value {
     let obj_rc: Rc<RefCell<ObjectData>> =
       gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
+    obj_rc
+      .borrow_mut()
+      .set_internal_slot("[[ArgumentsData]]", Value::Bool(true));
     let arg_count = args_for_arguments.len();
     let mapped_count = proto
       .arity

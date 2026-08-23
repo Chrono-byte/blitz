@@ -45,8 +45,7 @@ fn builtin_eval_script(
   let chunk = crate::typecheck::with_strict_override(None, || {
     let src = src.as_str_lossy();
     let session = Parser::parse_source(src).map_err(|e| format!("evalScript parse: {}", e))?;
-    let prog = session.program();
-    compiler::compile_oxc(prog, src).map_err(|e| format!("evalScript compile: {}", e))
+    compiler::compile_session(&session).map_err(|e| format!("evalScript compile: {}", e))
   })?;
   let mut eval_vm = Vm::new(Rc::clone(globals));
   eval_vm

@@ -461,12 +461,19 @@ impl Vm {
           Op::GetModuleExport => {
             let (module_index, name) =
               self.module_export_descriptor(decode_risc_aux16(word) as usize)?;
-            registers[rd] = self
+            let value = self
               .modules
               .table
               .get(module_index)
               .and_then(|module| module.get(&name).cloned())
               .map_or(Value::Undefined, |slot| slot.borrow().clone());
+            if matches!(value, Value::Uninitialized) {
+              return Err(
+                self
+                  .throw_reference_error(&format!("Cannot access '{name}' before initialization")),
+              );
+            }
+            registers[rd] = value;
           }
           Op::SetModuleExport => {
             let (module_index, name) =
@@ -671,7 +678,15 @@ impl Vm {
             registers[rd] = value;
           }
           Op::DeleteProperty => {
-            let object = registers[rd].clone();
+            let base = registers[rd].clone();
+            if matches!(base, Value::Undefined | Value::Null) {
+              return Err(self.throw_type_error("Cannot delete property of null or undefined"));
+            }
+            let object = if base.is_object() {
+              base
+            } else {
+              self.to_object_value(base)?
+            };
             let key = self.to_property_key(&registers[rs])?;
             let deleted = self.delete_property_host(&object, &key)?;
             if !deleted && self.is_strict_mode() {
@@ -681,6 +696,9 @@ impl Vm {
           }
           Op::HasProperty => {
             let object = registers[rd].clone();
+            if !object.is_object() {
+              return Err(self.throw_type_error("Right-hand side of 'in' is not an object"));
+            }
             let key = self.to_property_key(&registers[rs])?;
             registers[rd] = Value::Bool(self.has_property_host(&object, &key)?);
           }

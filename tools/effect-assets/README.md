@@ -36,7 +36,9 @@ pnpm test
 
 `verify` checks both manifests, SHA-256 hashes, canonical import closure,
 visibility and ABI metadata, pinned package integrity, and byte-for-byte
-deterministic regeneration.
+deterministic regeneration. It also regenerates the final bundle with the
+committed bundle temporarily absent, which proves a clean checkout can rebuild
+the artifact without executing it first.
 
 The generated graph includes Effect's static runtime dependencies required by
 the root export (currently `fast-check` and its static dependencies). Optional

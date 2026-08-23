@@ -10,8 +10,8 @@ on:
       - "crates/**"
       - "examples/**"
       - "test262/harness/**"
+      - "language-server/**"
       - "tools/effect-assets/**"
-      - "tools/effect-bytecode/**"
       - ".forgejo/workflows/test.yml"
   pull_request:
     paths:
@@ -20,8 +20,8 @@ on:
       - "crates/**"
       - "examples/**"
       - "test262/harness/**"
+      - "language-server/**"
       - "tools/effect-assets/**"
-      - "tools/effect-bytecode/**"
       - ".forgejo/workflows/test.yml"
   workflow_dispatch:
 
@@ -42,3 +42,43 @@ jobs:
 
       - name: Test Rust workspace
         run: cargo test --workspace --locked
+
+  tooling:
+    name: Language server and Effect assets
+    runs-on: ci
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: https://data.forgejo.org/actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+
+      - name: Install Rust toolchain
+        uses: https://github.com/dtolnay/rust-toolchain@1.97.0
+
+      - name: Install Bun
+        uses: https://github.com/oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Install Node.js
+        uses: https://github.com/actions/setup-node@v4
+        with:
+          node-version: 24.18.0
+
+      - name: Install pnpm
+        run: npm install --global pnpm@11.15.0
+
+      - name: Install language server dependencies
+        working-directory: language-server
+        run: bun install --frozen-lockfile
+
+      - name: Check and test language server
+        working-directory: language-server
+        run: bun run check && bun run lint && bun run fmt:check && bun run test
+
+      - name: Install Effect asset dependencies
+        working-directory: tools/effect-assets
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify, typecheck, and test Effect assets
+        working-directory: tools/effect-assets
+        run: pnpm run verify && pnpm run typecheck && pnpm run test

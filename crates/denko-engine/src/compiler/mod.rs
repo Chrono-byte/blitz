@@ -25,6 +25,7 @@
 //! - Constant folding
 
 use crate::bytecode::Chunk;
+use crate::parser::ParserSession;
 use crate::value::Value;
 use emit::FrontendOp as Op;
 use oxc_ast::ast as oast;
@@ -65,12 +66,28 @@ pub fn compile(
   c.compile_oxc(program, None)
 }
 
+/// Compile a parser session to bytecode.
+///
+/// The session owns both the AST and its backing source text, so callers
+/// cannot accidentally compile an AST with unrelated source metadata.
+pub fn compile_session(session: &ParserSession) -> Result<Chunk, crate::errors::CompilerError> {
+  compile_oxc(session.program(), session.source())
+}
+
+/// Compile a parser session with module-linking metadata.
+pub fn compile_session_with_context(
+  session: &ParserSession,
+  context: &ModuleContext,
+) -> Result<Chunk, crate::errors::CompilerError> {
+  compile_oxc_with_ctx(session.program(), Some(context), session.source())
+}
+
 /// Compile an oxc AST Program.
 ///
 /// # Errors
 ///
 /// Returns an error if compilation fails.
-pub fn compile_oxc(
+pub(crate) fn compile_oxc(
   program: &oast::Program<'_>,
   source: &str,
 ) -> Result<Chunk, crate::errors::CompilerError> {
@@ -84,7 +101,7 @@ pub fn compile_oxc(
 /// # Errors
 ///
 /// Returns an error if compilation fails.
-pub fn compile_oxc_with_ctx(
+pub(crate) fn compile_oxc_with_ctx(
   program: &oast::Program<'_>,
   ctx: Option<&ModuleContext>,
   source: &str,
@@ -101,13 +118,22 @@ pub fn compile_oxc_with_ctx(
 /// # Errors
 ///
 /// Returns an error if compilation fails.
-pub fn compile_oxc_repl(
+pub(crate) fn compile_oxc_repl(
   program: &oast::Program<'_>,
   source: &str,
 ) -> Result<Chunk, crate::errors::CompilerError> {
   let source_text = Arc::new(source.to_string());
   let mut c = Compiler::new(source_text);
   c.compile_oxc_with_mode(program, None, true)
+}
+
+/// Compile a parser session in persistent REPL mode.
+///
+/// The final expression remains on the stack as the submission result.
+pub fn compile_repl_session(
+  session: &ParserSession
+) -> Result<Chunk, crate::errors::CompilerError> {
+  compile_oxc_repl(session.program(), session.source())
 }
 
 impl Compiler {
@@ -450,7 +476,7 @@ impl Compiler {
   ///
   /// # Errors
   /// Returns a `CompilerError` if compilation fails.
-  pub fn compile_oxc(
+  pub(crate) fn compile_oxc(
     &mut self,
     program: &oast::Program<'_>,
     ctx: Option<&ModuleContext>,
@@ -464,7 +490,7 @@ impl Compiler {
   ///
   /// # Errors
   /// Returns a `CompilerError` if compilation fails.
-  pub fn compile_oxc_with_mode(
+  pub(crate) fn compile_oxc_with_mode(
     &mut self,
     program: &oast::Program<'_>,
     ctx: Option<&ModuleContext>,
@@ -513,6 +539,10 @@ impl Compiler {
       self.compile_statement_oast_with_mode(stmt, is_last_expr_stmt, None)?;
     }
 
+    if let Some(error) = self.emission_error.take() {
+      return Err(error);
+    }
+
     self.emit(Op::Return, LINE);
     if self.is_root {
       self.chunk.root_slot_types = self.local_types.clone();
@@ -554,6 +584,35 @@ mod test {
       }
     }
     ops
+  }
+
+  #[test]
+  fn compile_session_uses_its_own_source_text() {
+    let source = crate::js!("let answer = 42;");
+    let session = crate::parser::Parser::parse_source(source).expect("parse");
+
+    let chunk = super::compile_session(&session).expect("compile session");
+
+    assert_eq!(chunk.source_text.as_str(), source);
+  }
+
+  #[test]
+  fn anonymous_default_class_compiles_as_a_named_default_export() {
+    let source = crate::js!("export default class {}");
+    let session =
+      crate::parser::Parser::parse_source_with_type(source, oxc_span::SourceType::mjs())
+        .expect("parse module");
+    let context = ModuleContext {
+      module_index: 0,
+      imports: HashMap::new(),
+      exports: HashSet::from(["default".to_string()]),
+      namespace_exports: HashMap::new(),
+    };
+
+    let chunk = super::compile_session_with_context(&session, &context)
+      .expect("compile anonymous default class");
+
+    assert!(!chunk.code.is_empty());
   }
 
   #[test]
@@ -1150,7 +1209,7 @@ mod test {
 
   #[test]
   fn object_literal_evaluates_mixed_properties_in_source_order() {
-    let vm = run_compiled(
+    let vm = run_compiled(crate::js!(
       r#"
         let order = "";
         function mark(label, value) { order += label; return value; }
@@ -1165,8 +1224,8 @@ mod test {
         globalThis.object_order = order;
         globalThis.object_result = result.first + result.computed + result.copied + result.last;
         globalThis.object_accessor = Object.getOwnPropertyDescriptor(result, "accessor").get !== undefined;
-      "#,
-    );
+      "#
+    ));
 
     assert_eq!(
       vm.get_global("object_order"),
@@ -1178,15 +1237,15 @@ mod test {
 
   #[test]
   fn template_interpolations_use_to_string_and_unary_plus_rejects_bigint() {
-    let vm = run_compiled(
+    let vm = run_compiled(crate::js!(
       r#"
         const template_result = `${1n}:${true}:${null}:${undefined}`;
         let unary_plus_threw = false;
         try { +1n; } catch (error) { unary_plus_threw = error instanceof TypeError; }
         globalThis.template_result = template_result;
         globalThis.unary_plus_threw = unary_plus_threw;
-      "#,
-    );
+      "#
+    ));
 
     assert_eq!(
       vm.get_global("template_result"),
@@ -1197,7 +1256,7 @@ mod test {
 
   #[test]
   fn optional_calls_return_undefined_and_call_present_values() {
-    let vm = run_compiled(
+    let vm = run_compiled(crate::js!(
       r#"
         let calls = 0;
         function present() { calls += 1; return 7; }
@@ -1206,22 +1265,67 @@ mod test {
         const missing = absent?.();
         const receiver = { value: 9, method() { return this.value; } };
         const member = receiver?.method();
+        const missingMember = receiver?.missing?.();
+        const missingComputed = receiver?.["missing"]?.();
         globalThis.optional_direct = direct;
         globalThis.optional_missing = missing;
         globalThis.optional_member = member;
+        globalThis.optional_missing_member = missingMember;
+        globalThis.optional_missing_computed = missingComputed;
         globalThis.optional_calls = calls;
-      "#,
-    );
+      "#
+    ));
 
     assert_eq!(vm.get_global("optional_direct"), Some(Value::Number(7.0)));
     assert_eq!(vm.get_global("optional_missing"), Some(Value::Undefined));
     assert_eq!(vm.get_global("optional_member"), Some(Value::Number(9.0)));
+    assert_eq!(
+      vm.get_global("optional_missing_member"),
+      Some(Value::Undefined)
+    );
+    assert_eq!(
+      vm.get_global("optional_missing_computed"),
+      Some(Value::Undefined)
+    );
     assert_eq!(vm.get_global("optional_calls"), Some(Value::Number(1.0)));
   }
 
   #[test]
+  fn optional_spread_calls_expand_arguments_after_nullish_check() {
+    let vm = run_compiled(crate::js!(
+      r#"
+        let evaluated = 0;
+        function args() { evaluated += 1; return [10, 20, 40]; }
+        function sum(a, b, c) { return a + b + c; }
+        let absent;
+        globalThis.optional_spread_sum = sum?.(...args());
+        globalThis.optional_spread_missing = absent?.(...args());
+        globalThis.optional_spread_evaluated = evaluated;
+        globalThis.named_function_expression = (function named() {}?.name);
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("optional_spread_sum"),
+      Some(Value::Number(70.0))
+    );
+    assert_eq!(
+      vm.get_global("optional_spread_missing"),
+      Some(Value::Undefined)
+    );
+    assert_eq!(
+      vm.get_global("optional_spread_evaluated"),
+      Some(Value::Number(1.0))
+    );
+    assert_eq!(
+      vm.get_global("named_function_expression"),
+      Some(Value::String("named".into()))
+    );
+  }
+
+  #[test]
   fn lexical_scopes_parameters_and_compiler_temporaries_are_not_leaked() {
-    let vm = run_compiled(
+    let vm = run_compiled(crate::js!(
       r#"
         let outer = 1;
         let block_tdz = false;
@@ -1242,11 +1346,13 @@ mod test {
         globalThis.block_tdz = block_tdz;
         globalThis.block_scope = blockScope();
         globalThis.loop_scope = typeof loopName;
+        var __user_binding = Array.isArray;
         globalThis.temporary_scope = typeof __switch_discriminant_0;
+        globalThis.double_underscore_binding = __user_binding([]);
         globalThis.parameter_scope = parameterScope();
         globalThis.later_parameter_tdz = laterParameterTdz;
-      "#,
-    );
+      "#
+    ));
 
     assert_eq!(vm.get_global("block_tdz"), Some(Value::Bool(true)));
     assert_eq!(
@@ -1261,6 +1367,10 @@ mod test {
       vm.get_global("temporary_scope"),
       Some(Value::String("undefined".into()))
     );
+    assert_eq!(
+      vm.get_global("double_underscore_binding"),
+      Some(Value::Bool(true))
+    );
     assert_eq!(vm.get_global("parameter_scope"), Some(Value::Number(42.0)));
     assert_eq!(
       vm.get_global("later_parameter_tdz"),
@@ -1271,8 +1381,8 @@ mod test {
   #[test]
   fn strict_early_errors_cover_generator_parameters_and_catch_bindings() {
     for source in [
-      r#"function* invalid(value = 1) { "use strict"; }"#,
-      r#""use strict"; try { throw 1; } catch (eval) {}"#,
+      crate::js!(r#"function* invalid(value = 1) { "use strict"; }"#),
+      crate::js!(r#""use strict"; try { throw 1; } catch (eval) {}"#),
     ] {
       let session = crate::parser::Parser::parse_source(source).expect("parse ok");
       assert!(

@@ -505,8 +505,8 @@ impl super::Compiler {
         self.emit_byte(self.function_index_to_u8(idx)?, LINE);
       }
       OExpr::FunctionExpression(f) => {
-        let name = "<anonymous>";
         let self_name = f.id.as_ref().map(|id| id.name.as_str());
+        let name = self_name.unwrap_or("<anonymous>");
         let (proto, _env_len) = self.compile_function(name, self_name, f, None, false)?;
         let idx = self.chunk.add_function(proto);
         self.emit(Op::MakeClosure, LINE);
@@ -1354,8 +1354,13 @@ impl super::Compiler {
           return Ok(());
         }
         if matches!(b.operator, oast::BinaryOperator::In) {
-          self.compile_expr_oast(&b.right)?;
           self.compile_expr_oast(&b.left)?;
+          let key_slot = self.alloc_reusable_temp_local("in_property_key");
+          self.emit(Op::StoreLocal, LINE);
+          self.emit_byte(self.slot_to_u8(key_slot)?, LINE);
+          self.compile_expr_oast(&b.right)?;
+          self.emit(Op::LoadLocal, LINE);
+          self.emit_byte(self.slot_to_u8(key_slot)?, LINE);
           self.emit(Op::HasProperty, LINE);
           return Ok(());
         }
@@ -1637,6 +1642,10 @@ impl super::Compiler {
             }
           }
           CE::CallExpression(c) => {
+            if self.compile_spread_call_tail(c)? {
+              return Ok(());
+            }
+
             if let OExpr::StaticMemberExpression(m) = &c.callee
               && matches!(&m.object, OExpr::Super(_))
             {
@@ -1715,20 +1724,44 @@ impl super::Compiler {
               self.compile_expr_oast(&m.object)?;
               self.emit(Op::Copy, LINE);
               self.emit(Op::JumpIfNullish, LINE);
-              let nullish = self.current_ip();
+              let object_nullish = self.current_ip();
               self.emit_jump_placeholder();
               self.emit(Op::Copy, LINE);
               self.emit_constant(Value::String(m.property.name.to_string().into()), LINE);
               self.emit(Op::GetProperty, LINE);
+              let callee_nullish = if c.optional {
+                self.emit(Op::Copy, LINE);
+                self.emit(Op::JumpIfNullish, LINE);
+                let patch = self.current_ip();
+                self.emit_jump_placeholder();
+                Some(patch)
+              } else {
+                None
+              };
               let arg_count = self.compile_call_arguments(&c.arguments)?;
               self.emit_call_with_arg_count(Op::CallBuiltin, arg_count)?;
               self.emit(Op::Jump, LINE);
-              let end = self.current_ip();
+              let normal_end = self.current_ip();
               self.emit_jump_placeholder();
-              self.patch_jump(nullish);
+              let callee_end = if let Some(callee_nullish) = callee_nullish {
+                self.patch_jump(callee_nullish);
+                self.emit(Op::Discard, LINE);
+                self.emit(Op::Discard, LINE);
+                self.emit(Op::Undefined, LINE);
+                self.emit(Op::Jump, LINE);
+                let patch = self.current_ip();
+                self.emit_jump_placeholder();
+                Some(patch)
+              } else {
+                None
+              };
+              self.patch_jump(object_nullish);
               self.emit(Op::Discard, LINE);
               self.emit(Op::Undefined, LINE);
-              self.patch_jump(end);
+              self.patch_jump(normal_end);
+              if let Some(callee_end) = callee_end {
+                self.patch_jump(callee_end);
+              }
               return Ok(());
             }
             if let OExpr::ComputedMemberExpression(m) = &c.callee
@@ -1738,20 +1771,44 @@ impl super::Compiler {
               self.compile_expr_oast(&m.object)?;
               self.emit(Op::Copy, LINE);
               self.emit(Op::JumpIfNullish, LINE);
-              let nullish = self.current_ip();
+              let object_nullish = self.current_ip();
               self.emit_jump_placeholder();
               self.emit(Op::Copy, LINE);
               self.compile_expr_oast(&m.expression)?;
               self.emit(Op::GetProperty, LINE);
+              let callee_nullish = if c.optional {
+                self.emit(Op::Copy, LINE);
+                self.emit(Op::JumpIfNullish, LINE);
+                let patch = self.current_ip();
+                self.emit_jump_placeholder();
+                Some(patch)
+              } else {
+                None
+              };
               let arg_count = self.compile_call_arguments(&c.arguments)?;
               self.emit_call_with_arg_count(Op::CallBuiltin, arg_count)?;
               self.emit(Op::Jump, LINE);
-              let end = self.current_ip();
+              let normal_end = self.current_ip();
               self.emit_jump_placeholder();
-              self.patch_jump(nullish);
+              let callee_end = if let Some(callee_nullish) = callee_nullish {
+                self.patch_jump(callee_nullish);
+                self.emit(Op::Discard, LINE);
+                self.emit(Op::Discard, LINE);
+                self.emit(Op::Undefined, LINE);
+                self.emit(Op::Jump, LINE);
+                let patch = self.current_ip();
+                self.emit_jump_placeholder();
+                Some(patch)
+              } else {
+                None
+              };
+              self.patch_jump(object_nullish);
               self.emit(Op::Discard, LINE);
               self.emit(Op::Undefined, LINE);
-              self.patch_jump(end);
+              self.patch_jump(normal_end);
+              if let Some(callee_end) = callee_end {
+                self.patch_jump(callee_end);
+              }
               return Ok(());
             }
             let is_optional_call = c.optional;

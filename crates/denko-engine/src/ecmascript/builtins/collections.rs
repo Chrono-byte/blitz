@@ -586,6 +586,21 @@ pub(crate) fn install_map_set_constructors(
     PKey::String("constructor".to_string().into()),
     PropertyDescriptor::builtin_data(map_ctor_val.clone()),
   );
+  let map_species = method(
+    Rc::new(|_vm, args| Ok(args.first().cloned().unwrap_or(Value::Undefined))),
+    function_proto_map,
+    "get [Symbol.species]",
+    0.0,
+  );
+  map_ctor.borrow_mut().properties.insert(
+    PKey::Symbol(SymbolId::well_known_species()),
+    PropertyDescriptor::Accessor {
+      get: Some(map_species),
+      set: None,
+      enumerable: false,
+      configurable: true,
+    },
+  );
 
   let map_group_by_proto = Rc::clone(&map_proto);
   let map_group_by_data = map_data_key;
@@ -1378,6 +1393,21 @@ pub(crate) fn install_map_set_constructors(
   set_proto.borrow_mut().properties.insert(
     PKey::String("constructor".to_string().into()),
     PropertyDescriptor::builtin_data(set_ctor_val.clone()),
+  );
+  let set_species = method(
+    Rc::new(|_vm, args| Ok(args.first().cloned().unwrap_or(Value::Undefined))),
+    function_proto_map,
+    "get [Symbol.species]",
+    0.0,
+  );
+  set_ctor.borrow_mut().properties.insert(
+    PKey::Symbol(SymbolId::well_known_species()),
+    PropertyDescriptor::Accessor {
+      get: Some(set_species),
+      set: None,
+      enumerable: false,
+      configurable: true,
+    },
   );
 
   let set_data = set_data_key;

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use crate::args::ExecutionArgs;
+#[cfg(test)]
 use denko::compiler;
 use denko::parser::Parser as JsParser;
 use denko::test262_support;
@@ -16,7 +17,7 @@ use std::time::{Duration, Instant};
 pub(crate) fn run(
   execution: ExecutionArgs,
   node_compat: blitz_runtime::host::NodeCompatProfile,
-) -> Result<(), denko::errors::Error> {
+) -> Result<i32, denko::errors::Error> {
   let async_done_state: Rc<RefCell<Option<test262_support::AsyncCompletion>>> =
     Rc::new(RefCell::new(None));
   let globals = if execution.test262_harness {
@@ -45,32 +46,29 @@ pub(crate) fn run(
     let script_name = target.to_string_lossy();
     if let Some(commands) = project.package_script(&script_name) {
       run_package_script(&project, &commands, &execution.args, &runtime_options.env)?;
-      return Ok(());
+      return Ok(0);
     }
     if execution.if_present && !target.is_file() {
-      return Ok(());
+      return Ok(0);
     }
   }
 
   if let Some(source) = execution.eval {
-    let mut vm = Vm::new(globals);
-    let mut runtime = blitz_runtime::host::install_runtime(&mut vm, runtime_options);
-    blitz_runtime::modules::evaluate_preloads(&mut vm, &execution.preloads)?;
-    let value = evaluate_inline(&mut vm, &source)?;
+    let mut session = blitz_runtime::session::HostedSession::with_globals(globals, runtime_options);
+    session.preload(&execution.preloads)?;
+    let value = session.evaluate_repl(&source)?;
     if execution.print {
       print_completion(&value);
     }
-    runtime.run(&mut vm)?;
-    return Ok(());
+    return Ok(session.run()?.code);
   }
 
   let Some(path) = execution.file else {
-    return blitz_runtime::repl::run(runtime_options, &execution.preloads);
+    return crate::repl::run(runtime_options, &execution.preloads);
   };
 
-  let mut vm = Vm::new(globals);
-  let mut runtime = blitz_runtime::host::install_runtime(&mut vm, runtime_options);
-  blitz_runtime::modules::evaluate_preloads(&mut vm, &execution.preloads)?;
+  let mut session = blitz_runtime::session::HostedSession::with_globals(globals, runtime_options);
+  session.preload(&execution.preloads)?;
 
   let source = std::fs::read_to_string(&path).map_err(|error| {
     denko::errors::RuntimeError::from(format!("Failed to read {}: {error}", path.display()))
@@ -85,19 +83,15 @@ pub(crate) fn run(
     .as_ref()
     .and_then(|package| package.package_type);
   if should_load_as_module(&path, &source, execution.module, package_type) {
-    blitz_runtime::modules::evaluate_entry(&mut vm, &path)?;
+    session.evaluate_module(&path)?;
   } else {
-    let source_type = JsParser::source_type_for_path(&path, false);
-    let session = JsParser::parse_source_with_type(&source, source_type)?;
-    let chunk = compiler::compile_oxc(session.program(), &source)?;
-    vm.run(chunk)?;
+    session.evaluate_script(&source, &path)?;
 
-    if execution.test262_harness && vm.get_global("$DONE").is_some() {
-      wait_for_test262_completion(&mut vm, &async_done_state)?;
+    if execution.test262_harness && session.vm_mut().get_global("$DONE").is_some() {
+      wait_for_test262_completion(session.vm_mut(), &async_done_state)?;
     }
   }
-  runtime.run(&mut vm)?;
-  Ok(())
+  Ok(session.run()?.code)
 }
 
 fn run_package_script(
@@ -335,14 +329,15 @@ fn print_completion(value: &Value) {
   }
 }
 
+#[cfg(test)]
 fn evaluate_inline(
   vm: &mut Vm,
   source: &str,
 ) -> Result<Value, denko::errors::Error> {
   let source_type = JsParser::source_type_for_path(Path::new("[eval].ts"), false);
   let session = JsParser::parse_source_with_type(source, source_type)?;
-  let chunk = compiler::compile_oxc_repl(session.program(), source)?;
-  vm.run(chunk).map_err(denko::errors::Error::from)
+  let chunk = compiler::compile_repl_session(&session)?;
+  vm.run(chunk).map_err(Into::into)
 }
 
 fn should_load_as_module(
@@ -507,7 +502,7 @@ mod tests {
     let mut vm = Vm::new(standard_globals());
     let source = denko::js!("var answer = 1 + 2; answer;");
     let session = JsParser::parse_source(source).expect("parse");
-    let chunk = compiler::compile_oxc(session.program(), source).expect("compile");
+    let chunk = compiler::compile_session(&session).expect("compile");
     vm.run(chunk).expect("run");
 
     assert!(
@@ -545,7 +540,7 @@ mod tests {
       JsParser::source_type_for_path(Path::new("answer.ts"), false),
     )
     .expect("parse TypeScript");
-    let chunk = compiler::compile_oxc(session.program(), source).expect("compile TypeScript");
+    let chunk = compiler::compile_session(&session).expect("compile TypeScript");
     let mut vm = Vm::new(standard_globals());
 
     vm.run(chunk).expect("run TypeScript");

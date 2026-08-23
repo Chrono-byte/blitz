@@ -44,7 +44,7 @@ pub struct ModuleContext {
 }
 
 /// Compiles AST to bytecode
-pub struct Compiler {
+pub(crate) struct Compiler {
   /// Current chunk being compiled
   pub chunk: Chunk,
   /// Compiler-owned virtual instruction stream. Frontend operations never
@@ -114,11 +114,11 @@ pub struct Compiler {
   /// represents the hidden private key. We store the string so inner
   /// compilers can add the same constant into their own chunks.
   pub private_names: HashMap<String, String>,
-  /// Tracks whether SetProperty was emitted in the current object literal.
-  /// Used to determine if we need to emit a Pop after variable declaration.
-  pub object_expr_had_set_property: bool,
   /// Instance fields awaiting initialization after `super()` in a derived constructor.
   pub pending_instance_fields: Vec<PreparedClassField>,
+  /// First deferred emission failure. Emission helpers cannot return errors
+  /// through every AST visitor, so compilation reports it before lowering.
+  pub(crate) emission_error: Option<CompilerError>,
 }
 
 /// A class field prepared for constructor or static initialization.
@@ -285,7 +285,7 @@ impl Compiler {
   }
 
   /// Creates a new compiler instance
-  pub fn new(source_text: Arc<String>) -> Self {
+  pub(crate) fn new(source_text: Arc<String>) -> Self {
     let (allow_new_target, allow_super) = COMPILE_CONTEXT_OVERRIDE
       .with(|override_state| *override_state.borrow())
       .unwrap_or((false, false));
@@ -327,8 +327,8 @@ impl Compiler {
       upvalue_indices: HashMap::new(),
       captured_upvalues: Vec::new(),
       private_names: HashMap::new(),
-      object_expr_had_set_property: false,
       pending_instance_fields: Vec::new(),
+      emission_error: None,
     }
   }
 
@@ -412,12 +412,26 @@ impl Compiler {
     value: Value,
     line: u32,
   ) {
-    let constant = Constant::try_from(value).expect("compiler emitted a runtime-owned constant");
+    let constant = match Constant::try_from(value) {
+      Ok(constant) => constant,
+      Err(_) => {
+        self
+          .emission_error
+          .get_or_insert_with(|| CompilerError::from("compiler emitted a runtime-owned constant"));
+        return;
+      }
+    };
     let idx = self.chunk.add_constant(constant);
     // Emit the Const instruction with the constant index encoded into
     // the 24-bit payload in a single instruction word to avoid
     // multi-write emissions which break the fixed-width instruction model.
-    let idx = u16::try_from(idx).expect("too many constants in chunk") as u32;
+    let Ok(idx) = u16::try_from(idx) else {
+      self
+        .emission_error
+        .get_or_insert_with(|| CompilerError::from("constant pool exceeds 65536 entries"));
+      return;
+    };
+    let idx = u32::from(idx);
     self.emit_with_payload(Op::Const, idx, line);
   }
 
@@ -824,7 +838,7 @@ impl Compiler {
     let mut names = vec![None; self.locals.len()];
     if let Some(function_scope) = self.scopes.first() {
       for (name, &slot) in &function_scope.bindings {
-        if slot < names.len() && !name.starts_with("__") {
+        if slot < names.len() && !name.starts_with('\0') {
           names[slot] = Some(name.clone());
         }
       }
@@ -1225,5 +1239,26 @@ impl Compiler {
 impl Default for Compiler {
   fn default() -> Self {
     Self::new(Arc::new(String::new()))
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn constant_pool_overflow_records_a_compiler_error() {
+    let mut compiler = Compiler::default();
+    for value in 0..=u16::MAX {
+      compiler.emit_constant(Value::Number(f64::from(value)), LINE);
+    }
+    assert!(compiler.emission_error.is_none());
+
+    compiler.emit_constant(Value::Number(65_536.0), LINE);
+
+    let error = compiler
+      .emission_error
+      .expect("constant pool overflow must be reported");
+    assert!(error.message.contains("constant pool exceeds"));
   }
 }

@@ -1,0 +1,151 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://blitz.dev/protocol/analysis-v1.schema.json",
+  "title": "Blitz analysis protocol v1 response",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol_version", "id", "result"],
+  "properties": {
+    "protocol_version": { "const": 1 },
+    "id": { "type": "integer", "minimum": 0 },
+    "result": { "$ref": "#/$defs/analysis" }
+  },
+  "$defs": {
+    "span": {
+      "type": "object",
+      "required": ["start", "end"],
+      "properties": {
+        "start": { "type": "integer", "minimum": 0 },
+        "end": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "diagnostic": {
+      "allOf": [
+        { "$ref": "#/$defs/span" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["message", "start", "end"],
+          "properties": {
+            "message": { "type": "string" },
+            "start": { "type": "integer", "minimum": 0 },
+            "end": { "type": "integer", "minimum": 0 }
+          }
+        }
+      ]
+    },
+    "declaration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "kind",
+        "detail",
+        "start",
+        "end",
+        "selection_start",
+        "selection_end",
+        "children"
+      ],
+      "properties": {
+        "name": { "type": "string" },
+        "kind": {
+          "enum": [
+            "function",
+            "class",
+            "interface",
+            "type",
+            "variable",
+            "method",
+            "property",
+            "constructor",
+            "enum",
+            "enumMember",
+            "namespace"
+          ]
+        },
+        "detail": { "type": "string" },
+        "documentation": { "type": "string" },
+        "start": { "type": "integer", "minimum": 0 },
+        "end": { "type": "integer", "minimum": 0 },
+        "selection_start": { "type": "integer", "minimum": 0 },
+        "selection_end": { "type": "integer", "minimum": 0 },
+        "children": { "type": "array", "items": { "$ref": "#/$defs/declaration" } }
+      }
+    },
+    "definition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "start",
+        "end",
+        "target_start",
+        "target_end",
+        "target_selection_start",
+        "target_selection_end"
+      ],
+      "properties": {
+        "start": { "type": "integer", "minimum": 0 },
+        "end": { "type": "integer", "minimum": 0 },
+        "target_path": { "type": "string" },
+        "target_virtual": { "type": "string" },
+        "detail": { "type": "string" },
+        "documentation": { "type": "string" },
+        "target_start": { "type": "integer", "minimum": 0 },
+        "target_end": { "type": "integer", "minimum": 0 },
+        "target_selection_start": { "type": "integer", "minimum": 0 },
+        "target_selection_end": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "analysis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "diagnostics",
+        "declarations",
+        "definitions",
+        "keywords",
+        "runtime_globals",
+        "virtual_documents",
+        "inlay_hints"
+      ],
+      "properties": {
+        "diagnostics": { "type": "array", "items": { "$ref": "#/$defs/diagnostic" } },
+        "declarations": { "type": "array", "items": { "$ref": "#/$defs/declaration" } },
+        "definitions": { "type": "array", "items": { "$ref": "#/$defs/definition" } },
+        "keywords": { "type": "array", "items": { "type": "string" } },
+        "runtime_globals": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "detail"],
+            "properties": { "name": { "type": "string" }, "detail": { "type": "string" } }
+          }
+        },
+        "virtual_documents": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "text"],
+            "properties": { "id": { "type": "string" }, "text": { "type": "string" } }
+          }
+        },
+        "inlay_hints": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["position", "label", "kind"],
+            "properties": {
+              "position": { "type": "integer", "minimum": 0 },
+              "label": { "type": "string" },
+              "kind": { "enum": ["type", "parameter"] }
+            }
+          }
+        }
+      }
+    }
+  }
+}

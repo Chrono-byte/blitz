@@ -3,7 +3,6 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::io::{self, Write};
 use std::rc::Rc;
 use std::time::Instant;
 
@@ -12,7 +11,7 @@ use denko::gc;
 use denko::inspect::{InspectOptions, inspect_with_options};
 use denko::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
 
-use super::host_function;
+use super::{Output, OutputStream, host_function};
 
 #[derive(Default)]
 struct ConsoleState {
@@ -21,7 +20,10 @@ struct ConsoleState {
   group_depth: usize,
 }
 
-pub(super) fn install(vm: &mut Vm) {
+pub(super) fn install(
+  vm: &mut Vm,
+  output: Rc<dyn Output>,
+) {
   let console = Value::Object(gc::track_object(Rc::new(RefCell::new(
     ObjectData::with_prototype(vm.realm().object_prototype()),
   ))));
@@ -32,29 +34,39 @@ pub(super) fn install(vm: &mut Vm) {
       vm,
       &console,
       name,
-      output_method(Rc::clone(&state), false, None),
+      output_method(Rc::clone(&state), Rc::clone(&output), false, None),
     );
   }
   set_method(
     vm,
     &console,
     "warn",
-    output_method(Rc::clone(&state), true, None),
+    output_method(Rc::clone(&state), Rc::clone(&output), true, None),
   );
   set_method(
     vm,
     &console,
     "error",
-    output_method(Rc::clone(&state), true, None),
+    output_method(Rc::clone(&state), Rc::clone(&output), true, None),
   );
   set_method(
     vm,
     &console,
     "trace",
-    output_method(Rc::clone(&state), true, Some("Trace:")),
+    output_method(Rc::clone(&state), Rc::clone(&output), true, Some("Trace:")),
   );
-  set_method(vm, &console, "assert", assert_method(Rc::clone(&state)));
-  set_method(vm, &console, "count", count_method(Rc::clone(&state)));
+  set_method(
+    vm,
+    &console,
+    "assert",
+    assert_method(Rc::clone(&state), Rc::clone(&output)),
+  );
+  set_method(
+    vm,
+    &console,
+    "count",
+    count_method(Rc::clone(&state), Rc::clone(&output)),
+  );
   set_method(
     vm,
     &console,
@@ -66,20 +78,25 @@ pub(super) fn install(vm: &mut Vm) {
     vm,
     &console,
     "timeLog",
-    time_log_method(Rc::clone(&state), false),
+    time_log_method(Rc::clone(&state), Rc::clone(&output), false),
   );
   set_method(
     vm,
     &console,
     "timeEnd",
-    time_log_method(Rc::clone(&state), true),
+    time_log_method(Rc::clone(&state), Rc::clone(&output), true),
   );
-  set_method(vm, &console, "group", group_method(Rc::clone(&state)));
+  set_method(
+    vm,
+    &console,
+    "group",
+    group_method(Rc::clone(&state), Rc::clone(&output)),
+  );
   set_method(
     vm,
     &console,
     "groupCollapsed",
-    group_method(Rc::clone(&state)),
+    group_method(Rc::clone(&state), Rc::clone(&output)),
   );
   set_method(
     vm,
@@ -87,7 +104,7 @@ pub(super) fn install(vm: &mut Vm) {
     "groupEnd",
     group_end_method(Rc::clone(&state)),
   );
-  set_method(vm, &console, "clear", clear_method());
+  set_method(vm, &console, "clear", clear_method(output));
 
   vm.realm().set_global("console", console);
 }
@@ -109,36 +126,43 @@ fn set_method(
 
 fn output_method(
   state: Rc<RefCell<ConsoleState>>,
+  output: Rc<dyn Output>,
   stderr: bool,
   prefix: Option<&'static str>,
 ) -> BuiltinFn {
   Rc::new(move |vm, args| {
-    let message = format_arguments(vm, actual_args(args));
-    emit(&state.borrow(), stderr, prefix, &message);
+    let message = format_arguments(vm, actual_args(args))?;
+    emit(output.as_ref(), &state.borrow(), stderr, prefix, &message)?;
     Ok(Value::Undefined)
   })
 }
 
-fn assert_method(state: Rc<RefCell<ConsoleState>>) -> BuiltinFn {
+fn assert_method(
+  state: Rc<RefCell<ConsoleState>>,
+  output: Rc<dyn Output>,
+) -> BuiltinFn {
   Rc::new(move |vm, args| {
     let actual = actual_args(args);
     if actual.first().is_some_and(Value::is_truthy) {
       return Ok(Value::Undefined);
     }
-    let detail = format_arguments(vm, actual.get(1..).unwrap_or_default());
+    let detail = format_arguments(vm, actual.get(1..).unwrap_or_default())?;
     let message = if detail.is_empty() {
       "Assertion failed".to_string()
     } else {
       format!("Assertion failed: {detail}")
     };
-    emit(&state.borrow(), true, None, &message);
+    emit(output.as_ref(), &state.borrow(), true, None, &message)?;
     Ok(Value::Undefined)
   })
 }
 
-fn count_method(state: Rc<RefCell<ConsoleState>>) -> BuiltinFn {
+fn count_method(
+  state: Rc<RefCell<ConsoleState>>,
+  output: Rc<dyn Output>,
+) -> BuiltinFn {
   Rc::new(move |vm, args| {
-    let label = label(vm, actual_args(args).first());
+    let label = label(vm, actual_args(args).first())?;
     let (depth, count) = {
       let mut state = state.borrow_mut();
       let depth = state.group_depth;
@@ -146,14 +170,14 @@ fn count_method(state: Rc<RefCell<ConsoleState>>) -> BuiltinFn {
       *count += 1;
       (depth, *count)
     };
-    emit_at_depth(false, depth, &format!("{label}: {count}"));
+    emit_at_depth(output.as_ref(), false, depth, &format!("{label}: {count}"))?;
     Ok(Value::Undefined)
   })
 }
 
 fn count_reset_method(state: Rc<RefCell<ConsoleState>>) -> BuiltinFn {
   Rc::new(move |vm, args| {
-    let label = label(vm, actual_args(args).first());
+    let label = label(vm, actual_args(args).first())?;
     state.borrow_mut().counts.remove(&label);
     Ok(Value::Undefined)
   })
@@ -161,7 +185,7 @@ fn count_reset_method(state: Rc<RefCell<ConsoleState>>) -> BuiltinFn {
 
 fn time_method(state: Rc<RefCell<ConsoleState>>) -> BuiltinFn {
   Rc::new(move |vm, args| {
-    let label = label(vm, actual_args(args).first());
+    let label = label(vm, actual_args(args).first())?;
     state
       .borrow_mut()
       .timers
@@ -172,11 +196,12 @@ fn time_method(state: Rc<RefCell<ConsoleState>>) -> BuiltinFn {
 
 fn time_log_method(
   state: Rc<RefCell<ConsoleState>>,
+  output: Rc<dyn Output>,
   remove: bool,
 ) -> BuiltinFn {
   Rc::new(move |vm, args| {
     let actual = actual_args(args);
-    let label = label(vm, actual.first());
+    let label = label(vm, actual.first())?;
     let (depth, started) = {
       let mut state = state.borrow_mut();
       let started = if remove {
@@ -187,33 +212,42 @@ fn time_log_method(
       (state.group_depth, started)
     };
     if let Some(started) = started {
-      let suffix = format_arguments(vm, actual.get(1..).unwrap_or_default());
+      let suffix = format_arguments(vm, actual.get(1..).unwrap_or_default())?;
       let suffix = if suffix.is_empty() {
         String::new()
       } else {
         format!(" {suffix}")
       };
       emit_at_depth(
+        output.as_ref(),
         false,
         depth,
         &format!(
           "{label}: {:.3}ms{suffix}",
           started.elapsed().as_secs_f64() * 1000.0
         ),
-      );
+      )?;
     } else {
-      emit_at_depth(true, depth, &format!("Timer '{label}' does not exist"));
+      emit_at_depth(
+        output.as_ref(),
+        true,
+        depth,
+        &format!("Timer '{label}' does not exist"),
+      )?;
     }
     Ok(Value::Undefined)
   })
 }
 
-fn group_method(state: Rc<RefCell<ConsoleState>>) -> BuiltinFn {
+fn group_method(
+  state: Rc<RefCell<ConsoleState>>,
+  output: Rc<dyn Output>,
+) -> BuiltinFn {
   Rc::new(move |vm, args| {
-    let message = format_arguments(vm, actual_args(args));
+    let message = format_arguments(vm, actual_args(args))?;
     let depth = state.borrow().group_depth;
     if !message.is_empty() {
-      emit_at_depth(false, depth, &message);
+      emit_at_depth(output.as_ref(), false, depth, &message)?;
     }
     state.borrow_mut().group_depth += 1;
     Ok(Value::Undefined)
@@ -228,10 +262,9 @@ fn group_end_method(state: Rc<RefCell<ConsoleState>>) -> BuiltinFn {
   })
 }
 
-fn clear_method() -> BuiltinFn {
-  Rc::new(|_vm, _args| {
-    print!("\x1b[2J\x1b[H");
-    let _result = io::stdout().flush();
+fn clear_method(output: Rc<dyn Output>) -> BuiltinFn {
+  Rc::new(move |_vm, _args| {
+    output.clear()?;
     Ok(Value::Undefined)
   })
 }
@@ -243,23 +276,23 @@ fn actual_args(args: &[Value]) -> &[Value] {
 fn label(
   vm: &mut Vm,
   value: Option<&Value>,
-) -> String {
-  value.map_or_else(|| "default".to_string(), |value| stringify(vm, value))
+) -> Result<String, denko::errors::RuntimeError> {
+  value.map_or_else(|| Ok("default".to_string()), |value| stringify(vm, value))
 }
 
 fn format_arguments(
   vm: &mut Vm,
   args: &[Value],
-) -> String {
+) -> Result<String, denko::errors::RuntimeError> {
   let Some(first) = args.first() else {
-    return String::new();
+    return Ok(String::new());
   };
   let Value::String(template) = first else {
     return args
       .iter()
       .map(|value| format_console_argument(vm, value))
-      .collect::<Vec<_>>()
-      .join(" ");
+      .collect::<Result<Vec<_>, _>>()
+      .map(|arguments| arguments.join(" "));
   };
 
   let mut output = String::new();
@@ -292,7 +325,7 @@ fn format_arguments(
       if matches!(specifier, 'o' | 'O') {
         output.push_str(&inspect_console_value(value));
       } else {
-        output.push_str(&stringify(vm, value));
+        output.push_str(&stringify(vm, value)?);
       }
     }
   }
@@ -301,24 +334,23 @@ fn format_arguments(
     if !output.is_empty() {
       output.push(' ');
     }
-    output.push_str(&format_console_argument(vm, value));
+    output.push_str(&format_console_argument(vm, value)?);
   }
-  output
+  Ok(output)
 }
 
 fn stringify(
   vm: &mut Vm,
   value: &Value,
-) -> String {
+) -> Result<String, denko::errors::RuntimeError> {
   vm.to_string(value)
-    .unwrap_or_else(|_| format!("{value}").into())
-    .to_string_lossy()
+    .map(|value| value.to_string_lossy())
 }
 
 fn format_console_argument(
   vm: &mut Vm,
   value: &Value,
-) -> String {
+) -> Result<String, denko::errors::RuntimeError> {
   match value {
     Value::Object(_)
     | Value::Array(..)
@@ -326,7 +358,7 @@ fn format_console_argument(
     | Value::Closure { .. }
     | Value::Builtin(_)
     | Value::BuiltinObject(..)
-    | Value::Promise(..) => inspect_console_value(value),
+    | Value::Promise(..) => Ok(inspect_console_value(value)),
     _ => stringify(vm, value),
   }
 }
@@ -342,30 +374,33 @@ fn inspect_console_value(value: &Value) -> String {
 }
 
 fn emit(
+  output: &dyn Output,
   state: &ConsoleState,
   stderr: bool,
   prefix: Option<&str>,
   message: &str,
-) {
+) -> Result<(), denko::errors::RuntimeError> {
   let message = match prefix {
     Some(prefix) if message.is_empty() => prefix.to_string(),
     Some(prefix) => format!("{prefix} {message}"),
     None => message.to_string(),
   };
-  emit_at_depth(stderr, state.group_depth, &message);
+  emit_at_depth(output, stderr, state.group_depth, &message)
 }
 
 fn emit_at_depth(
+  output: &dyn Output,
   stderr: bool,
   depth: usize,
   message: &str,
-) {
+) -> Result<(), denko::errors::RuntimeError> {
   let indentation = "  ".repeat(depth);
-  if stderr {
-    eprintln!("{indentation}{message}");
+  let stream = if stderr {
+    OutputStream::Stderr
   } else {
-    println!("{indentation}{message}");
-  }
+    OutputStream::Stdout
+  };
+  output.write_line(stream, &format!("{indentation}{message}"))
 }
 
 #[cfg(test)]
@@ -376,7 +411,7 @@ mod tests {
   fn installs_common_console_methods() {
     let globals = Rc::new(RefCell::new(ObjectData::new()));
     let mut vm = Vm::new(globals);
-    install(&mut vm);
+    install(&mut vm, Rc::new(crate::host::ProcessOutput));
 
     let console = vm.get_global("console").expect("console global");
     for name in [
@@ -418,19 +453,17 @@ mod tests {
     let object = Value::Object(Rc::new(RefCell::new(data)));
 
     assert_eq!(
-      format_arguments(&mut vm, std::slice::from_ref(&object)),
+      format_arguments(&mut vm, std::slice::from_ref(&object)).expect("format"),
       "{ answer: 42 }"
     );
     assert_eq!(
       format_arguments(
         &mut vm,
         &[Value::String("%o".to_string().into()), object.clone()]
-      ),
+      )
+      .expect("format"),
       "{ answer: 42 }"
     );
-    assert_eq!(
-      format_arguments(&mut vm, &[Value::String("%s".to_string().into()), object]),
-      "[object Object]"
-    );
+    assert!(format_arguments(&mut vm, &[Value::String("%s".to_string().into()), object]).is_err());
   }
 }

@@ -2,6 +2,7 @@
 //! Buffered terminal input and prompt-safe output for interactive applications.
 
 use std::cell::RefCell;
+use std::io::{self, BufRead, Write};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -10,7 +11,6 @@ use denko::errors::RuntimeError;
 use denko::gc;
 use denko::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
 use denko::{HostRoot, Vm};
-use rustyline::{DefaultEditor, ExternalPrinter};
 use tokio::sync::mpsc;
 
 use super::host_function;
@@ -28,7 +28,6 @@ struct TerminalInner {
   started: bool,
   active: bool,
   prompt: Arc<Mutex<String>>,
-  printer: Arc<Mutex<Option<Box<dyn ExternalPrinter + Send>>>>,
   events: mpsc::Sender<TerminalEvent>,
 }
 
@@ -161,7 +160,6 @@ pub(super) fn install(
     started: false,
     active: false,
     prompt: Arc::new(Mutex::new("> ".to_string())),
-    printer: Arc::new(Mutex::new(None)),
     events,
   })));
   let stdin = object(vm.realm().object_prototype());
@@ -258,40 +256,33 @@ pub(super) fn install(
 }
 
 fn start_input(state: &TerminalState) {
-  let (events, prompt, printer) = {
+  let (events, prompt) = {
     let mut inner = state.0.borrow_mut();
     if inner.started {
       return;
     }
     inner.started = true;
     inner.active = true;
-    (
-      inner.events.clone(),
-      Arc::clone(&inner.prompt),
-      Arc::clone(&inner.printer),
-    )
+    (inner.events.clone(), Arc::clone(&inner.prompt))
   };
   drop(thread::spawn(move || {
-    let mut editor = match DefaultEditor::new() {
-      Ok(editor) => editor,
-      Err(error) => {
-        let _result = events.blocking_send(TerminalEvent::Error(error.to_string()));
-        return;
-      }
-    };
-    if let Ok(external_printer) = editor.create_external_printer()
-      && let Ok(mut slot) = printer.lock()
-    {
-      *slot = Some(Box::new(external_printer));
-    }
+    let stdin = io::stdin();
+    let mut stdin = stdin.lock();
     loop {
       let current_prompt = prompt
         .lock()
         .map_or_else(|_| "> ".to_string(), |value| value.clone());
-      match editor.readline(&current_prompt) {
-        Ok(line) => {
-          if !line.is_empty() {
-            let _result = editor.add_history_entry(line.as_str());
+      print!("{current_prompt}");
+      let _result = io::stdout().flush();
+      let mut line = String::new();
+      match stdin.read_line(&mut line) {
+        Ok(0) => {
+          let _result = events.blocking_send(TerminalEvent::Eof);
+          break;
+        }
+        Ok(_) => {
+          while line.ends_with(['\n', '\r']) {
+            line.pop();
           }
           if events
             .blocking_send(TerminalEvent::Line(line))
@@ -299,11 +290,6 @@ fn start_input(state: &TerminalState) {
           {
             break;
           }
-        }
-        Err(rustyline::error::ReadlineError::Interrupted) => continue,
-        Err(rustyline::error::ReadlineError::Eof) => {
-          let _result = events.blocking_send(TerminalEvent::Eof);
-          break;
         }
         Err(error) => {
           let _result = events.blocking_send(TerminalEvent::Error(error.to_string()));
@@ -315,16 +301,9 @@ fn start_input(state: &TerminalState) {
 }
 
 fn print_external(
-  state: &TerminalState,
+  _state: &TerminalState,
   message: String,
 ) {
-  let printer = Arc::clone(&state.0.borrow().printer);
-  if let Ok(mut printer) = printer.lock()
-    && let Some(printer) = printer.as_mut()
-    && printer.print(message.clone()).is_ok()
-  {
-    return;
-  }
   println!("{message}");
 }
 
@@ -407,8 +386,7 @@ mod tests {
     "#
     );
     let session = JsParser::parse_source(source).expect("parse terminal callback");
-    let chunk =
-      compiler::compile_oxc(session.program(), source).expect("compile terminal callback");
+    let chunk = compiler::compile_session(&session).expect("compile terminal callback");
     vm.run(chunk).expect("define terminal callback");
     let callback = vm
       .get_global("handleInput")
@@ -475,8 +453,7 @@ mod tests {
     "#
     );
     let session = JsParser::parse_source(source).expect("parse IRC terminal callback");
-    let chunk =
-      compiler::compile_oxc(session.program(), source).expect("compile IRC terminal callback");
+    let chunk = compiler::compile_session(&session).expect("compile IRC terminal callback");
     vm.run(chunk)
       .expect("define IRC terminal callback");
     let callback = vm

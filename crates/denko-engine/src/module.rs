@@ -231,6 +231,48 @@ fn estree_module_export_name(node: Option<&JsonValue>) -> Option<String> {
     .map(ToString::to_string)
 }
 
+fn estree_binding_names(
+  node: Option<&JsonValue>,
+  names: &mut Vec<String>,
+) {
+  let Some(node) = node else {
+    return;
+  };
+  match node.get("type").and_then(JsonValue::as_str) {
+    Some("Identifier") => {
+      if let Some(name) = node.get("name").and_then(JsonValue::as_str) {
+        names.push(name.to_string());
+      }
+    }
+    Some("AssignmentPattern") => estree_binding_names(node.get("left"), names),
+    Some("RestElement") => estree_binding_names(node.get("argument"), names),
+    Some("ArrayPattern") => {
+      if let Some(elements) = node.get("elements").and_then(JsonValue::as_array) {
+        for element in elements {
+          if !element.is_null() {
+            estree_binding_names(Some(element), names);
+          }
+        }
+      }
+    }
+    Some("ObjectPattern") => {
+      if let Some(properties) = node
+        .get("properties")
+        .and_then(JsonValue::as_array)
+      {
+        for property in properties {
+          match property.get("type").and_then(JsonValue::as_str) {
+            Some("Property") => estree_binding_names(property.get("value"), names),
+            Some("RestElement") => estree_binding_names(property.get("argument"), names),
+            _ => {}
+          }
+        }
+      }
+    }
+    _ => {}
+  }
+}
+
 fn stable_hash_bytes(bytes: impl IntoIterator<Item = u8>) -> u64 {
   // FNV-1a is deliberately used instead of the process-randomized standard
   // hasher: generated assets must have the same hash across hosts and runs.
@@ -815,5 +857,19 @@ impl ModuleLoader {
   #[must_use]
   pub fn condition_names(&self) -> &[String] {
     &self.condition_names
+  }
+
+  /// Return whether a validated prelinked graph owns `specifier`.
+  ///
+  /// Embedders can use a private module specifier as a realm-local
+  /// installation marker without maintaining a second identity registry.
+  #[must_use]
+  pub fn contains_prelinked_specifier(
+    &self,
+    specifier: &str,
+  ) -> bool {
+    self
+      .prelinked_by_specifier
+      .contains_key(specifier)
   }
 }

@@ -1431,7 +1431,7 @@ mod tests {
     let mut source = (0..260)
       .map(|value| format!("{value};"))
       .collect::<String>();
-    source.push_str("let { ...rest } = {};");
+    source.push_str(crate::js!("let { ...rest } = {};"));
     let session = Parser::parse_source(&source).expect("parse");
     let chunk = compiler::compile(session.program(), session.source()).expect("compile");
     chunk.verify().expect("verified RISC chunk");
@@ -1486,11 +1486,9 @@ mod tests {
 
   #[test]
   fn relaxes_compare_branches_beyond_signed_i13() {
-    let mut source = String::from("let value = 0; if (value === 0) {\n");
-    for _ in 0..1_100 {
-      source.push_str("value += 1;\n");
-    }
-    source.push('}');
+    let body = crate::js!("value += 1;\n").repeat(1_100);
+    let source =
+      crate::js!("let value = 0; if (value === 0) { /* body */ }").replace("/* body */", &body);
 
     let session = Parser::parse_source(&source).expect("parse");
     let chunk = compiler::compile(session.program(), session.source()).expect("compile");

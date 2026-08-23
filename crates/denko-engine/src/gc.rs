@@ -17,6 +17,8 @@ use crate::value::{
 /// Result of a prototype GC collection cycle.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct GcStats {
+  /// Why collection was deferred, when no heap scan was performed.
+  pub deferred: Option<GcDeferredReason>,
   /// Number of tracked heap nodes marked reachable.
   pub marked_nodes: usize,
   /// Number of object property bags reclaimed.
@@ -29,6 +31,16 @@ pub struct GcStats {
   pub swept_envs: usize,
   /// Number of promise states reclaimed.
   pub swept_promises: usize,
+}
+
+/// A condition that prevents the prototype collector from safely enumerating
+/// every live root.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum GcDeferredReason {
+  /// More than one VM shares the current thread-local prototype heap.
+  MultipleVms,
+  /// A VM has host-side jobs whose captured JavaScript values are opaque.
+  PendingJobs,
 }
 
 /// Snapshot of the prototype collector's tracked heap usage.
@@ -114,6 +126,11 @@ impl Drop for VmGcRegistration {
 
 pub(crate) fn collection_is_safe() -> bool {
   LIVE_VMS.with(|count| count.get() <= 1)
+}
+
+/// Number of VMs registered against the current thread-local prototype heap.
+pub fn live_vm_count() -> usize {
+  LIVE_VMS.with(Cell::get)
 }
 
 fn push_weak<T>(
@@ -236,7 +253,10 @@ pub fn collect_with_env_roots(
   env_roots: &[Rc<RefCell<Vec<SharedValue>>>],
 ) -> GcStats {
   if !collection_is_safe() {
-    return GcStats::default();
+    return GcStats {
+      deferred: Some(GcDeferredReason::MultipleVms),
+      ..GcStats::default()
+    };
   }
   {
     {
@@ -1167,5 +1187,17 @@ mod tests {
 
     reset_allocation_pressure();
     assert_eq!(allocation_pressure(), 0);
+  }
+
+  #[test]
+  fn collection_reports_multiple_vm_deferral() {
+    let first = VmGcRegistration::new();
+    let second = VmGcRegistration::new();
+
+    let stats = collect(&[]);
+
+    assert_eq!(stats.deferred, Some(GcDeferredReason::MultipleVms));
+    drop(second);
+    drop(first);
   }
 }

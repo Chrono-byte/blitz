@@ -438,12 +438,12 @@ pub(in crate::ecmascript::builtins::array) fn install_after_iterator(
     PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(move |vm, args| {
         let receiver = vm.to_object_value(args.first().cloned().unwrap_or(Value::Undefined))?;
+        let len = array_like_length(vm, &receiver)?;
         let callback = args.get(1).cloned().unwrap_or(Value::Undefined);
         let this_arg = args.get(2).cloned().unwrap_or(Value::Undefined);
         if !Vm::is_callable_value(&callback) {
           return Err(vm.throw_type_error("Array.prototype.every callback is not callable"));
         }
-        let len = array_like_length(vm, &receiver)?;
         for i in 0..len {
           let key = PKey::String(i.to_string().into());
           if vm.has_property_host(&receiver, &key)? {
@@ -767,28 +767,18 @@ pub(in crate::ecmascript::builtins::array) fn install_after_iterator(
             let lower_key_value = Value::String(lower.to_string().into());
             let upper_key_value = Value::String(upper.to_string().into());
             let lower_exists = vm.has_property_host(&receiver, &lower_key)?;
-            let upper_exists = vm.has_property_host(&receiver, &upper_key)?;
             let lower_value = if lower_exists {
               Some(vm.get_property_host(&receiver, &lower_key)?)
             } else {
               None
             };
+            let upper_exists = vm.has_property_host(&receiver, &upper_key)?;
             let upper_value = if upper_exists {
               Some(vm.get_property_host(&receiver, &upper_key)?)
             } else {
               None
             };
-            let lower_still_exists = lower_exists && vm.has_property_host(&receiver, &lower_key)?;
-            let upper_still_exists = upper_exists && vm.has_property_host(&receiver, &upper_key)?;
-
-            match (
-              lower_still_exists
-                .then_some(lower_value)
-                .flatten(),
-              upper_still_exists
-                .then_some(upper_value)
-                .flatten(),
-            ) {
+            match (lower_value, upper_value) {
               (Some(low), Some(high)) => {
                 vm.set_property_host(&receiver, &lower_key_value, high)?;
                 vm.set_property_host(&receiver, &upper_key_value, low)?;
@@ -818,12 +808,12 @@ pub(in crate::ecmascript::builtins::array) fn install_after_iterator(
     PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(move |vm, args| {
         let receiver = vm.to_object_value(args.first().cloned().unwrap_or(Value::Undefined))?;
+        let len = array_like_length(vm, &receiver)?;
         let callback = args.get(1).cloned().unwrap_or(Value::Undefined);
         let this_arg = args.get(2).cloned().unwrap_or(Value::Undefined);
         if !Vm::is_callable_value(&callback) {
           return Err(vm.throw_type_error("Array.prototype.some callback is not callable"));
         }
-        let len = array_like_length(vm, &receiver)?;
         for i in 0..len {
           let key = PKey::String(i.to_string().into());
           if vm.has_property_host(&receiver, &key)? {

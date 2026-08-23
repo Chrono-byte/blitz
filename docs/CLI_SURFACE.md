@@ -90,6 +90,7 @@ and should remain global.
 4. Extend project precompilation with additional packaging and build transforms
    only after their output contracts are stable.
 
-Command parsing and presentation belong to `blitz-cli`. Hosted execution and
-REPL capabilities belong to `blitz-runtime`. ECMAScript behavior and debugger
-or profiler primitives belong to Denko.
+Command parsing, line editing, history, and value presentation belong to
+`blitz-cli`. Persistent hosted execution and REPL evaluation belong to
+`blitz-runtime`. ECMAScript behavior and debugger or profiler primitives
+belong to Denko.

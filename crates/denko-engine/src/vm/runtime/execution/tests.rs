@@ -22,8 +22,7 @@ fn test_globals() -> Rc<RefCell<ObjectData>> {
 
 fn run_script(src: &str) -> (Vm, Rc<RefCell<ObjectData>>) {
   let session = Parser::parse_source(src).expect("parse ok");
-  let program = session.program();
-  let chunk = compiler::compile_oxc(program, session.source()).expect("compile ok");
+  let chunk = compiler::compile_session(&session).expect("compile ok");
 
   let globals = test_globals();
   let mut vm = Vm::new(Clone::clone(&globals));
@@ -1433,6 +1432,92 @@ mod test {
   }
 
   #[test]
+  fn property_get_ic_invalidates_after_host_descriptor_write() {
+    let (mut vm, _) = run_script(crate::js!(
+      r#"
+        var host_cached_object = { value: 1 };
+        function read_host_cached_value() { return host_cached_object.value; }
+        read_host_cached_value();
+      "#
+    ));
+    let object = vm
+      .get_global("host_cached_object")
+      .expect("cached object global");
+    let reader = vm
+      .get_global("read_host_cached_value")
+      .expect("cached reader global");
+
+    assert!(!vm.caches.property_get.is_empty());
+    assert!(
+      vm.define_own_property_host(
+        &object,
+        PropertyKey::String("value".to_string().into()),
+        PropertyDescriptor::ordinary_data(Value::Number(2.0)),
+      )
+      .expect("host property definition")
+    );
+
+    let value = vm
+      .call_value_with_this(&reader, &Value::Undefined, &[])
+      .expect("read after host write");
+    assert_eq!(value, Value::Number(2.0));
+  }
+
+  #[test]
+  fn native_callback_direct_mutation_cannot_leave_a_stale_property_cache() {
+    let globals = test_globals();
+    let target = gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
+    target.borrow_mut().properties.insert(
+      PropertyKey::String("value".to_string().into()),
+      PropertyDescriptor::ordinary_data(Value::Number(1.0)),
+    );
+    globals.borrow_mut().properties.insert(
+      PropertyKey::String("native_target".to_string().into()),
+      PropertyDescriptor::ordinary_data(Value::Object(Rc::clone(&target))),
+    );
+    globals.borrow_mut().properties.insert(
+      PropertyKey::String("mutate_native_target".to_string().into()),
+      PropertyDescriptor::ordinary_data(Value::Builtin(Rc::new(move |_vm, _args| {
+        target.borrow_mut().properties.insert(
+          PropertyKey::String("value".to_string().into()),
+          PropertyDescriptor::ordinary_data(Value::Number(2.0)),
+        );
+        Ok(Value::Undefined)
+      }))),
+    );
+    let mut vm = Vm::new(globals);
+    let setup = Parser::parse_source(crate::js!(
+      r#"
+        function read_native_target() { return native_target.value; }
+        globalThis.before_native_mutation = read_native_target();
+      "#
+    ))
+    .expect("parse setup");
+    vm.run(compiler::compile_session(&setup).expect("compile setup"))
+      .expect("run setup");
+    assert!(!vm.caches.property_get.is_empty());
+
+    let mutate = Parser::parse_source(crate::js!(
+      r#"
+        mutate_native_target();
+        globalThis.after_native_mutation = read_native_target();
+      "#
+    ))
+    .expect("parse mutation");
+    vm.run(compiler::compile_session(&mutate).expect("compile mutation"))
+      .expect("run mutation");
+
+    assert_eq!(
+      vm.get_global("before_native_mutation"),
+      Some(Value::Number(1.0))
+    );
+    assert_eq!(
+      vm.get_global("after_native_mutation"),
+      Some(Value::Number(2.0))
+    );
+  }
+
+  #[test]
   fn host_roots_reuse_slots_without_reviving_stale_handles() {
     let globals = test_globals();
     let mut vm = Vm::new(globals);
@@ -1518,14 +1603,14 @@ mod test {
       "#
     );
     let session = Parser::parse_source(first).expect("parse generator setup");
-    let chunk = compiler::compile_oxc(session.program(), session.source()).expect("compile setup");
+    let chunk = compiler::compile_session(&session).expect("compile setup");
     vm.run(chunk).expect("start generator");
 
     assert_eq!(vm.collect_garbage_prototype().swept_objects, 0);
 
     let second = crate::js!("globalThis.generatorAnswer = iterator.next().value;");
     let session = Parser::parse_source(second).expect("parse generator resume");
-    let chunk = compiler::compile_oxc(session.program(), session.source()).expect("compile resume");
+    let chunk = compiler::compile_session(&session).expect("compile resume");
     vm.run(chunk).expect("resume generator");
     assert_eq!(vm.get_global("generatorAnswer"), Some(Value::Number(42.0)));
   }
@@ -1538,8 +1623,7 @@ mod test {
 
     let source = crate::js!("throw 42;");
     let session = Parser::parse_source(source).expect("parse nested throw");
-    let chunk =
-      compiler::compile_oxc_repl(session.program(), session.source()).expect("compile nested");
+    let chunk = compiler::compile_repl_session(&session).expect("compile nested");
     let failure = vm
       .run_nested(chunk, true)
       .expect_err("nested run throws");
@@ -1599,7 +1683,7 @@ mod test {
     poison_state(&mut vm);
     let source = crate::js!("undefined;");
     let session = Parser::parse_source(source).expect("parse root");
-    let chunk = compiler::compile_oxc(session.program(), session.source()).expect("compile root");
+    let chunk = compiler::compile_session(&session).expect("compile root");
     vm.run(chunk).expect("run root");
     assert_cleared(&vm);
 
@@ -1717,6 +1801,243 @@ mod test {
           .to_string()
           .into()
       ))
+    );
+  }
+
+  #[test]
+  fn math_and_json_have_namespace_tags_and_math_has_object_prototype() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        globalThis.result = [
+          Object.prototype.toString.call(Math),
+          Object.prototype.toString.call(JSON),
+          Object.getPrototypeOf(Math) === Object.prototype,
+          Object.getOwnPropertyDescriptor(Math, Symbol.toStringTag).writable,
+          Object.getOwnPropertyDescriptor(JSON, Symbol.toStringTag).configurable
+        ].join(",");
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("result"),
+      Some(Value::String(
+        "[object Math],[object JSON],true,false,true".into()
+      ))
+    );
+  }
+
+  #[test]
+  fn array_iteration_reads_length_before_validating_callback() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        let everyLengthRead = false;
+        let someLengthRead = false;
+        const everyReceiver = { get length() { everyLengthRead = true; return 0; } };
+        const someReceiver = { get length() { someLengthRead = true; return 0; } };
+        try { Array.prototype.every.call(everyReceiver); } catch (_) {}
+        try { Array.prototype.some.call(someReceiver); } catch (_) {}
+        globalThis.result = everyLengthRead && someLengthRead;
+      "#
+    ));
+
+    assert_eq!(vm.get_global("result"), Some(Value::Bool(true)));
+  }
+
+  #[test]
+  fn builtin_edge_cases_follow_required_coercion_and_validation() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        let toSortedThrew = false;
+        try { [3, 1].toSorted(0); } catch (error) { toSortedThrew = error instanceof TypeError; }
+
+        const descriptors = {};
+        Object.defineProperty(descriptors, "hidden", {
+          value: { value: 42 },
+          enumerable: false
+        });
+        const defined = Object.defineProperties({}, descriptors);
+
+        let promiseThrew = false;
+        try { new Promise(1); } catch (error) { promiseThrew = error instanceof TypeError; }
+
+        const assignedLength = [];
+        assignedLength.length = "2";
+        let fractionalLengthThrew = false;
+        try { assignedLength.length = 1.5; } catch (error) {
+          fractionalLengthThrew = error instanceof RangeError;
+        }
+        const definedIndex = [];
+        Object.defineProperty(definedIndex, "0", { value: 42 });
+        const fixedLength = [];
+        Object.defineProperty(fixedLength, "length", { writable: false });
+        let fixedLengthThrew = false;
+        try {
+          (function() { "use strict"; fixedLength[0] = 1; })();
+        } catch (error) {
+          fixedLengthThrew = error instanceof TypeError;
+        }
+
+        globalThis.result = [
+          "ab".lastIndexOf("b", NaN) === 1,
+          toSortedThrew,
+          defined.hidden === undefined,
+          Function("return 1").name === "anonymous",
+          promiseThrew,
+          Object.prototype.toString.call((function() { return arguments; })(1)) === "[object Arguments]",
+          assignedLength.length === 2,
+          fractionalLengthThrew,
+          definedIndex.length === 1 && definedIndex[0] === 42,
+          fixedLengthThrew && fixedLength.length === 0 && fixedLength[0] === undefined
+        ].every(Boolean);
+      "#
+    ));
+
+    assert_eq!(vm.get_global("result"), Some(Value::Bool(true)));
+  }
+
+  #[test]
+  fn constructor_and_primitive_property_operations_follow_reference_semantics() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        function Constructor() {}
+        function ReturningConstructor() { return { constructor: "original" }; }
+        let prototypeGetterThrew = false;
+        const ProxiedConstructor = new Proxy(Constructor, {
+          get(target, key) {
+            if (key === "prototype") throw "prototype getter";
+            return target[key];
+          }
+        });
+        try { new ProxiedConstructor(); } catch (error) {
+          prototypeGetterThrew = error === "prototype getter";
+        }
+
+        let inNullThrew = false;
+        let inNumberThrew = false;
+        let deleteNullThrew = false;
+        try { "x" in null; } catch (error) { inNullThrew = error instanceof TypeError; }
+        try { "x" in 1; } catch (error) { inNumberThrew = error instanceof TypeError; }
+        try { delete null.x; } catch (error) { deleteNullThrew = error instanceof TypeError; }
+
+        let inOrder = "";
+        function inKey() { inOrder += "key"; return "x"; }
+        function inObject() { inOrder += "object"; return { x: 1 }; }
+        const inResult = inKey() in inObject();
+        let rightEvaluatedAfterThrow = false;
+        try {
+          (() => { throw "left"; })() in (() => { rightEvaluatedAfterThrow = true; return {}; })();
+        } catch (_) {}
+
+        const coercible = { valueOf() {}, toString: undefined };
+        const boxedString = new String(coercible);
+        globalThis.result = [
+          !Object.hasOwn(new Constructor(), "constructor"),
+          new ReturningConstructor().constructor === "original",
+          prototypeGetterThrew,
+          inNullThrew,
+          inNumberThrew,
+          deleteNullThrew,
+          delete (1).x,
+          inResult && inOrder === "keyobject" && !rightEvaluatedAfterThrow,
+          String(new Object(true)) === "true",
+          String(boxedString) === "undefined"
+        ].every(Boolean);
+      "#
+    ));
+
+    assert_eq!(vm.get_global("result"), Some(Value::Bool(true)));
+  }
+
+  #[test]
+  fn reflect_uses_shared_property_and_array_like_operations() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        const target = { get value() { return this.receiverValue; } };
+        let primitiveTargetThrew = false;
+        let invalidArgumentsListThrew = false;
+        try { Reflect.get(1, "value"); } catch (error) {
+          primitiveTargetThrew = error instanceof TypeError;
+        }
+        try { Reflect.construct(function () {}, null); } catch (error) {
+          invalidArgumentsListThrew = error instanceof TypeError;
+        }
+        const boxed = new String("x");
+        let objectKeysNullThrew = false;
+        try { Object.keys(null); } catch (error) {
+          objectKeysNullThrew = error instanceof TypeError;
+        }
+        globalThis.reflectResult = [
+          Reflect[Symbol.toStringTag] === "Reflect",
+          Reflect.apply.name === "apply" && Reflect.apply.length === 3,
+          Reflect.get(target, "value", { receiverValue: 42 }) === 42,
+          primitiveTargetThrew,
+          invalidArgumentsListThrew,
+          !Reflect.ownKeys(boxed).includes("[[PrimitiveValue]]"),
+          Object.keys.name === "keys" && Object.keys({}) instanceof Array,
+          objectKeysNullThrew
+        ].every(Boolean);
+      "#
+    ));
+
+    assert_eq!(vm.get_global("reflectResult"), Some(Value::Bool(true)));
+  }
+
+  #[test]
+  fn shared_es6_abstract_operations_preserve_invariants() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        let coercionGetterCalls = 0;
+        const coercible = {
+          get [Symbol.toPrimitive]() {
+            coercionGetterCalls += 1;
+            return () => 7;
+          }
+        };
+        let nonCallableToPrimitiveThrew = false;
+        let objectToPrimitiveThrew = false;
+        try { +{ [Symbol.toPrimitive]: 1 }; } catch (error) {
+          nonCallableToPrimitiveThrew = error instanceof TypeError;
+        }
+        try { +{ [Symbol.toPrimitive]() { return {}; } }; } catch (error) {
+          objectToPrimitiveThrew = error instanceof TypeError;
+        }
+
+        const values = [1];
+        const iterator = values.values();
+        iterator.next();
+        const exhausted = iterator.next();
+
+        function Constructor() { return () => new.target; }
+        const lexicalNewTarget = new Constructor();
+
+        const fixed = {};
+        Object.defineProperty(fixed, "value", {
+          value: 1, writable: true, configurable: false
+        });
+        const invalidDescriptor = new Proxy(fixed, {
+          getOwnPropertyDescriptor() {
+            return { value: 1, writable: false, configurable: false };
+          }
+        });
+        let proxyInvariantThrew = false;
+        try { Object.getOwnPropertyDescriptor(invalidDescriptor, "value"); }
+        catch (error) { proxyInvariantThrew = error instanceof TypeError; }
+
+        globalThis.sharedOperationsResult = [
+          +coercible === 7,
+          coercionGetterCalls === 1,
+          nonCallableToPrimitiveThrew,
+          objectToPrimitiveThrew,
+          exhausted.done,
+          lexicalNewTarget() === Constructor,
+          proxyInvariantThrew
+        ].every(Boolean);
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("sharedOperationsResult"),
+      Some(Value::Bool(true))
     );
   }
 
@@ -3475,8 +3796,7 @@ mod test {
 
     let source = crate::js!("globalThis.weak_map_key_for_gc = null;");
     let session = Parser::parse_source(source).expect("parse WeakMap key release");
-    let chunk =
-      compiler::compile_oxc(session.program(), session.source()).expect("compile WeakMap release");
+    let chunk = compiler::compile_session(&session).expect("compile WeakMap release");
     vm.run(chunk).expect("release WeakMap key");
     vm.collect_garbage_prototype();
 
@@ -3517,8 +3837,7 @@ mod test {
 
     let source = crate::js!("globalThis.weak_set_key_for_gc = null;");
     let session = Parser::parse_source(source).expect("parse WeakSet key release");
-    let chunk =
-      compiler::compile_oxc(session.program(), session.source()).expect("compile WeakSet release");
+    let chunk = compiler::compile_session(&session).expect("compile WeakSet release");
     vm.run(chunk).expect("release WeakSet key");
     vm.collect_garbage_prototype();
 
@@ -3580,8 +3899,7 @@ mod test {
 
     let source = crate::js!("globalThis.weak_ref_target = null;");
     let session = Parser::parse_source(source).expect("parse WeakRef target release");
-    let chunk = compiler::compile_oxc(session.program(), session.source())
-      .expect("compile WeakRef target release");
+    let chunk = compiler::compile_session(&session).expect("compile WeakRef target release");
     vm.run(chunk).expect("release WeakRef target");
     vm.collect_garbage_prototype();
 

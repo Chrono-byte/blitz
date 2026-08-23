@@ -184,19 +184,13 @@ pub(crate) fn static_builtin_arg_offset(
   args: &[Value],
   global_name: &str,
 ) -> usize {
-  let has_new_target = vm.current_new_target().is_some();
   let prepended_this = vm.builtin_this_arg_prepended();
-  let offset = if has_new_target || prepended_this {
-    1
-  } else {
-    0
-  };
+  let offset = usize::from(prepended_this);
   if crate::trace::enabled() && global_name == "Object" {
     let first_type = args.first().map_or("<none>", Value::type_name);
     eprintln!(
-      "[trace] static_builtin_arg_offset Object -> {} (new_target={}, prepended_this={}, args_len={}, arg0_type={})",
+      "[trace] static_builtin_arg_offset Object -> {} (prepended_this={}, args_len={}, arg0_type={})",
       offset,
-      has_new_target,
       prepended_this,
       args.len(),
       first_type

@@ -45,8 +45,7 @@ pub(crate) fn install_hidden_builtins(intrinsics: &mut Intrinsics) {
         compiler::with_compile_context_override(Some((allow_new_target, allow_super)), || {
           let session = Parser::parse_source(&eval_src)
             .map_err(|e| syntax_error(vm, format!("eval parse: {}", e)))?;
-          let prog = session.program();
-          compiler::compile_oxc_repl(prog, &eval_src)
+          compiler::compile_repl_session(&session)
             .map_err(|e| syntax_error(vm, format!("eval compile: {}", e)))
         })
       })?;

@@ -5,7 +5,7 @@ use crate::environment::EnvironmentRecord;
 use crate::errors::RuntimeError;
 use crate::gc;
 use crate::runtime_utils::{to_length, usize_to_decimal_string, usize_to_f64};
-use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, SharedValue, Value};
+use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, SharedValue, Value};
 use crate::vm::Vm;
 use crate::vm::state::{
   ArgumentsState, ExecutionContext, Frame, LOCALS_INITIAL_CAPACITY, SlotMetadata,
@@ -18,6 +18,20 @@ mod arguments;
 mod generators;
 
 impl Vm {
+  fn invoke_builtin(
+    &mut self,
+    function: &BuiltinFn,
+    args: &[Value],
+  ) -> Result<Value, RuntimeError> {
+    // Native integrations can still hold object backing stores for legacy
+    // construction APIs. Treat every native callback as a cache coherency
+    // boundary until all external object mutation is opaque and VM-owned.
+    self.caches.property_get.clear();
+    let result = (function.as_ref())(self, args);
+    self.caches.property_get.clear();
+    result
+  }
+
   pub(super) fn throw_class_constructor_call_error(
     &mut self,
     proto: &FunctionProto,
@@ -65,37 +79,6 @@ impl Vm {
     callee: &Value,
     args: &[Value],
   ) -> Result<Value, RuntimeError> {
-    let set_constructor_property = |value: &Value, ctor: &Value| -> Result<(), RuntimeError> {
-      match value {
-        Value::Object(obj) => {
-          obj.borrow_mut().properties.insert(
-            PropertyKey::String("constructor".to_string().into()),
-            PropertyDescriptor::builtin_data(ctor.clone()),
-          );
-        }
-        Value::Array(_, props) => {
-          props.borrow_mut().properties.insert(
-            PropertyKey::String("constructor".to_string().into()),
-            PropertyDescriptor::builtin_data(ctor.clone()),
-          );
-        }
-        Value::Closure { props, .. } => {
-          props.borrow_mut().properties.insert(
-            PropertyKey::String("constructor".to_string().into()),
-            PropertyDescriptor::builtin_data(ctor.clone()),
-          );
-        }
-        Value::BuiltinObject(_, props) | Value::Promise(_, props) => {
-          props.borrow_mut().properties.insert(
-            PropertyKey::String("constructor".to_string().into()),
-            PropertyDescriptor::builtin_data(ctor.clone()),
-          );
-        }
-        Value::Proxy(_) => {}
-        _ => {}
-      }
-      Ok(())
-    };
     let temp_root_base = self.roots.temporary.len();
     self.roots.temporary.push(callee.clone());
     self.roots.temporary.extend(args.iter().cloned());
@@ -197,12 +180,16 @@ impl Vm {
             .new_target
             .clone()
             .unwrap_or_else(|| callee.clone());
-          let proto = self
-            .get_property_value(
-              &proto_source,
-              &PropertyKey::String("prototype".to_string().into()),
-            )
-            .unwrap_or(Value::Null);
+          let proto = match self.get_property_value(
+            &proto_source,
+            &PropertyKey::String("prototype".to_string().into()),
+          ) {
+            Ok(proto) => proto,
+            Err(error) => {
+              self.roots.temporary.truncate(temp_root_base);
+              return Err(error);
+            }
+          };
           let instance_proto = match proto {
             Value::Object(_)
             | Value::Array(..)
@@ -213,10 +200,6 @@ impl Vm {
           let instance_obj = gc::track_object(Rc::new(RefCell::new(ObjectData::with_prototype(
             instance_proto,
           ))));
-          instance_obj.borrow_mut().properties.insert(
-            PropertyKey::String("constructor".to_string().into()),
-            PropertyDescriptor::ordinary_data(callee.clone()),
-          );
           Value::Object(instance_obj)
         };
         let prev_new_target = self.construction.new_target.clone();
@@ -247,10 +230,7 @@ impl Vm {
           | Value::Closure { .. }
           | Value::BuiltinObject(_, _)
           | Value::Proxy(_)
-          | Value::Promise(..) => {
-            drop(set_constructor_property(&result, callee));
-            result
-          }
+          | Value::Promise(..) => result,
           _ if is_derived_constructor => {
             let Some(this_obj) = initialized_this else {
               self.roots.temporary.truncate(temp_root_base);
@@ -262,7 +242,6 @@ impl Vm {
           }
           _ => instance,
         };
-        drop(set_constructor_property(&result, callee));
         if matches!(
           result,
           Value::Object(_)
@@ -317,12 +296,16 @@ impl Vm {
           .new_target
           .clone()
           .unwrap_or_else(|| callee.clone());
-        let proto = self
-          .get_property_value(
-            &proto_source,
-            &PropertyKey::String("prototype".to_string().into()),
-          )
-          .unwrap_or(Value::Null);
+        let proto = match self.get_property_value(
+          &proto_source,
+          &PropertyKey::String("prototype".to_string().into()),
+        ) {
+          Ok(proto) => proto,
+          Err(error) => {
+            self.roots.temporary.truncate(temp_root_base);
+            return Err(error);
+          }
+        };
         let instance_proto = match proto {
           Value::Object(_)
           | Value::Array(..)
@@ -333,10 +316,6 @@ impl Vm {
         let instance_obj = gc::track_object(Rc::new(RefCell::new(ObjectData::with_prototype(
           instance_proto,
         ))));
-        instance_obj.borrow_mut().properties.insert(
-          PropertyKey::String("constructor".to_string().into()),
-          PropertyDescriptor::ordinary_data(callee.clone()),
-        );
         let instance = Value::Object(instance_obj);
         // Builtin constructors receive:
         // args[0] = new instance (via call_with_this)
@@ -357,13 +336,9 @@ impl Vm {
           | Value::Closure { .. }
           | Value::BuiltinObject(_, _)
           | Value::Proxy(_)
-          | Value::Promise(..) => {
-            drop(set_constructor_property(&result, callee));
-            result
-          }
+          | Value::Promise(..) => result,
           _ => instance,
         };
-        drop(set_constructor_property(&result, callee));
         if matches!(
           result,
           Value::Object(_)
@@ -383,7 +358,7 @@ impl Vm {
       Value::Builtin(f) => {
         let prev_builtin_this =
           std::mem::replace(&mut self.execution.builtin_this_arg_prepended, false);
-        let result = (f.as_ref())(self, args);
+        let result = self.invoke_builtin(f, args);
         self.execution.builtin_this_arg_prepended = prev_builtin_this;
         if let Ok(value) = &result {
           if matches!(
@@ -495,7 +470,7 @@ impl Vm {
         let prev_closure_env = self.execution.active.closure_env.clone();
         let prev_slots = self.execution.active.slots.clone();
         let prev_lexical_env = Rc::clone(&self.execution.active.lexical_env);
-        let result = (f.as_ref())(self, args);
+        let result = self.invoke_builtin(f, args);
         self.execution.builtin_this_arg_prepended = prev_builtin_this;
         self.execution.active.this_value = prev_this;
         self.execution.active.closure_env = prev_closure_env;
@@ -580,7 +555,7 @@ impl Vm {
           let prev_closure_env = self.execution.active.closure_env.clone();
           let prev_slots = self.execution.active.slots.clone();
           let prev_lexical_env = Rc::clone(&self.execution.active.lexical_env);
-          let result = (f.as_ref())(self, &call_args);
+          let result = self.invoke_builtin(f, &call_args);
           self.execution.builtin_this_arg_prepended = prev_builtin_this;
           self.execution.active.this_value = prev_this;
           self.execution.active.closure_env = prev_closure_env;
@@ -619,7 +594,7 @@ impl Vm {
           let prev_closure_env = self.execution.active.closure_env.clone();
           let prev_slots = self.execution.active.slots.clone();
           let prev_lexical_env = Rc::clone(&self.execution.active.lexical_env);
-          let result = (f.as_ref())(self, &call_args);
+          let result = self.invoke_builtin(f, &call_args);
           self.execution.builtin_this_arg_prepended = prev_builtin_this;
           self.execution.active.this_value = prev_this;
           self.execution.active.closure_env = prev_closure_env;
@@ -831,6 +806,9 @@ impl Vm {
       } else {
         let props: Rc<RefCell<ObjectData>> =
           gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
+        props
+          .borrow_mut()
+          .set_internal_slot("[[ArgumentsData]]", Value::Bool(true));
         for (idx, maybe_value) in args_for_arguments.iter().enumerate() {
           props.borrow_mut().properties.insert(
             PropertyKey::String(usize_to_decimal_string(idx).into()),
@@ -900,6 +878,7 @@ impl Vm {
     this_value: Value,
     callee: Value,
   ) -> Result<(), RuntimeError> {
+    let new_target = self.construction.new_target.take();
     let lexical_env = Rc::clone(&self.execution.active.lexical_env);
     let caller_context = std::mem::replace(
       &mut self.execution.active,
@@ -923,10 +902,9 @@ impl Vm {
       context: caller_context,
       risc_state: None,
       callee: callee.clone(),
-      // `construct_new_target` is a pending entry value. Moving it into the
-      // suspended frame makes it active for this callee while ensuring an
+      // Arrow functions capture the surrounding [[NewTarget]], while an
       // ordinary nested call starts with no [[NewTarget]].
-      new_target: self.construction.new_target.take(),
+      new_target,
       upvalues: proto.upvalues.clone(),
     });
 

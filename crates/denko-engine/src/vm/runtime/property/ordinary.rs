@@ -296,8 +296,29 @@ pub(in crate::vm::runtime) fn set_property(
     Value::Array(arr, props) => {
       if let Some(i) = array_index_from_key(key) {
         let mut p = props.borrow_mut();
+        if let Some(descriptor) = p.properties.get_mut(key) {
+          if let PropertyDescriptor::Data {
+            value: current,
+            writable: true,
+            ..
+          } = descriptor
+          {
+            *current = value;
+          }
+          return Ok(());
+        }
         let current_len = array_length(&p);
         let next_len = current_len.max(i.saturating_add(1));
+        if next_len > current_len
+          && p
+            .properties
+            .get(&PropertyKey::String("length".into()))
+            .is_some_and(|descriptor| {
+              !matches!(descriptor, PropertyDescriptor::Data { writable: true, .. })
+            })
+        {
+          return Ok(());
+        }
         let dense_limit = arr
           .borrow()
           .len()
@@ -308,17 +329,19 @@ pub(in crate::vm::runtime) fn set_property(
             a.resize(i + 1, None);
           }
           a[i] = Some(value);
-          p.properties.insert(
-            PropertyKey::String("length".to_string().into()),
-            PropertyDescriptor::ordinary_data(Value::Number(usize_to_f64(next_len))),
-          );
         } else {
           p.properties
             .insert(key.clone(), PropertyDescriptor::ordinary_data(value));
-          p.properties.insert(
-            PropertyKey::String("length".to_string().into()),
-            PropertyDescriptor::ordinary_data(Value::Number(usize_to_f64(next_len))),
-          );
+        }
+        if next_len > current_len
+          && let Some(PropertyDescriptor::Data {
+            value: length_value,
+            ..
+          }) = p
+            .properties
+            .get_mut(&PropertyKey::String("length".into()))
+        {
+          *length_value = Value::Number(usize_to_f64(next_len));
         }
         return Ok(());
       }

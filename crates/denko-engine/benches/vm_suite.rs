@@ -110,7 +110,7 @@ fn hotpath_number_value() -> Value {
 fn compile_fixture(path: &Path) -> denko::bytecode::Chunk {
   let source = std::fs::read_to_string(path).expect("benchmark fixture should be readable");
   let session = Parser::parse_source(&source).expect("benchmark fixture should parse as JS");
-  compiler::compile_oxc(session.program(), &source).expect("benchmark fixture should compile")
+  compiler::compile_session(&session).expect("benchmark fixture should compile")
 }
 
 /// Returns the source text for the given benchmark fixture path.
@@ -161,7 +161,7 @@ fn bench_compile(c: &mut Criterion) {
       |b, source| {
         b.iter(|| {
           let session = Parser::parse_source(source).expect("fixture should parse as JS");
-          drop(compiler::compile_oxc(session.program(), source).expect("fixture should compile"));
+          drop(compiler::compile_session(&session).expect("fixture should compile"));
         });
       },
     );
@@ -293,8 +293,7 @@ fn bench_execute_unicode_hotpaths(c: &mut Criterion) {
     ("a6_like_comment_only_eval", comment_only_eval_source()),
   ] {
     let session = Parser::parse_source(&source).expect("benchmark source should parse as JS");
-    let chunk =
-      compiler::compile_oxc(session.program(), &source).expect("benchmark source should compile");
+    let chunk = compiler::compile_session(&session).expect("benchmark source should compile");
     let globals = benchmark_globals();
     let keep_globals = baseline_global_names(&globals);
     let mut vm = Vm::new(Rc::clone(&globals));

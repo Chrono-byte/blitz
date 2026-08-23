@@ -9,6 +9,7 @@ mod analysis;
 mod args;
 mod execution;
 mod precompile;
+mod repl;
 mod typecheck;
 
 use args::{Cli, CliCommand, ExecutionArgs};
@@ -105,5 +106,9 @@ fn main() -> Result<(), denko::errors::Error> {
     }
   };
 
-  execution::run(execution, node_compat)
+  let status = execution::run(execution, node_compat)?;
+  if status != 0 {
+    std::process::exit(status);
+  }
+  Ok(())
 }

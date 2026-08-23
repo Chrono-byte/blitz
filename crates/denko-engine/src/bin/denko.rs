@@ -70,7 +70,7 @@ fn run_script(
     denko::errors::RuntimeError::from(format!("Failed to read {}: {error}", path.display()))
   })?;
   let session = JsParser::parse_source(&source)?;
-  let chunk = compiler::compile_oxc(session.program(), &source)?;
+  let chunk = compiler::compile_session(&session)?;
   vm.run(chunk)?;
   Ok(())
 }
@@ -140,7 +140,7 @@ fn run_repl_source(
   source: &str,
 ) -> Result<Value, denko::errors::Error> {
   let session = JsParser::parse_source(source)?;
-  let chunk = compiler::compile_oxc_repl(session.program(), source)?;
+  let chunk = compiler::compile_repl_session(&session)?;
   vm.run_repl(chunk)
     .map_err(denko::errors::Error::from)
 }

@@ -456,26 +456,18 @@ pub(crate) fn install_string_boolean_symbol_builtins(
 
   let string_proto_for_ctor = Rc::clone(&string_proto_map);
   let string_ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
-    let value_idx = if vm.current_new_target().is_some() || args.len() > 1 {
-      1
-    } else {
-      0
-    };
+    let constructing = vm.current_new_target().is_some();
+    let value_idx = if constructing || args.len() > 1 { 1 } else { 0 };
     let receiver = args.first().cloned().unwrap_or(Value::Undefined);
     let s = match args.get(value_idx) {
       None => JsString::empty(),
       Some(v) => string_constructor_to_string(vm, v)?,
     };
-    if vm.current_new_target().is_some()
-      && let Value::Object(obj_rc) = &receiver
-    {
+    if constructing && let Value::Object(obj_rc) = &receiver {
       {
         let mut obj = obj_rc.borrow_mut();
         obj.set_prototype_value(Value::Object(Rc::clone(&string_proto_for_ctor)));
-        obj.properties.insert(
-          PKey::String("[[PrimitiveValue]]".to_string().into()),
-          PropertyDescriptor::ordinary_data(Value::String(s.clone())),
-        );
+        obj.set_internal_slot("[[PrimitiveValue]]", Value::String(s.clone()));
         obj.properties.insert(
           PKey::String("length".to_string().into()),
           PropertyDescriptor::Data {
@@ -753,9 +745,11 @@ pub(crate) fn install_string_boolean_symbol_builtins(
         None => length,
         Some(value) => {
           let number = vm.to_number_value(value)?;
-          if number.is_nan() || number <= 0.0 {
+          if number.is_nan() || number == f64::INFINITY {
+            length
+          } else if number <= 0.0 {
             0
-          } else if number.is_infinite() || number >= usize_to_f64(length) {
+          } else if number >= usize_to_f64(length) {
             length
           } else {
             number.trunc().to_usize().unwrap_or(length)

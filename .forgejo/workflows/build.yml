@@ -12,9 +12,7 @@ on:
       - "crates/**/src/**"
       - "crates/blitz-runtime/assets/**"
       - "examples/**"
-      - "tools/effect-assets/src/facades/**"
-      - "tools/effect-bytecode/Cargo.toml"
-      - "tools/effect-bytecode/src/**"
+      - "tools/effect-assets/**"
       - ".forgejo/workflows/build.yml"
   pull_request:
     paths:
@@ -25,9 +23,7 @@ on:
       - "crates/**/src/**"
       - "crates/blitz-runtime/assets/**"
       - "examples/**"
-      - "tools/effect-assets/src/facades/**"
-      - "tools/effect-bytecode/Cargo.toml"
-      - "tools/effect-bytecode/src/**"
+      - "tools/effect-assets/**"
       - ".forgejo/workflows/build.yml"
   workflow_dispatch:
 

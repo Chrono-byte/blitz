@@ -950,8 +950,7 @@ mod tests {
 
   fn run(source: &str) -> Vm {
     let session = Parser::parse_source(source).expect("parse Date test");
-    let chunk =
-      compiler::compile_oxc(session.program(), session.source()).expect("compile Date test");
+    let chunk = compiler::compile_session(&session).expect("compile Date test");
     let globals = Rc::new(RefCell::new(ObjectData::new()));
     globals.borrow_mut().properties.insert(
       PropertyKey::String("globalThis".into()),

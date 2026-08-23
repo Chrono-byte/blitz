@@ -7,10 +7,10 @@ use std::rc::Rc;
 use crate::Vm;
 use crate::ecmascript::semantics::{
   builtin_object, create_list_from_array_like, descriptor_value_from_descriptor,
-  property_key_to_value,
+  property_key_to_value, set_builtin_length, set_builtin_name,
 };
 use crate::runtime_utils::{array_from_values, static_builtin_arg_offset, strict_equal};
-use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
+use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value};
 
 fn key(value: &str) -> PropertyKey {
   PropertyKey::String(value.into())
@@ -29,10 +29,24 @@ fn install(
   name: &str,
   implementation: BuiltinFn,
 ) {
-  object.borrow_mut().properties.insert(
-    key(name),
-    PropertyDescriptor::builtin_data(function(implementation, function_prototype)),
-  );
+  let length = match name {
+    "apply" | "set" | "defineProperty" => 3.0,
+    "construct"
+    | "deleteProperty"
+    | "get"
+    | "getOwnPropertyDescriptor"
+    | "has"
+    | "setPrototypeOf" => 2.0,
+    "getPrototypeOf" | "isExtensible" | "ownKeys" | "preventExtensions" => 1.0,
+    _ => 0.0,
+  };
+  let function = function(implementation, function_prototype);
+  set_builtin_name(&function, name);
+  set_builtin_length(&function, length);
+  object
+    .borrow_mut()
+    .properties
+    .insert(key(name), PropertyDescriptor::builtin_data(function));
 }
 
 /// The ordinary global Reflect object.
@@ -50,6 +64,15 @@ pub(crate) fn create_reflect_intrinsics(
   let object = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
     Rc::clone(object_prototype),
   ))));
+  object.borrow_mut().properties.insert(
+    PropertyKey::Symbol(SymbolId::well_known_to_string_tag()),
+    PropertyDescriptor::Data {
+      value: Value::String("Reflect".into()),
+      writable: false,
+      enumerable: false,
+      configurable: true,
+    },
+  );
   install(
     &object,
     function_prototype,
@@ -104,15 +127,7 @@ pub(crate) fn create_reflect_intrinsics(
       if !constructor.is_constructable() {
         return Err(vm.throw_type_error("Reflect.construct: newTarget is not a constructor"));
       }
-      let arguments = match arg_list {
-        Value::Array(array, _) => array
-          .borrow()
-          .iter()
-          .filter_map(Clone::clone)
-          .collect(),
-        Value::Undefined | Value::Null => Vec::new(),
-        _ => Vec::new(),
-      };
+      let arguments = create_list_from_array_like(vm, &arg_list)?;
       let result = vm.construct_value_with_new_target(&target, &arguments, new_target.clone())?;
       if matches!(new_target, Value::Undefined) {
         return Ok(result);
@@ -235,6 +250,9 @@ pub(crate) fn create_reflect_intrinsics(
         .get(offset + 1)
         .cloned()
         .unwrap_or(Value::Undefined);
+      if !target.is_object() {
+        return Err(vm.throw_type_error("Reflect.deleteProperty called on non-object"));
+      }
       let property = vm.to_property_key(&property)?;
       Ok(Value::Bool(vm.delete_property_host(&target, &property)?))
     }),
@@ -278,12 +296,15 @@ pub(crate) fn create_reflect_intrinsics(
         .get(offset + 1)
         .cloned()
         .unwrap_or(Value::Undefined);
-      let _receiver = args
+      let receiver = args
         .get(offset + 2)
         .cloned()
         .unwrap_or_else(|| target.clone());
+      if !target.is_object() {
+        return Err(vm.throw_type_error("Reflect.get called on non-object"));
+      }
       let property = vm.to_property_key(&property)?;
-      vm.get_property_host(&target, &property)
+      vm.get_property_with_receiver(&target, &property, &receiver)
     }),
   );
   let object_prototype = Rc::clone(object_prototype);
@@ -301,6 +322,9 @@ pub(crate) fn create_reflect_intrinsics(
         .get(offset + 1)
         .cloned()
         .unwrap_or(Value::Undefined);
+      if !target.is_object() {
+        return Err(vm.throw_type_error("Reflect.getOwnPropertyDescriptor called on non-object"));
+      }
       let property = vm.to_property_key(&property)?;
       let Some(descriptor) = vm.get_own_property_value(&target, &property)? else {
         return Ok(Value::Undefined);
@@ -341,6 +365,9 @@ pub(crate) fn create_reflect_intrinsics(
         .get(offset + 1)
         .cloned()
         .unwrap_or(Value::Undefined);
+      if !target.is_object() {
+        return Err(vm.throw_type_error("Reflect.has called on non-object"));
+      }
       let property = vm.to_property_key(&property)?;
       Ok(Value::Bool(vm.has_property_host(&target, &property)?))
     }),
@@ -422,6 +449,9 @@ pub(crate) fn create_reflect_intrinsics(
         .get(offset + 3)
         .cloned()
         .unwrap_or_else(|| target.clone());
+      if !target.is_object() {
+        return Err(vm.throw_type_error("Reflect.set called on non-object"));
+      }
       let property = property_key_to_value(&vm.to_property_key(&property)?);
       Ok(Value::Bool(vm.reflect_set_property_host(
         &target,

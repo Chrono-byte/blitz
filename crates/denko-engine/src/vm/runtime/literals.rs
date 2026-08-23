@@ -221,6 +221,14 @@ impl Vm {
       env_cells.push(cell);
     }
 
+    if closure_proto.captures_this {
+      props.borrow_mut().set_internal_slot(
+        "[[LexicalNewTarget]]",
+        self
+          .current_new_target()
+          .unwrap_or(Value::Undefined),
+      );
+    }
     let closure = Value::Closure {
       proto: Rc::clone(&closure_proto),
       env: gc::track_env(Rc::new(RefCell::new(env_cells))),

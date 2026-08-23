@@ -306,7 +306,7 @@ impl Vm {
     Ok(self.get_prototype(&home_object))
   }
 
-  pub(super) fn get_property_with_receiver(
+  pub(crate) fn get_property_with_receiver(
     &mut self,
     obj: &Value,
     key: &PropertyKey,
@@ -324,6 +324,10 @@ impl Vm {
     }
     if let Some((desc, _holder)) = self.lookup_property_descriptor(obj, key, 0)? {
       return match desc {
+        PropertyDescriptor::Data {
+          value: Value::Uninitialized,
+          ..
+        } => Err(self.throw_reference_error("Cannot access module binding before initialization")),
         PropertyDescriptor::Data { value, .. } => Ok(value),
         PropertyDescriptor::Accessor { get, .. } => {
           if let Some(getter) = get.filter(|getter| !matches!(getter, Value::Undefined)) {
@@ -773,6 +777,25 @@ impl Vm {
     Ok(accepted)
   }
 
+  /// Host hook: define an own property from an already constructed descriptor.
+  ///
+  /// Native integrations must use this operation instead of mutating
+  /// [`ObjectData::properties`] directly. It preserves ECMAScript descriptor
+  /// invariants and invalidates property inline caches after an accepted write.
+  pub fn define_own_property_host(
+    &mut self,
+    object: &Value,
+    key: PropertyKey,
+    descriptor: PropertyDescriptor,
+  ) -> Result<bool, RuntimeError> {
+    let accepted =
+      self.define_own_property(object, key, partial_descriptor_from_complete(&descriptor))?;
+    if accepted {
+      self.bump_object_generation(object);
+    }
+    Ok(accepted)
+  }
+
   /// Host hook: set a property value on a target object-like value.
   ///
   /// # Errors
@@ -843,6 +866,10 @@ impl Vm {
     }
     if let Some((desc, _holder)) = self.lookup_property_descriptor(obj, key, 0)? {
       return match desc {
+        PropertyDescriptor::Data {
+          value: Value::Uninitialized,
+          ..
+        } => Err(self.throw_reference_error("Cannot access module binding before initialization")),
         PropertyDescriptor::Data { value, .. } => Ok(value),
         PropertyDescriptor::Accessor { get, .. } => {
           if let Some(getter) = get.filter(|getter| !matches!(getter, Value::Undefined)) {
@@ -1146,33 +1173,38 @@ impl Vm {
       }
       return Ok(());
     }
-    if let Value::Array(arr, props) = obj
-      && matches!(key, PropertyKey::String(s) if s == "length")
-      && let Value::Number(new_len_f) = value.clone()
-    {
-      let new_len = if new_len_f.is_nan() || new_len_f < 0.0 {
-        0usize
-      } else {
-        // Ensure the float is an integer within the u32 range before conversion.
-        let truncated = new_len_f.trunc();
-        if !truncated.is_finite() || truncated < 0.0 || truncated > u32::MAX as f64 {
-          return Err(self.throw_range_error("Invalid array length"));
-        }
-        let truncated_i64 = truncated as i64;
-        let truncated_u32 = u32::try_from(truncated_i64)
-          .map_err(|_| self.throw_range_error("Invalid array length"))?;
-        truncated_u32 as usize
+    if matches!(obj, Value::Array(..)) && matches!(key, PropertyKey::String(s) if s == "length") {
+      let descriptor = PartialDescriptor {
+        value: Some(value),
+        has_value: true,
+        ..PartialDescriptor::default()
       };
-      let mut a = arr.borrow_mut();
-      if new_len < a.len() {
-        a.truncate(new_len);
+      let accepted = self.define_own_property(obj, key.clone(), descriptor)?;
+      if !accepted && self.is_strict_mode() {
+        return Err(self.throw_type_error("Cannot assign to read only array length"));
       }
-      props.borrow_mut().properties.insert(
-        PropertyKey::String("length".to_string().into()),
-        PropertyDescriptor::ordinary_data(Value::Number(usize_to_f64(new_len))),
-      );
-      self.bump_object_generation(obj);
+      if accepted {
+        self.bump_object_generation(obj);
+      }
       return Ok(());
+    }
+    if let Value::Array(_, props) = obj
+      && let Some(index) = array_index_from_key(key)
+    {
+      let properties = props.borrow();
+      let current_len = array_length(&properties);
+      let length_writable = properties
+        .properties
+        .get(&PropertyKey::String("length".into()))
+        .is_none_or(|descriptor| {
+          matches!(descriptor, PropertyDescriptor::Data { writable: true, .. })
+        });
+      if index >= current_len && !length_writable {
+        if self.is_strict_mode() {
+          return Err(self.throw_type_error("Cannot extend an array with read only length"));
+        }
+        return Ok(());
+      }
     }
     let mut sync_arguments_slot = None;
     if let Some((desc, _holder)) = self.lookup_property_descriptor(obj, key, 0)? {

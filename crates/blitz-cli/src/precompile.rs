@@ -13,13 +13,14 @@ use blitz_runtime::runtime_graph::{
   ModuleVisibility, RUNTIME_ABI_VERSION, RUNTIME_GRAPH_FORMAT_VERSION, RuntimeGraphManifest,
   RuntimeModuleManifest, RuntimePrecompiledBundle, canonical_manifest_bytes, manifest_sha256,
 };
+use denko::Chunk;
 use denko::bytecode::BytecodeVersion;
+use denko::compiler::compile_session_with_context;
 use denko::compiler::core::ModuleContext;
 use denko::module::{
   ModuleLoader, ModuleRecord, ModuleRecordPayload, VirtualModule, VirtualModuleRegistry,
 };
 use denko::prelinked::{PrelinkedExport, PrelinkedImport, PrelinkedModule, PrelinkedModuleGraph};
-use denko::{Chunk, compile_oxc_with_ctx};
 use oxc_span::SourceType;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -737,7 +738,7 @@ fn compile_record(record: &ModuleRecord) -> Result<Chunk, String> {
     exports: record.exports.keys().cloned().collect(),
     namespace_exports: record.namespace_exports.clone(),
   };
-  let chunk = compile_oxc_with_ctx(session.program(), Some(&context), session.source())
+  let chunk = compile_session_with_context(session, &context)
     .map_err(|error| format!("compile {}: {error}", record.specifier))?;
   let chunk = denko::runtime_utils::clear_slot_types_in_chunk(chunk);
   chunk
@@ -1262,12 +1263,15 @@ mod tests {
     .expect("write package manifest");
     fs::write(
       source_root.join("value.ts"),
-      "export const value: number = 41;\n",
+      denko::js!(typescript, "export const value: number = 41;\n"),
     )
     .expect("write dependency");
     fs::write(
       source_root.join("main.ts"),
-      "import { value } from './value.ts';\nexport const answer = value + 1;\n",
+      denko::js!(
+        typescript,
+        "import { value } from './value.ts';\nexport const answer = value + 1;\n"
+      ),
     )
     .expect("write entry");
 

@@ -133,7 +133,7 @@ need an npm install or a separate TypeScript build step.
 ## Project layout
 
 - `crates/denko-engine` — the Denko parser, compiler, VM, garbage collector, and builtins
-- `crates/blitz-runtime` — host capabilities, application APIs, and the Blitz REPL
+- `crates/blitz-runtime` — host capabilities, application APIs, and persistent hosted sessions
 - `crates/blitz-cli` — the `blitz` command, checker, and analysis API
 - `crates/blitz-test262` — Test262 discovery, execution, and reporting
 - `crates/js-string` — JavaScript string implementation

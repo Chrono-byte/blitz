@@ -1,0 +1,38 @@
+{
+  "protocol_version": 1,
+  "id": 7,
+  "result": {
+    "diagnostics": [{ "message": "example diagnostic", "start": 1, "end": 2 }],
+    "declarations": [
+      {
+        "name": "answer",
+        "kind": "variable",
+        "detail": "const answer: number",
+        "documentation": "The answer.",
+        "start": 0,
+        "end": 18,
+        "selection_start": 6,
+        "selection_end": 12,
+        "children": []
+      }
+    ],
+    "definitions": [
+      {
+        "start": 20,
+        "end": 26,
+        "target_path": "/project/source.ts",
+        "target_virtual": "lib.es2023.d.ts",
+        "detail": "const answer: number",
+        "documentation": "The answer.",
+        "target_start": 0,
+        "target_end": 18,
+        "target_selection_start": 6,
+        "target_selection_end": 12
+      }
+    ],
+    "keywords": ["const"],
+    "runtime_globals": [{ "name": "console", "detail": "Console output" }],
+    "virtual_documents": [{ "id": "lib.es2023.d.ts", "text": "declare const answer: number;" }],
+    "inlay_hints": [{ "position": 12, "label": ": number", "kind": "type" }]
+  }
+}

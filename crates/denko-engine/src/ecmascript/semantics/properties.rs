@@ -102,10 +102,7 @@ pub(crate) fn this_string_value(
   match value {
     Value::String(s) => Ok(s.clone()),
     Value::Object(obj) => {
-      if let Some(PropertyDescriptor::Data { value, .. }) = obj.borrow().properties.get(
-        &PropertyKey::String("[[PrimitiveValue]]".to_string().into()),
-      ) && let Value::String(s) = value
-      {
+      if let Some(Value::String(s)) = obj.borrow().internal_slot("[[PrimitiveValue]]") {
         return Ok(s.clone());
       }
       Err(vm.throw_type_error("String method called on incompatible receiver"))
