@@ -94,6 +94,45 @@ mod test {
   }
 
   #[test]
+  fn promise_species_is_the_standard_constructor_getter() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        const descriptor = Object.getOwnPropertyDescriptor(Promise, Symbol.species);
+        globalThis.result = [
+          Promise[Symbol.species] === Promise,
+          descriptor.get.name, descriptor.get.length,
+          descriptor.set, descriptor.enumerable, descriptor.configurable
+        ].join(",");
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("result"),
+      Some(Value::String(
+        "true,get [Symbol.species],0,,false,true".into()
+      ))
+    );
+  }
+
+  #[test]
+  fn typed_array_constructors_expose_standard_lengths() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        const TypedArray = Object.getPrototypeOf(Uint8Array);
+        globalThis.result = [
+          Object.hasOwnProperty.call(TypedArray, "length"), TypedArray.length,
+          Uint8Array.length, Int16Array.length, Float64Array.length
+        ].join(",");
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("result"),
+      Some(Value::String("true,0,3,3,3".into()))
+    );
+  }
+
+  #[test]
   fn byte_typed_arrays_share_array_buffer_storage() {
     let (vm, _) = run_script(crate::js!(
       r#"
@@ -1974,7 +2013,10 @@ mod test {
           invalidArgumentsListThrew,
           !Reflect.ownKeys(boxed).includes("[[PrimitiveValue]]"),
           Object.keys.name === "keys" && Object.keys({}) instanceof Array,
-          objectKeysNullThrew
+          objectKeysNullThrew,
+          Object.getOwnPropertyNames(1).length === 0,
+          Object.getOwnPropertyNames("x").join(",") === "0,length",
+          Object.getOwnPropertySymbols(false).length === 0
         ].every(Boolean);
       "#
     ));
@@ -5101,6 +5143,8 @@ mod test {
     let src = crate::js!(
       r#"
             class A {}
+            globalThis.classBindingIsFunction = typeof A === "function";
+            globalThis.classDeclarationGlobal = globalThis.A;
         "#
     );
     let session = Parser::parse_source(src).expect("parse ok");
@@ -5108,7 +5152,14 @@ mod test {
     let globals = test_globals();
     let mut vm = Vm::new(globals);
     vm.run(chunk).expect("run ok");
-    assert!(matches!(vm.get_global("A"), Some(Value::Closure { .. })));
+    assert_eq!(
+      vm.get_global("classBindingIsFunction"),
+      Some(Value::Bool(true))
+    );
+    assert_eq!(
+      vm.get_global("classDeclarationGlobal"),
+      Some(Value::Undefined)
+    );
   }
 
   #[test]

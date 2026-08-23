@@ -140,6 +140,7 @@ impl Compiler {
   fn lexical_declared_names_of_statement(
     stmt: &oast::Statement<'_>,
     out: &mut HashSet<String>,
+    function_body: bool,
   ) {
     match stmt {
       oast::Statement::VariableDeclaration(v)
@@ -149,7 +150,7 @@ impl Compiler {
           Self::collect_binding_names(&decl.id, out);
         }
       }
-      oast::Statement::FunctionDeclaration(f) => {
+      oast::Statement::FunctionDeclaration(f) if !function_body => {
         if let Some(id) = &f.id {
           out.insert(id.name.to_string());
         }
@@ -281,51 +282,246 @@ impl Compiler {
     Ok(())
   }
 
+  fn validate_variable_initializers(
+    &self,
+    declaration: &oast::VariableDeclaration<'_>,
+  ) -> Result<(), crate::errors::CompilerError> {
+    for declarator in &declaration.declarations {
+      if let Some(init) = &declarator.init {
+        self.validate_early_errors_in_expression(init)?;
+      }
+    }
+    Ok(())
+  }
+
+  fn validate_function(
+    &self,
+    function: &oast::Function<'_>,
+  ) -> Result<(), crate::errors::CompilerError> {
+    let mut params = HashSet::new();
+    let simple = function.params.rest.is_none()
+      && function.params.items.iter().all(|p| {
+        p.initializer.is_none() && matches!(p.pattern, oast::BindingPattern::BindingIdentifier(_))
+      });
+    for parameter in &function.params.items {
+      let mut names = HashSet::new();
+      Self::collect_binding_names(&parameter.pattern, &mut names);
+      let duplicate = names.iter().any(|name| params.contains(name));
+      if !simple && duplicate {
+        return Err(crate::errors::CompilerError::from(
+          "SyntaxError: duplicate parameter name",
+        ));
+      }
+      params.extend(names);
+      if let Some(init) = &parameter.initializer {
+        self.validate_early_errors_in_expression(init)?;
+      }
+    }
+    if let Some(rest) = &function.params.rest {
+      let mut names = HashSet::new();
+      Self::collect_binding_names(&rest.rest.argument, &mut names);
+      if names
+        .iter()
+        .any(|name| !params.insert(name.clone()))
+      {
+        return Err(crate::errors::CompilerError::from(
+          "SyntaxError: duplicate parameter name",
+        ));
+      }
+    }
+    if let Some(body) = &function.body {
+      let mut lexical = HashSet::new();
+      for stmt in &body.statements {
+        Self::lexical_declared_names_of_statement(stmt, &mut lexical, true);
+      }
+      if params.iter().any(|name| lexical.contains(name)) {
+        return Err(crate::errors::CompilerError::from(
+          "SyntaxError: parameter/body lexical conflict",
+        ));
+      }
+      self.validate_early_errors_in_statements(&body.statements, false, true)?;
+    }
+    Ok(())
+  }
+
+  fn validate_class(
+    &self,
+    class: &oast::Class<'_>,
+  ) -> Result<(), crate::errors::CompilerError> {
+    if let Some(super_class) = &class.super_class {
+      self.validate_early_errors_in_expression(super_class)?;
+    }
+    for element in &class.body.body {
+      match element {
+        oast::ClassElement::StaticBlock(block) => {
+          self.validate_early_errors_in_statements(&block.body, false, false)?;
+        }
+        oast::ClassElement::MethodDefinition(method) => {
+          if let Some(key) = method.key.as_expression() {
+            self.validate_early_errors_in_expression(key)?;
+          }
+          self.validate_function(&method.value)?;
+        }
+        oast::ClassElement::PropertyDefinition(property) => {
+          if let Some(key) = property.key.as_expression() {
+            self.validate_early_errors_in_expression(key)?;
+          }
+          if let Some(value) = &property.value {
+            self.validate_early_errors_in_expression(value)?;
+          }
+        }
+        oast::ClassElement::AccessorProperty(property) => {
+          if let Some(value) = &property.value {
+            self.validate_early_errors_in_expression(value)?;
+          }
+        }
+        oast::ClassElement::TSIndexSignature(_) => {}
+      }
+    }
+    Ok(())
+  }
+
   fn validate_early_errors_in_expression(
     &self,
     expr: &oast::Expression<'_>,
   ) -> Result<(), crate::errors::CompilerError> {
-    let mut expr = expr;
-    while let oast::Expression::ParenthesizedExpression(p) = expr {
-      expr = &p.expression;
-    }
+    use oast::Expression as E;
     match expr {
-      oast::Expression::FunctionExpression(f) => {
-        if let Some(body) = &f.body {
-          self.validate_early_errors_in_statements(&body.statements, false)?;
-        }
+      E::FunctionExpression(f) => self.validate_function(f),
+      E::ArrowFunctionExpression(a) => {
+        self.validate_early_errors_in_statements(&a.body.statements, false, true)
       }
-      oast::Expression::ArrowFunctionExpression(a) => {
-        self.validate_early_errors_in_statements(&a.body.statements, false)?;
-      }
-      oast::Expression::ClassExpression(c) => {
-        for element in &c.body.body {
-          match element {
-            oast::ClassElement::StaticBlock(block) => {
-              self.validate_early_errors_in_statements(&block.body, false)?;
-            }
-            oast::ClassElement::MethodDefinition(md) => {
-              if let Some(body) = &md.value.body {
-                self.validate_early_errors_in_statements(&body.statements, false)?;
-              }
-            }
-            oast::ClassElement::PropertyDefinition(prop) => {
-              if let Some(value) = &prop.value {
-                self.validate_early_errors_in_expression(value)?;
-              }
-            }
-            oast::ClassElement::AccessorProperty(prop) => {
-              if let Some(value) = &prop.value {
-                self.validate_early_errors_in_expression(value)?;
-              }
-            }
-            oast::ClassElement::TSIndexSignature(_) => {}
+      E::ClassExpression(c) => self.validate_class(c),
+      E::ParenthesizedExpression(p) => self.validate_early_errors_in_expression(&p.expression),
+      E::ArrayExpression(a) => {
+        for element in &a.elements {
+          if let Some(e) = element.as_expression() {
+            self.validate_early_errors_in_expression(e)?;
+          } else if let oast::ArrayExpressionElement::SpreadElement(s) = element {
+            self.validate_early_errors_in_expression(&s.argument)?;
           }
         }
+        Ok(())
       }
-      _ => {}
+      E::ObjectExpression(o) => {
+        for property in &o.properties {
+          match property {
+            oast::ObjectPropertyKind::ObjectProperty(p) => {
+              if let Some(key) = p.key.as_expression() {
+                self.validate_early_errors_in_expression(key)?;
+              }
+              self.validate_early_errors_in_expression(&p.value)?;
+            }
+            oast::ObjectPropertyKind::SpreadProperty(s) => {
+              self.validate_early_errors_in_expression(&s.argument)?;
+            }
+          }
+        }
+        Ok(())
+      }
+      E::TemplateLiteral(t) => {
+        for e in &t.expressions {
+          self.validate_early_errors_in_expression(e)?;
+        }
+        Ok(())
+      }
+      E::TaggedTemplateExpression(t) => {
+        self.validate_early_errors_in_expression(&t.tag)?;
+        for e in &t.quasi.expressions {
+          self.validate_early_errors_in_expression(e)?;
+        }
+        Ok(())
+      }
+      E::CallExpression(c) => {
+        self.validate_early_errors_in_expression(&c.callee)?;
+        for a in &c.arguments {
+          if let Some(e) = a.as_expression() {
+            self.validate_early_errors_in_expression(e)?;
+          } else if let oast::Argument::SpreadElement(s) = a {
+            self.validate_early_errors_in_expression(&s.argument)?;
+          }
+        }
+        Ok(())
+      }
+      E::NewExpression(n) => {
+        self.validate_early_errors_in_expression(&n.callee)?;
+        for a in &n.arguments {
+          if let Some(e) = a.as_expression() {
+            self.validate_early_errors_in_expression(e)?;
+          } else if let oast::Argument::SpreadElement(s) = a {
+            self.validate_early_errors_in_expression(&s.argument)?;
+          }
+        }
+        Ok(())
+      }
+      E::ComputedMemberExpression(m) => {
+        self.validate_early_errors_in_expression(&m.object)?;
+        self.validate_early_errors_in_expression(&m.expression)
+      }
+      E::StaticMemberExpression(m) => self.validate_early_errors_in_expression(&m.object),
+      E::PrivateFieldExpression(m) => self.validate_early_errors_in_expression(&m.object),
+      E::ChainExpression(c) => match &c.expression {
+        oast::ChainElement::CallExpression(call) => {
+          self.validate_early_errors_in_expression(&call.callee)?;
+          for a in &call.arguments {
+            if let Some(e) = a.as_expression() {
+              self.validate_early_errors_in_expression(e)?;
+            } else if let oast::Argument::SpreadElement(s) = a {
+              self.validate_early_errors_in_expression(&s.argument)?;
+            }
+          }
+          Ok(())
+        }
+        oast::ChainElement::TSNonNullExpression(e) => {
+          self.validate_early_errors_in_expression(&e.expression)
+        }
+        oast::ChainElement::ComputedMemberExpression(m) => {
+          self.validate_early_errors_in_expression(&m.object)?;
+          self.validate_early_errors_in_expression(&m.expression)
+        }
+        oast::ChainElement::StaticMemberExpression(m) => {
+          self.validate_early_errors_in_expression(&m.object)
+        }
+        oast::ChainElement::PrivateFieldExpression(m) => {
+          self.validate_early_errors_in_expression(&m.object)
+        }
+      },
+      E::AssignmentExpression(a) => self.validate_early_errors_in_expression(&a.right),
+      E::AwaitExpression(a) => self.validate_early_errors_in_expression(&a.argument),
+      E::BinaryExpression(a) => {
+        self.validate_early_errors_in_expression(&a.left)?;
+        self.validate_early_errors_in_expression(&a.right)
+      }
+      E::LogicalExpression(a) => {
+        self.validate_early_errors_in_expression(&a.left)?;
+        self.validate_early_errors_in_expression(&a.right)
+      }
+      E::ConditionalExpression(a) => {
+        self.validate_early_errors_in_expression(&a.test)?;
+        self.validate_early_errors_in_expression(&a.consequent)?;
+        self.validate_early_errors_in_expression(&a.alternate)
+      }
+      E::SequenceExpression(a) => {
+        for e in &a.expressions {
+          self.validate_early_errors_in_expression(e)?;
+        }
+        Ok(())
+      }
+      E::UnaryExpression(a) => self.validate_early_errors_in_expression(&a.argument),
+      E::YieldExpression(a) => {
+        if let Some(e) = &a.argument {
+          self.validate_early_errors_in_expression(e)?;
+        }
+        Ok(())
+      }
+      E::PrivateInExpression(a) => self.validate_early_errors_in_expression(&a.right),
+      E::TSAsExpression(a) => self.validate_early_errors_in_expression(&a.expression),
+      E::TSSatisfiesExpression(a) => self.validate_early_errors_in_expression(&a.expression),
+      E::TSTypeAssertion(a) => self.validate_early_errors_in_expression(&a.expression),
+      E::TSNonNullExpression(a) => self.validate_early_errors_in_expression(&a.expression),
+      E::TSInstantiationExpression(a) => self.validate_early_errors_in_expression(&a.expression),
+      _ => Ok(()),
     }
-    Ok(())
   }
 
   fn validate_early_errors_in_program(
@@ -333,27 +529,35 @@ impl Compiler {
     stmts: &[oast::Statement<'_>],
     allow_module_declarations: bool,
   ) -> Result<(), crate::errors::CompilerError> {
-    self.validate_early_errors_in_statements(stmts, allow_module_declarations)
+    self.validate_early_errors_in_statements(
+      stmts,
+      allow_module_declarations,
+      !allow_module_declarations,
+    )
   }
 
   fn validate_early_errors_in_statements(
     &self,
     stmts: &[oast::Statement<'_>],
     allow_module_declarations: bool,
+    function_body: bool,
   ) -> Result<(), crate::errors::CompilerError> {
     let mut lexical = HashSet::new();
     let mut vars = HashSet::new();
     for stmt in stmts {
-      Self::lexical_declared_names_of_statement(stmt, &mut lexical);
+      Self::lexical_declared_names_of_statement(stmt, &mut lexical, function_body);
+      if function_body
+        && let oast::Statement::FunctionDeclaration(function) = stmt
+        && let Some(id) = &function.id
+      {
+        vars.insert(id.name.to_string());
+      }
       self.var_declared_names_of_statement(stmt, &mut vars);
     }
     let mut seen_lexical = HashSet::new();
     for stmt in stmts {
-      if matches!(stmt, oast::Statement::FunctionDeclaration(_)) {
-        continue;
-      }
       let mut names = HashSet::new();
-      Self::lexical_declared_names_of_statement(stmt, &mut names);
+      Self::lexical_declared_names_of_statement(stmt, &mut names, function_body);
       let mut names: Vec<_> = names.into_iter().collect();
       names.sort();
       for name in names {
@@ -387,84 +591,91 @@ impl Compiler {
       }
       match stmt {
         oast::Statement::BlockStatement(b) => {
-          self.validate_early_errors_in_statements(&b.body, false)?
+          self.validate_early_errors_in_statements(&b.body, false, false)?
         }
         oast::Statement::IfStatement(i) => {
+          self.validate_early_errors_in_expression(&i.test)?;
           self.validate_statement_position_function(&i.consequent)?;
-          self.validate_early_errors_in_statements(std::slice::from_ref(&i.consequent), false)?;
+          self.validate_early_errors_in_statements(
+            std::slice::from_ref(&i.consequent),
+            false,
+            false,
+          )?;
           if let Some(alt) = &i.alternate {
             self.validate_statement_position_function(alt)?;
-            self.validate_early_errors_in_statements(std::slice::from_ref(alt), false)?;
+            self.validate_early_errors_in_statements(std::slice::from_ref(alt), false, false)?;
           }
         }
         oast::Statement::WhileStatement(w) => {
+          self.validate_early_errors_in_expression(&w.test)?;
           self.validate_statement_position_function(&w.body)?;
-          self.validate_early_errors_in_statements(std::slice::from_ref(&w.body), false)?;
+          self.validate_early_errors_in_statements(std::slice::from_ref(&w.body), false, false)?
         }
         oast::Statement::DoWhileStatement(d) => {
+          self.validate_early_errors_in_expression(&d.test)?;
           self.validate_statement_position_function(&d.body)?;
-          self.validate_early_errors_in_statements(std::slice::from_ref(&d.body), false)?;
+          self.validate_early_errors_in_statements(std::slice::from_ref(&d.body), false, false)?
         }
         oast::Statement::ForStatement(f) => {
           self.validate_statement_position_function(&f.body)?;
-          self.validate_early_errors_in_statements(std::slice::from_ref(&f.body), false)?;
+          self.validate_early_errors_in_statements(std::slice::from_ref(&f.body), false, false)?
         }
         oast::Statement::ForInStatement(f) => {
           self.validate_statement_position_function(&f.body)?;
-          self.validate_early_errors_in_statements(std::slice::from_ref(&f.body), false)?;
+          self.validate_early_errors_in_statements(std::slice::from_ref(&f.body), false, false)?
         }
         oast::Statement::ForOfStatement(f) => {
           self.validate_statement_position_function(&f.body)?;
-          self.validate_early_errors_in_statements(std::slice::from_ref(&f.body), false)?;
+          self.validate_early_errors_in_statements(std::slice::from_ref(&f.body), false, false)?
         }
         oast::Statement::LabeledStatement(l) => {
           self.validate_statement_position_function(&l.body)?;
-          self.validate_early_errors_in_statements(std::slice::from_ref(&l.body), false)?;
+          self.validate_early_errors_in_statements(std::slice::from_ref(&l.body), false, false)?;
         }
         oast::Statement::WithStatement(w) => {
-          self.validate_early_errors_in_statements(std::slice::from_ref(&w.body), false)?;
+          self.validate_early_errors_in_statements(std::slice::from_ref(&w.body), false, false)?
         }
         oast::Statement::TryStatement(t) => {
-          self.validate_early_errors_in_statements(&t.block.body, false)?;
+          self.validate_early_errors_in_statements(&t.block.body, false, false)?;
           if let Some(handler) = &t.handler {
-            self.validate_early_errors_in_statements(&handler.body.body, false)?;
+            if let Some(parameter) = &handler.param {
+              let mut names = HashSet::new();
+              Self::collect_binding_names(&parameter.pattern, &mut names);
+              let mut lexical = HashSet::new();
+              for stmt in &handler.body.body {
+                Self::lexical_declared_names_of_statement(stmt, &mut lexical, false);
+              }
+              if names.iter().any(|name| lexical.contains(name)) {
+                return Err(crate::errors::CompilerError::from(
+                  "SyntaxError: catch parameter/body lexical conflict",
+                ));
+              }
+            }
+            self.validate_early_errors_in_statements(&handler.body.body, false, false)?;
           }
           if let Some(finalizer) = &t.finalizer {
-            self.validate_early_errors_in_statements(&finalizer.body, false)?;
+            self.validate_early_errors_in_statements(&finalizer.body, false, false)?;
           }
         }
         oast::Statement::FunctionDeclaration(f) => {
-          if let Some(body) = &f.body {
-            self.validate_early_errors_in_statements(&body.statements, false)?;
-          }
+          self.validate_function(f)?;
         }
         oast::Statement::ClassDeclaration(c) => {
-          for element in &c.body.body {
-            match element {
-              oast::ClassElement::StaticBlock(block) => {
-                self.validate_early_errors_in_statements(&block.body, false)?;
-              }
-              oast::ClassElement::MethodDefinition(md) => {
-                if let Some(body) = &md.value.body {
-                  self.validate_early_errors_in_statements(&body.statements, false)?;
-                }
-              }
-              oast::ClassElement::PropertyDefinition(prop) => {
-                if let Some(expr) = &prop.value {
-                  self.validate_early_errors_in_expression(expr)?;
-                }
-              }
-              oast::ClassElement::AccessorProperty(prop) => {
-                if let Some(expr) = &prop.value {
-                  self.validate_early_errors_in_expression(expr)?;
-                }
-              }
-              oast::ClassElement::TSIndexSignature(_) => {}
-            }
-          }
+          self.validate_class(c)?;
+        }
+        oast::Statement::VariableDeclaration(v) => {
+          self.validate_variable_initializers(v)?;
         }
         oast::Statement::ExpressionStatement(e) => {
           self.validate_early_errors_in_expression(&e.expression)?;
+        }
+        oast::Statement::ReturnStatement(s) => {
+          if let Some(expression) = &s.argument {
+            self.validate_early_errors_in_expression(expression)?;
+          }
+        }
+        oast::Statement::ThrowStatement(s) => {
+          self.validate_early_errors_in_expression(&s.argument)?;
         }
         _ => {}
       }
@@ -1023,6 +1234,48 @@ mod test {
   }
 
   #[test]
+  fn module_export_updates_follow_binding_identity() {
+    let context = ModuleContext {
+      module_index: 0,
+      imports: HashMap::new(),
+      exports: HashSet::from(["x".to_string(), "shadow".to_string(), "capture".to_string()]),
+      namespace_exports: HashMap::new(),
+    };
+    let source = crate::js!(
+      r#"
+        export let x = 0;
+        export function shadow() { let x = 1; x = 2; }
+        export function capture() { x = 3; }
+      "#
+    );
+    let session =
+      crate::parser::Parser::parse_source_with_type(source, oxc_span::SourceType::mjs())
+        .expect("parse module");
+    let chunk = compile_oxc_with_ctx(session.program(), Some(&context), session.source())
+      .expect("compile module");
+    let shadow = chunk
+      .functions
+      .iter()
+      .find(|function| function.name == "shadow")
+      .unwrap();
+    let capture = chunk
+      .functions
+      .iter()
+      .find(|function| function.name == "capture")
+      .unwrap();
+    let count_export_writes = |function: &crate::bytecode::FunctionProto| {
+      function
+        .chunk
+        .code
+        .iter()
+        .filter(|word| Op::from_byte((*word & 0xff) as u8) == Some(Op::SetModuleExport))
+        .count()
+    };
+    assert_eq!(count_export_writes(shadow), 0);
+    assert_eq!(count_export_writes(capture), 1);
+  }
+
+  #[test]
   fn strict_assignment_to_arguments_is_rejected() {
     let src = crate::js!(
       r#"
@@ -1208,6 +1461,87 @@ mod test {
   }
 
   #[test]
+  fn lexical_classes_loops_and_duplicate_parameters_follow_ecmascript_binding_rules() {
+    let vm = run_compiled(crate::js!(
+      r#"
+        let class_tdz;
+        try { class_tdz = typeof C; } catch (_) { class_tdz = "tdz"; }
+        class C {}
+        let class_assignment_threw = false;
+        try { C = 1; } catch (_) { class_assignment_threw = true; }
+
+        let outer = 1;
+        let loop_tdz_threw = false;
+        try { for (let outer = outer; false;) {} } catch (_) { loop_tdz_threw = true; }
+
+        function duplicate(value, value) { return value; }
+        globalThis.class_tdz = class_tdz;
+        globalThis.class_assignment_threw = class_assignment_threw;
+        globalThis.class_global = globalThis.C;
+        globalThis.loop_tdz_threw = loop_tdz_threw;
+        globalThis.duplicate_parameter = duplicate(1, 2);
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("class_tdz"),
+      Some(Value::String("tdz".into()))
+    );
+    assert_eq!(
+      vm.get_global("class_assignment_threw"),
+      Some(Value::Bool(true))
+    );
+    assert_eq!(vm.get_global("class_global"), Some(Value::Undefined));
+    assert_eq!(vm.get_global("loop_tdz_threw"), Some(Value::Bool(true)));
+    assert_eq!(
+      vm.get_global("duplicate_parameter"),
+      Some(Value::Number(2.0))
+    );
+  }
+
+  #[test]
+  fn private_names_are_class_specific_unforgeable_and_brand_checked() {
+    let vm = run_compiled(crate::js!(
+      r#"
+        class A { #value = 1; read(other) { return other.#value; } }
+        class B { #value = 2; }
+        let rejected = false;
+        try { new A().read(new B()); } catch (error) { rejected = error instanceof TypeError; }
+        const instance = new A();
+        globalThis.private_brand_rejected = rejected;
+        globalThis.private_string_spoof = instance["\u001fprivate#value"];
+        globalThis.private_reflected = Reflect.ownKeys(instance).length;
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("private_brand_rejected"),
+      Some(Value::Bool(true))
+    );
+    assert_eq!(
+      vm.get_global("private_string_spoof"),
+      Some(Value::Undefined)
+    );
+    assert_eq!(vm.get_global("private_reflected"), Some(Value::Number(0.0)));
+  }
+
+  #[test]
+  fn nested_optional_chains_short_circuit_and_strict_delete_is_rejected() {
+    let vm = run_compiled(crate::js!(
+      "globalThis.optional_chain_result = null?.missing.value;"
+    ));
+    assert_eq!(
+      vm.get_global("optional_chain_result"),
+      Some(Value::Undefined)
+    );
+
+    let source = crate::js!(r#""use strict"; let value; delete value;"#);
+    let session = crate::parser::Parser::parse_source(source).expect("parse strict delete");
+    let error = compile(session.program(), session.source()).expect_err("strict delete must fail");
+    assert!(error.to_string().contains("delete"));
+  }
+
+  #[test]
   fn object_literal_evaluates_mixed_properties_in_source_order() {
     let vm = run_compiled(crate::js!(
       r#"
@@ -1376,6 +1710,43 @@ mod test {
       vm.get_global("later_parameter_tdz"),
       Some(Value::Bool(true))
     );
+  }
+
+  #[test]
+  fn var_and_function_declarations_share_script_function_scope() {
+    let source = crate::js!(
+      r#"var f; function f() { return 1; } function outer() { var nested; function nested() {} }"#
+    );
+    let session = crate::parser::Parser::parse_source(source).expect("parse ok");
+    compile(session.program(), session.source()).expect("var/function redeclaration is valid");
+
+    let block_conflict = crate::js!(r#"{ var f; function f() {} }"#);
+    let session = crate::parser::Parser::parse_source(block_conflict).expect("parse ok");
+    assert!(compile(session.program(), session.source()).is_err());
+
+    let module_conflict = crate::js!(r#"var f; function f() {}"#);
+    let session =
+      crate::parser::Parser::parse_source_with_type(module_conflict, oxc_span::SourceType::mjs())
+        .expect("parse module");
+    assert!(compile(session.program(), session.source()).is_err());
+  }
+
+  #[test]
+  fn early_errors_recurse_through_initializers_and_check_parameter_bodies() {
+    for source in [
+      crate::js!(r#"const value = true ? { method: function () { let x; let x; } } : 0;"#),
+      crate::js!(
+        r#"const value = [0, (() => ({ nested: class { method() { let x; let x; } } }))];"#
+      ),
+      crate::js!(r#"function invalid(parameter) { let parameter; }"#),
+      crate::js!(r#"try {} catch (error) { let error; }"#),
+    ] {
+      let session = crate::parser::Parser::parse_source(source).expect("parse ok");
+      assert!(
+        compile(session.program(), session.source()).is_err(),
+        "{source}"
+      );
+    }
   }
 
   #[test]

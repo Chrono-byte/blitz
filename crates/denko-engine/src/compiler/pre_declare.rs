@@ -79,7 +79,15 @@ impl Compiler {
     use std::collections::HashSet;
 
     for stmt in stmts {
-      if let oast::Statement::VariableDeclaration(v) = stmt {
+      let variable = match stmt {
+        oast::Statement::VariableDeclaration(variable) => Some(variable.as_ref()),
+        oast::Statement::ExportNamedDeclaration(export) => match &export.declaration {
+          Some(oast::Declaration::VariableDeclaration(variable)) => Some(variable.as_ref()),
+          _ => None,
+        },
+        _ => None,
+      };
+      if let Some(v) = variable {
         for dec in &v.declarations {
           let mut names = HashSet::new();
           Self::collect_binding_names(&dec.id, &mut names);
@@ -108,6 +116,34 @@ impl Compiler {
               self.mark_local_immutable(slot);
             }
           }
+        }
+      }
+
+      let class = match stmt {
+        oast::Statement::ClassDeclaration(class) => Some(class.as_ref()),
+        oast::Statement::ExportNamedDeclaration(export) => match &export.declaration {
+          Some(oast::Declaration::ClassDeclaration(class)) => Some(class.as_ref()),
+          _ => None,
+        },
+        oast::Statement::ExportDefaultDeclaration(export) => match &export.declaration {
+          oast::ExportDefaultDeclarationKind::ClassDeclaration(class) => Some(class.as_ref()),
+          _ => None,
+        },
+        _ => None,
+      };
+      if let Some(class) = class
+        && let Some(identifier) = &class.id
+      {
+        let name = identifier.name.to_string();
+        if self
+          .scopes
+          .last()
+          .is_some_and(|scope| !scope.bindings.contains_key(&name))
+        {
+          let slot = self.add_local_with_mirror(name.clone(), None, false);
+          self.mark_local_tdz(slot);
+          self.mark_local_immutable(slot);
+          self.add_lexical_binding(&name);
         }
       }
     }

@@ -1031,6 +1031,7 @@ pub(crate) fn install_typed_arrays(
         })
       };
       let ctor_val = Value::BuiltinObject(ctor_fn.clone(), ctor_map.clone());
+      crate::ecmascript::semantics::set_builtin_length(&ctor_val, 3.0);
       ctor_map.borrow_mut().properties.insert(
         PropertyKey::String("prototype".to_string().into()),
         PropertyDescriptor::builtin_prototype(Value::Object(proto_map.clone())),

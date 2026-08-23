@@ -23,14 +23,7 @@ fn this_number_value(
   match this {
     Value::Number(value) => Ok(*value),
     Value::Object(object) => {
-      if let Some(PropertyDescriptor::Data {
-        value: Value::Number(value),
-        ..
-      }) = object
-        .borrow()
-        .properties
-        .get(&PropertyKey::String("[[PrimitiveValue]]".into()))
-      {
+      if let Some(Value::Number(value)) = object.borrow().internal_slot("[[NumberData]]") {
         Ok(*value)
       } else {
         Err(vm.throw_type_error(&format!(
@@ -389,6 +382,9 @@ pub(crate) fn install_bigint_and_number_builtins(
   let number_proto_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(
     ObjectData::with_prototype(Value::Object(Rc::clone(object_proto_map))),
   ));
+  number_proto_map
+    .borrow_mut()
+    .set_internal_slot("[[NumberData]]", Value::Number(0.0));
   let number_ctor_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::with_prototype(
     Value::Object(Rc::clone(function_proto_map)),
   )));
@@ -403,12 +399,8 @@ pub(crate) fn install_bigint_and_number_builtins(
       let n = vm.to_number_value(&value)?;
       let mut obj = ObjectData::new();
       obj.set_prototype_value(Value::Object(Rc::clone(&number_proto_for_ctor)));
-      let obj_rc = Rc::new(RefCell::new(obj));
-      obj_rc.borrow_mut().properties.insert(
-        PKey::String("[[PrimitiveValue]]".to_string().into()),
-        PropertyDescriptor::ordinary_data(Value::Number(n)),
-      );
-      return Ok(Value::Object(obj_rc));
+      obj.set_internal_slot("[[NumberData]]", Value::Number(n));
+      return Ok(Value::Object(Rc::new(RefCell::new(obj))));
     }
     let value_idx = if !matches!(vm.this_value(), Value::Undefined)
       && args.len() == 1
@@ -450,11 +442,7 @@ pub(crate) fn install_bigint_and_number_builtins(
         let res = match this {
           Value::Number(n) => Value::Number(*n),
           Value::Object(obj) => {
-            if let Some(PropertyDescriptor::Data { value, .. }) = obj
-              .borrow()
-              .properties
-              .get(&PKey::String("[[PrimitiveValue]]".to_string().into()))
-            {
+            if let Some(value) = obj.borrow().internal_slot("[[NumberData]]") {
               value.clone()
             } else {
               return Err(
@@ -486,12 +474,7 @@ pub(crate) fn install_bigint_and_number_builtins(
         match this {
           Value::Number(n) => Ok(Value::String(js_number_to_string(*n).into())),
           Value::Object(obj) => {
-            if let Some(PropertyDescriptor::Data { value, .. }) = obj
-              .borrow()
-              .properties
-              .get(&PKey::String("[[PrimitiveValue]]".to_string().into()))
-              && let Value::Number(n) = value
-            {
+            if let Some(Value::Number(n)) = obj.borrow().internal_slot("[[NumberData]]") {
               return Ok(Value::String(js_number_to_string(*n).into()));
             }
             Err(vm.throw_type_error("Number.prototype.toString called on incompatible receiver"))

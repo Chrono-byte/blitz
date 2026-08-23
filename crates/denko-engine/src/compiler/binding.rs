@@ -295,15 +295,7 @@ impl super::Compiler {
     if self.is_root && mirror_global {
       self.emit_set_global_name(name);
     }
-    let is_exported = self
-      .current_module
-      .as_ref()
-      .is_some_and(|c| c.exports.contains(name));
-    if is_exported {
-      self.emit(Op::LoadLocal, LINE);
-      self.emit_byte(self.slot_to_u8(slot)?, LINE);
-      self.emit_set_own_module_export(name)?;
-    }
+    self.emit_sync_local_module_export(name, slot)?;
     Ok(())
   }
 
@@ -341,24 +333,11 @@ impl super::Compiler {
         self.emit_byte(self.slot_to_u8(slot)?, LINE);
         self.emit_set_global_name(name);
       }
-      let is_exported = self
-        .current_module
-        .as_ref()
-        .is_some_and(|c| c.exports.contains(name));
-      if is_exported {
-        let module_index = self
-          .current_module
-          .as_ref()
-          .map(|c| c.module_index)
-          .expect("module_index expected");
-        let descriptor = self.module_export_descriptor_index(module_index, name)?;
-        self.emit(Op::SetModuleExport, LINE);
-        self.emit_byte(descriptor.to_le_bytes()[0], LINE);
-        self.emit_byte(descriptor.to_le_bytes()[1], LINE);
-      }
+      self.emit_sync_local_module_export(name, slot)?;
     } else if let Some(upvalue) = self.resolve_upvalue(name) {
       self.emit(Op::SetUpvalue, LINE);
       self.emit_byte(upvalue, LINE);
+      self.emit_sync_upvalue_module_export(upvalue)?;
     } else {
       self.emit_set_global_name(name);
     }

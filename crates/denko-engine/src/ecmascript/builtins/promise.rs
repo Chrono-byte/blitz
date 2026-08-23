@@ -315,6 +315,21 @@ pub(crate) fn create_promise_intrinsics(
   let promise_ctor_val = Value::BuiltinObject(promise_ctor_fn, Rc::clone(&promise_ctor_map));
   set_builtin_name(&promise_ctor_val, "Promise");
   set_builtin_length(&promise_ctor_val, 1.0);
+  let species_getter = builtin_object(
+    Rc::new(|_vm, args| Ok(args.first().cloned().unwrap_or(Value::Undefined))),
+    function_proto_map,
+  );
+  set_builtin_name(&species_getter, "get [Symbol.species]");
+  set_builtin_length(&species_getter, 0.0);
+  promise_ctor_map.borrow_mut().properties.insert(
+    PKey::Symbol(SymbolId::well_known_species()),
+    PropertyDescriptor::Accessor {
+      get: Some(species_getter),
+      set: None,
+      enumerable: false,
+      configurable: true,
+    },
+  );
 
   promise_proto_map.borrow_mut().properties.insert(
     PKey::String("constructor".to_string().into()),

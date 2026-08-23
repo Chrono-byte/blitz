@@ -72,6 +72,9 @@ pub mod typecheck;
 pub mod value;
 pub mod vm;
 
+#[cfg(test)]
+mod ecmascript_correctness_tests;
+
 // Re-export oxc_ast::ast under the `ast` namespace for compatibility.
 pub use bytecode::*;
 pub use compiler::*;

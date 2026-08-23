@@ -310,6 +310,418 @@ impl super::Compiler {
     }
   }
 
+  fn compile_optional_chain_member_static(
+    &mut self,
+    member: &oast::StaticMemberExpression<'_>,
+    continuation: &mut dyn FnMut(&mut Self) -> Result<(), crate::errors::CompilerError>,
+  ) -> Result<(), crate::errors::CompilerError> {
+    if matches!(&member.object, oast::Expression::Super(_)) {
+      if member.optional {
+        return Err(crate::errors::CompilerError::from(
+          "optional chaining with super is not supported",
+        ));
+      }
+      self.emit_super_property_get_static(member.property.name.as_str(), false)?;
+      return continuation(self);
+    }
+
+    self.compile_optional_chain_expression(&member.object, &mut |this| {
+      if member.optional {
+        this.emit(Op::Copy, LINE);
+        this.emit(Op::JumpIfNullish, LINE);
+        let nullish = this.current_ip();
+        this.emit_jump_placeholder();
+
+        this.emit_constant(Value::String(member.property.name.to_string().into()), LINE);
+        this.emit(Op::GetProperty, LINE);
+        continuation(this)?;
+
+        this.emit(Op::Jump, LINE);
+        let end = this.current_ip();
+        this.emit_jump_placeholder();
+        this.patch_jump(nullish);
+        this.emit(Op::Discard, LINE);
+        this.emit(Op::Undefined, LINE);
+        this.patch_jump(end);
+      } else {
+        this.emit_constant(Value::String(member.property.name.to_string().into()), LINE);
+        this.emit(Op::GetProperty, LINE);
+        continuation(this)?;
+      }
+      Ok(())
+    })
+  }
+
+  fn compile_optional_chain_member_computed(
+    &mut self,
+    member: &oast::ComputedMemberExpression<'_>,
+    continuation: &mut dyn FnMut(&mut Self) -> Result<(), crate::errors::CompilerError>,
+  ) -> Result<(), crate::errors::CompilerError> {
+    if matches!(&member.object, oast::Expression::Super(_)) {
+      if member.optional {
+        return Err(crate::errors::CompilerError::from(
+          "optional chaining with super is not supported",
+        ));
+      }
+      self.emit_super_property_get_computed(&member.expression, false)?;
+      return continuation(self);
+    }
+
+    self.compile_optional_chain_expression(&member.object, &mut |this| {
+      if member.optional {
+        this.emit(Op::Copy, LINE);
+        this.emit(Op::JumpIfNullish, LINE);
+        let nullish = this.current_ip();
+        this.emit_jump_placeholder();
+
+        this.compile_expr_oast(&member.expression)?;
+        this.emit(Op::GetProperty, LINE);
+        continuation(this)?;
+
+        this.emit(Op::Jump, LINE);
+        let end = this.current_ip();
+        this.emit_jump_placeholder();
+        this.patch_jump(nullish);
+        this.emit(Op::Discard, LINE);
+        this.emit(Op::Undefined, LINE);
+        this.patch_jump(end);
+      } else {
+        this.compile_expr_oast(&member.expression)?;
+        this.emit(Op::GetProperty, LINE);
+        continuation(this)?;
+      }
+      Ok(())
+    })
+  }
+
+  fn compile_optional_chain_member_private(
+    &mut self,
+    member: &oast::PrivateFieldExpression<'_>,
+    continuation: &mut dyn FnMut(&mut Self) -> Result<(), crate::errors::CompilerError>,
+  ) -> Result<(), crate::errors::CompilerError> {
+    self.compile_optional_chain_expression(&member.object, &mut |this| {
+      if member.optional {
+        this.emit(Op::Copy, LINE);
+        this.emit(Op::JumpIfNullish, LINE);
+        let nullish = this.current_ip();
+        this.emit_jump_placeholder();
+
+        let key = this.ensure_private_name_constant(&member.field.name);
+        this.emit_constant(key, LINE);
+        this.emit(Op::GetProperty, LINE);
+        continuation(this)?;
+
+        this.emit(Op::Jump, LINE);
+        let end = this.current_ip();
+        this.emit_jump_placeholder();
+        this.patch_jump(nullish);
+        this.emit(Op::Discard, LINE);
+        this.emit(Op::Undefined, LINE);
+        this.patch_jump(end);
+      } else {
+        let key = this.ensure_private_name_constant(&member.field.name);
+        this.emit_constant(key, LINE);
+        this.emit(Op::GetProperty, LINE);
+        continuation(this)?;
+      }
+      Ok(())
+    })
+  }
+
+  fn compile_optional_chain_callee(
+    &mut self,
+    callee: &oast::Expression<'_>,
+    continuation: &mut dyn FnMut(&mut Self) -> Result<(), crate::errors::CompilerError>,
+  ) -> Result<(), crate::errors::CompilerError> {
+    match callee {
+      oast::Expression::StaticMemberExpression(member) => {
+        if matches!(&member.object, oast::Expression::Super(_)) {
+          if member.optional {
+            return Err(crate::errors::CompilerError::from(
+              "optional chaining with super is not supported",
+            ));
+          }
+          self.emit_super_property_get_static(member.property.name.as_str(), true)?;
+          return continuation(self);
+        }
+        self.compile_optional_chain_expression(&member.object, &mut |this| {
+          if member.optional {
+            this.emit(Op::Copy, LINE);
+            this.emit(Op::JumpIfNullish, LINE);
+            let nullish = this.current_ip();
+            this.emit_jump_placeholder();
+
+            this.emit(Op::Copy, LINE);
+            this.emit_constant(Value::String(member.property.name.to_string().into()), LINE);
+            this.emit(Op::GetProperty, LINE);
+            continuation(this)?;
+
+            this.emit(Op::Jump, LINE);
+            let end = this.current_ip();
+            this.emit_jump_placeholder();
+            this.patch_jump(nullish);
+            this.emit(Op::Discard, LINE);
+            this.emit(Op::Undefined, LINE);
+            this.patch_jump(end);
+          } else {
+            this.emit(Op::Copy, LINE);
+            this.emit_constant(Value::String(member.property.name.to_string().into()), LINE);
+            this.emit(Op::GetProperty, LINE);
+            continuation(this)?;
+          }
+          Ok(())
+        })
+      }
+      oast::Expression::ComputedMemberExpression(member) => {
+        if matches!(&member.object, oast::Expression::Super(_)) {
+          if member.optional {
+            return Err(crate::errors::CompilerError::from(
+              "optional chaining with super is not supported",
+            ));
+          }
+          self.emit_super_property_get_computed(&member.expression, true)?;
+          return continuation(self);
+        }
+        self.compile_optional_chain_expression(&member.object, &mut |this| {
+          if member.optional {
+            this.emit(Op::Copy, LINE);
+            this.emit(Op::JumpIfNullish, LINE);
+            let nullish = this.current_ip();
+            this.emit_jump_placeholder();
+
+            this.emit(Op::Copy, LINE);
+            this.compile_expr_oast(&member.expression)?;
+            this.emit(Op::GetProperty, LINE);
+            continuation(this)?;
+
+            this.emit(Op::Jump, LINE);
+            let end = this.current_ip();
+            this.emit_jump_placeholder();
+            this.patch_jump(nullish);
+            this.emit(Op::Discard, LINE);
+            this.emit(Op::Undefined, LINE);
+            this.patch_jump(end);
+          } else {
+            this.emit(Op::Copy, LINE);
+            this.compile_expr_oast(&member.expression)?;
+            this.emit(Op::GetProperty, LINE);
+            continuation(this)?;
+          }
+          Ok(())
+        })
+      }
+      oast::Expression::PrivateFieldExpression(member) => {
+        self.compile_optional_chain_expression(&member.object, &mut |this| {
+          if member.optional {
+            this.emit(Op::Copy, LINE);
+            this.emit(Op::JumpIfNullish, LINE);
+            let nullish = this.current_ip();
+            this.emit_jump_placeholder();
+
+            this.emit(Op::Copy, LINE);
+            let key = this.ensure_private_name_constant(&member.field.name);
+            this.emit_constant(key, LINE);
+            this.emit(Op::GetProperty, LINE);
+            continuation(this)?;
+
+            this.emit(Op::Jump, LINE);
+            let end = this.current_ip();
+            this.emit_jump_placeholder();
+            this.patch_jump(nullish);
+            this.emit(Op::Discard, LINE);
+            this.emit(Op::Undefined, LINE);
+            this.patch_jump(end);
+          } else {
+            this.emit(Op::Copy, LINE);
+            let key = this.ensure_private_name_constant(&member.field.name);
+            this.emit_constant(key, LINE);
+            this.emit(Op::GetProperty, LINE);
+            continuation(this)?;
+          }
+          Ok(())
+        })
+      }
+      _ => self.compile_optional_chain_expression(callee, continuation),
+    }
+  }
+
+  fn emit_optional_chain_spread_call(
+    &mut self,
+    call: &oast::CallExpression<'_>,
+    has_receiver: bool,
+  ) -> Result<(), crate::errors::CompilerError> {
+    let arg_count = self.checked_arg_count(call.arguments.len())?;
+    let receiver_slot = if has_receiver {
+      let callee_slot = self.alloc_temp_local("chain_spread_callee");
+      self.emit(Op::StoreLocal, LINE);
+      self.emit_byte(self.slot_to_u8(callee_slot)?, LINE);
+      let receiver_slot = self.alloc_temp_local("chain_spread_receiver");
+      self.emit(Op::StoreLocal, LINE);
+      self.emit_byte(self.slot_to_u8(receiver_slot)?, LINE);
+      self.emit(Op::LoadLocal, LINE);
+      self.emit_byte(self.slot_to_u8(callee_slot)?, LINE);
+      Some(receiver_slot)
+    } else {
+      None
+    };
+
+    let mut spread_flags = Vec::with_capacity(call.arguments.len());
+    for argument in &call.arguments {
+      match argument {
+        oast::Argument::SpreadElement(spread) => {
+          self.compile_expr_oast(&spread.argument)?;
+          spread_flags.push(true);
+        }
+        _ => match argument.as_expression() {
+          Some(expr) => {
+            self.compile_expr_oast(expr)?;
+            spread_flags.push(false);
+          }
+          None => {
+            self.emit(Op::Undefined, LINE);
+            spread_flags.push(false);
+          }
+        },
+      }
+    }
+
+    self.emit(Op::BuildArray, LINE);
+    self.emit_byte(arg_count, LINE);
+    for (index, is_spread) in spread_flags.into_iter().enumerate() {
+      if index == 0
+        && let Some(receiver_slot) = receiver_slot
+      {
+        self.emit(Op::LoadLocal, LINE);
+        self.emit_byte(self.slot_to_u8(receiver_slot)?, LINE);
+        self.emit(if is_spread { Op::True } else { Op::False }, LINE);
+        self.emit(Op::BuildArray, LINE);
+        self.emit_byte(2, LINE);
+        continue;
+      }
+      self.emit(if is_spread { Op::True } else { Op::False }, LINE);
+    }
+    self.emit(Op::BuildArray, LINE);
+    self.emit_byte(arg_count, LINE);
+    self.emit(Op::Spread, LINE);
+    self.emit_byte(arg_count, LINE);
+    Ok(())
+  }
+
+  fn compile_optional_chain_call(
+    &mut self,
+    call: &oast::CallExpression<'_>,
+    continuation: &mut dyn FnMut(&mut Self) -> Result<(), crate::errors::CompilerError>,
+  ) -> Result<(), crate::errors::CompilerError> {
+    let member_callee = matches!(
+      &call.callee,
+      oast::Expression::StaticMemberExpression(_)
+        | oast::Expression::ComputedMemberExpression(_)
+        | oast::Expression::PrivateFieldExpression(_)
+    );
+    let mut emit_call = |this: &mut Self| {
+      let cleanup = if call.optional {
+        this.emit(Op::Copy, LINE);
+        this.emit(Op::JumpIfNullish, LINE);
+        let nullish = this.current_ip();
+        this.emit_jump_placeholder();
+        Some(nullish)
+      } else {
+        None
+      };
+
+      if call
+        .arguments
+        .iter()
+        .any(|arg| matches!(arg, oast::Argument::SpreadElement(_)))
+      {
+        this.emit_optional_chain_spread_call(call, member_callee)?;
+      } else {
+        let arg_count = this.compile_call_arguments(&call.arguments)?;
+        this.emit_call_with_arg_count(
+          if member_callee {
+            Op::CallBuiltin
+          } else {
+            Op::Call
+          },
+          arg_count,
+        )?;
+      }
+      continuation(this)?;
+
+      if let Some(nullish) = cleanup {
+        this.emit(Op::Jump, LINE);
+        let end = this.current_ip();
+        this.emit_jump_placeholder();
+        this.patch_jump(nullish);
+        if member_callee {
+          this.emit(Op::Discard, LINE);
+        }
+        this.emit(Op::Discard, LINE);
+        this.emit(Op::Undefined, LINE);
+        this.patch_jump(end);
+      }
+      Ok(())
+    };
+
+    if member_callee {
+      self.compile_optional_chain_callee(&call.callee, &mut emit_call)
+    } else {
+      self.compile_optional_chain_expression(&call.callee, &mut emit_call)
+    }
+  }
+
+  fn compile_optional_chain_expression(
+    &mut self,
+    expr: &oast::Expression<'_>,
+    continuation: &mut dyn FnMut(&mut Self) -> Result<(), crate::errors::CompilerError>,
+  ) -> Result<(), crate::errors::CompilerError> {
+    match expr {
+      oast::Expression::StaticMemberExpression(member) => {
+        self.compile_optional_chain_member_static(member, continuation)
+      }
+      oast::Expression::ComputedMemberExpression(member) => {
+        self.compile_optional_chain_member_computed(member, continuation)
+      }
+      oast::Expression::PrivateFieldExpression(member) => {
+        self.compile_optional_chain_member_private(member, continuation)
+      }
+      oast::Expression::CallExpression(call) => {
+        self.compile_optional_chain_call(call, continuation)
+      }
+      oast::Expression::ParenthesizedExpression(parenthesized) => {
+        self.compile_expr_oast(&parenthesized.expression)?;
+        continuation(self)
+      }
+      _ => {
+        self.compile_expr_oast(expr)?;
+        continuation(self)
+      }
+    }
+  }
+
+  fn compile_optional_chain_element(
+    &mut self,
+    element: &oast::ChainElement<'_>,
+    continuation: &mut dyn FnMut(&mut Self) -> Result<(), crate::errors::CompilerError>,
+  ) -> Result<(), crate::errors::CompilerError> {
+    use oast::ChainElement as CE;
+    match element {
+      CE::StaticMemberExpression(member) => {
+        self.compile_optional_chain_member_static(member, continuation)
+      }
+      CE::ComputedMemberExpression(member) => {
+        self.compile_optional_chain_member_computed(member, continuation)
+      }
+      CE::PrivateFieldExpression(member) => {
+        self.compile_optional_chain_member_private(member, continuation)
+      }
+      CE::CallExpression(call) => self.compile_optional_chain_call(call, continuation),
+      CE::TSNonNullExpression(non_null) => {
+        self.compile_optional_chain_expression(&non_null.expression, continuation)
+      }
+    }
+  }
+
   /// Compile an expression from the AST into bytecode.
   ///
   /// This is the main entry point for expression compilation. It recursively
@@ -759,25 +1171,11 @@ impl super::Compiler {
                   self.emit_byte(self.slot_to_u8(slot)?, LINE);
                   self.emit_set_global_name(name);
                 }
-                // Check export membership without holding a borrow
-                let is_exported = self
-                  .current_module
-                  .as_ref()
-                  .is_some_and(|c| c.exports.contains(name));
-                if is_exported {
-                  let module_index = self
-                    .current_module
-                    .as_ref()
-                    .map(|c| c.module_index)
-                    .expect("module_index expected");
-                  let descriptor = self.module_export_descriptor_index(module_index, name)?;
-                  self.emit(Op::SetModuleExport, LINE);
-                  self.emit_byte(descriptor.to_le_bytes()[0], LINE);
-                  self.emit_byte(descriptor.to_le_bytes()[1], LINE);
-                }
+                self.emit_sync_local_module_export(name, slot)?;
               } else if let Some(upvalue) = self.resolve_upvalue(name) {
                 self.emit(Op::SetUpvalue, LINE);
                 self.emit_byte(upvalue, LINE);
+                self.emit_sync_upvalue_module_export(upvalue)?;
               } else {
                 self.emit_set_global_name(name);
               }
@@ -1218,6 +1616,11 @@ impl super::Compiler {
           }
         }
         oast::UnaryOperator::Delete => {
+          if self.strict_context && Self::identifier_name_if_parenthesized(&u.argument).is_some() {
+            return Err(crate::errors::CompilerError::from(
+              "SyntaxError: delete of an unqualified identifier in strict mode",
+            ));
+          }
           if let OExpr::StaticMemberExpression(m) = &u.argument {
             self.compile_expr_oast(&m.object)?;
             self.emit_constant(Value::String(m.property.name.to_string().into()), LINE);
@@ -1579,300 +1982,9 @@ impl super::Compiler {
         }
       }
       OExpr::ChainExpression(c) => {
-        use oast::ChainElement as CE;
-        match &c.expression {
-          CE::StaticMemberExpression(m) => {
-            if matches!(&m.object, OExpr::Super(_)) {
-              if m.optional {
-                return Err(crate::errors::CompilerError::from(
-                  "optional chaining with super is not supported",
-                ));
-              }
-              self.emit_super_property_get_static(m.property.name.as_str(), false)?;
-            } else {
-              self.compile_expr_oast(&m.object)?;
-              if m.optional {
-                self.emit(Op::Copy, LINE);
-                self.emit(Op::JumpIfNullish, LINE);
-                let nullish = self.current_ip();
-                self.emit_jump_placeholder();
-                self.emit_constant(Value::String(m.property.name.to_string().into()), LINE);
-                self.emit(Op::GetProperty, LINE);
-                self.emit(Op::Jump, LINE);
-                let end = self.current_ip();
-                self.emit_jump_placeholder();
-                self.patch_jump(nullish);
-                self.emit(Op::Discard, LINE);
-                self.emit(Op::Undefined, LINE);
-                self.patch_jump(end);
-              } else {
-                self.emit_constant(Value::String(m.property.name.to_string().into()), LINE);
-                self.emit(Op::GetProperty, LINE);
-              }
-            }
-          }
-          CE::ComputedMemberExpression(m) => {
-            if matches!(&m.object, OExpr::Super(_)) {
-              if m.optional {
-                return Err(crate::errors::CompilerError::from(
-                  "optional chaining with super is not supported",
-                ));
-              }
-              self.emit_super_property_get_computed(&m.expression, false)?;
-            } else {
-              self.compile_expr_oast(&m.object)?;
-              if m.optional {
-                self.emit(Op::Copy, LINE);
-                self.emit(Op::JumpIfNullish, LINE);
-                let nullish = self.current_ip();
-                self.emit_jump_placeholder();
-                self.compile_expr_oast(&m.expression)?;
-                self.emit(Op::GetProperty, LINE);
-                self.emit(Op::Jump, LINE);
-                let end = self.current_ip();
-                self.emit_jump_placeholder();
-                self.patch_jump(nullish);
-                self.emit(Op::Discard, LINE);
-                self.emit(Op::Undefined, LINE);
-                self.patch_jump(end);
-              } else {
-                self.compile_expr_oast(&m.expression)?;
-                self.emit(Op::GetProperty, LINE);
-              }
-            }
-          }
-          CE::CallExpression(c) => {
-            if self.compile_spread_call_tail(c)? {
-              return Ok(());
-            }
-
-            if let OExpr::StaticMemberExpression(m) = &c.callee
-              && matches!(&m.object, OExpr::Super(_))
-            {
-              if c.optional || m.optional {
-                return Err(crate::errors::CompilerError::from(
-                  "optional chaining with super is not supported",
-                ));
-              }
-              self.emit_super_property_get_static(m.property.name.as_str(), true)?;
-              let mut arg_count = 0usize;
-              for arg in &c.arguments {
-                if let Some(expr) = arg.as_expression() {
-                  self.compile_expr_oast(expr)?;
-                  arg_count += 1;
-                } else {
-                  self.emit(Op::Undefined, LINE);
-                  arg_count += 1;
-                }
-              }
-              self.emit(Op::Call, LINE);
-              self.emit_byte(self.constant_index_to_u8(arg_count)?, LINE);
-              return Ok(());
-            }
-            if let OExpr::ComputedMemberExpression(m) = &c.callee
-              && matches!(&m.object, OExpr::Super(_))
-            {
-              if c.optional || m.optional {
-                return Err(crate::errors::CompilerError::from(
-                  "optional chaining with super is not supported",
-                ));
-              }
-              self.emit_super_property_get_computed(&m.expression, true)?;
-              let mut arg_count = 0usize;
-              for arg in &c.arguments {
-                if let Some(expr) = arg.as_expression() {
-                  self.compile_expr_oast(expr)?;
-                  arg_count += 1;
-                } else {
-                  self.emit(Op::Undefined, LINE);
-                  arg_count += 1;
-                }
-              }
-              self.emit(Op::Call, LINE);
-              self.emit_byte(self.constant_index_to_u8(arg_count)?, LINE);
-              return Ok(());
-            }
-            if let OExpr::StaticMemberExpression(m) = &c.callee
-              && c.optional
-              && !m.optional
-              && !matches!(&m.object, OExpr::Super(_))
-            {
-              self.compile_expr_oast(&m.object)?;
-              self.emit(Op::Copy, LINE);
-              self.emit_constant(Value::String(m.property.name.to_string().into()), LINE);
-              self.emit(Op::GetProperty, LINE);
-              self.emit(Op::Copy, LINE);
-              self.emit(Op::JumpIfNullish, LINE);
-              let nullish = self.current_ip();
-              self.emit_jump_placeholder();
-              let arg_count = self.compile_call_arguments(&c.arguments)?;
-              self.emit_call_with_arg_count(Op::CallBuiltin, arg_count)?;
-              self.emit(Op::Jump, LINE);
-              let end = self.current_ip();
-              self.emit_jump_placeholder();
-              self.patch_jump(nullish);
-              self.emit(Op::Discard, LINE);
-              self.emit(Op::Discard, LINE);
-              self.emit(Op::Undefined, LINE);
-              self.patch_jump(end);
-              return Ok(());
-            }
-            if let OExpr::StaticMemberExpression(m) = &c.callee
-              && m.optional
-              && !matches!(&m.object, OExpr::Super(_))
-            {
-              self.compile_expr_oast(&m.object)?;
-              self.emit(Op::Copy, LINE);
-              self.emit(Op::JumpIfNullish, LINE);
-              let object_nullish = self.current_ip();
-              self.emit_jump_placeholder();
-              self.emit(Op::Copy, LINE);
-              self.emit_constant(Value::String(m.property.name.to_string().into()), LINE);
-              self.emit(Op::GetProperty, LINE);
-              let callee_nullish = if c.optional {
-                self.emit(Op::Copy, LINE);
-                self.emit(Op::JumpIfNullish, LINE);
-                let patch = self.current_ip();
-                self.emit_jump_placeholder();
-                Some(patch)
-              } else {
-                None
-              };
-              let arg_count = self.compile_call_arguments(&c.arguments)?;
-              self.emit_call_with_arg_count(Op::CallBuiltin, arg_count)?;
-              self.emit(Op::Jump, LINE);
-              let normal_end = self.current_ip();
-              self.emit_jump_placeholder();
-              let callee_end = if let Some(callee_nullish) = callee_nullish {
-                self.patch_jump(callee_nullish);
-                self.emit(Op::Discard, LINE);
-                self.emit(Op::Discard, LINE);
-                self.emit(Op::Undefined, LINE);
-                self.emit(Op::Jump, LINE);
-                let patch = self.current_ip();
-                self.emit_jump_placeholder();
-                Some(patch)
-              } else {
-                None
-              };
-              self.patch_jump(object_nullish);
-              self.emit(Op::Discard, LINE);
-              self.emit(Op::Undefined, LINE);
-              self.patch_jump(normal_end);
-              if let Some(callee_end) = callee_end {
-                self.patch_jump(callee_end);
-              }
-              return Ok(());
-            }
-            if let OExpr::ComputedMemberExpression(m) = &c.callee
-              && m.optional
-              && !matches!(&m.object, OExpr::Super(_))
-            {
-              self.compile_expr_oast(&m.object)?;
-              self.emit(Op::Copy, LINE);
-              self.emit(Op::JumpIfNullish, LINE);
-              let object_nullish = self.current_ip();
-              self.emit_jump_placeholder();
-              self.emit(Op::Copy, LINE);
-              self.compile_expr_oast(&m.expression)?;
-              self.emit(Op::GetProperty, LINE);
-              let callee_nullish = if c.optional {
-                self.emit(Op::Copy, LINE);
-                self.emit(Op::JumpIfNullish, LINE);
-                let patch = self.current_ip();
-                self.emit_jump_placeholder();
-                Some(patch)
-              } else {
-                None
-              };
-              let arg_count = self.compile_call_arguments(&c.arguments)?;
-              self.emit_call_with_arg_count(Op::CallBuiltin, arg_count)?;
-              self.emit(Op::Jump, LINE);
-              let normal_end = self.current_ip();
-              self.emit_jump_placeholder();
-              let callee_end = if let Some(callee_nullish) = callee_nullish {
-                self.patch_jump(callee_nullish);
-                self.emit(Op::Discard, LINE);
-                self.emit(Op::Discard, LINE);
-                self.emit(Op::Undefined, LINE);
-                self.emit(Op::Jump, LINE);
-                let patch = self.current_ip();
-                self.emit_jump_placeholder();
-                Some(patch)
-              } else {
-                None
-              };
-              self.patch_jump(object_nullish);
-              self.emit(Op::Discard, LINE);
-              self.emit(Op::Undefined, LINE);
-              self.patch_jump(normal_end);
-              if let Some(callee_end) = callee_end {
-                self.patch_jump(callee_end);
-              }
-              return Ok(());
-            }
-            let is_optional_call = c.optional;
-            // Recursively compile the callee (which may be a member expression)
-            self.compile_expr_oast(&c.callee)?;
-            let nullish = if is_optional_call {
-              self.emit(Op::Copy, LINE);
-              self.emit(Op::JumpIfNullish, LINE);
-              let nullish = self.current_ip();
-              self.emit_jump_placeholder();
-              Some(nullish)
-            } else {
-              None
-            };
-            let mut arg_count = 0usize;
-            for arg in &c.arguments {
-              if let Some(expr) = arg.as_expression() {
-                self.compile_expr_oast(expr)?;
-                arg_count += 1;
-              } else {
-                self.emit(Op::Undefined, LINE);
-                arg_count += 1;
-              }
-            }
-            self.emit(Op::Call, LINE);
-            self.emit_byte(self.constant_index_to_u8(arg_count)?, LINE);
-            if let Some(nullish) = nullish {
-              self.emit(Op::Jump, LINE);
-              let end = self.current_ip();
-              self.emit_jump_placeholder();
-              self.patch_jump(nullish);
-              self.emit(Op::Discard, LINE);
-              self.emit(Op::Undefined, LINE);
-              self.patch_jump(end);
-            }
-          }
-          CE::PrivateFieldExpression(m) => {
-            self.compile_expr_oast(&m.object)?;
-            if m.optional {
-              self.emit(Op::Copy, LINE);
-              self.emit(Op::JumpIfNullish, LINE);
-              let nullish = self.current_ip();
-              self.emit_jump_placeholder();
-              let key = self.ensure_private_name_constant(&m.field.name);
-              self.emit_constant(key, LINE);
-              self.emit(Op::GetProperty, LINE);
-              self.emit(Op::Jump, LINE);
-              let end = self.current_ip();
-              self.emit_jump_placeholder();
-              self.patch_jump(nullish);
-              self.emit(Op::Discard, LINE);
-              self.emit(Op::Undefined, LINE);
-              self.patch_jump(end);
-            } else {
-              let key = self.ensure_private_name_constant(&m.field.name);
-              self.emit_constant(key, LINE);
-              self.emit(Op::GetProperty, LINE);
-            }
-          }
-          CE::TSNonNullExpression(n) => {
-            // Just compile the inner expression, as we don't have non-null assertions
-            self.compile_expr_oast(&n.expression)?;
-          }
-        }
+        let mut continuation = |_this: &mut Self| Ok(());
+        self.compile_optional_chain_element(&c.expression, &mut continuation)?;
+        return Ok(());
       }
       OExpr::Super(_s) => {
         if !self.allow_super {

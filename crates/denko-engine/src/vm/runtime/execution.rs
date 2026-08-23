@@ -663,6 +663,11 @@ impl Vm {
             let object = registers[rd].clone();
             let key = registers[rs].clone();
             let key = self.to_property_key(&key)?;
+            if matches!(&key, PropertyKey::Symbol(symbol) if symbol.is_private())
+              && !self.has_property_host(&object, &key)?
+            {
+              return Err(self.throw_type_error("Cannot access private member on this object"));
+            }
             registers[rd] = self.get_property_value_cached(instruction_ip, &object, &key)?;
           }
           Op::SetProperty => {

@@ -258,7 +258,8 @@ fn order_property_keys(keys: Vec<PropertyKey>) -> Vec<PropertyKey> {
         Some(index) => indices.push((index, key)),
         None => strings.push(key),
       },
-      PropertyKey::Symbol(_) => symbols.push(key),
+      PropertyKey::Symbol(symbol) if !symbol.is_private() => symbols.push(key),
+      PropertyKey::Symbol(_) => {}
     }
   }
 

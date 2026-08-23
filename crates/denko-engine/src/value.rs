@@ -138,9 +138,23 @@ impl std::fmt::Debug for WeakObject {
 pub struct SymbolId(Arc<u64>);
 
 impl SymbolId {
+  const PRIVATE_BIT: u64 = 1 << 63;
+
   /// Generate a new unique symbol id.
   pub fn new() -> Self {
-    Self(Arc::new(fastrand::u64(..)))
+    Self(Arc::new(fastrand::u64(..) & !Self::PRIVATE_BIT))
+  }
+
+  /// Generate an engine-private class name that JavaScript cannot create.
+  pub(crate) fn new_private() -> Self {
+    Self(Arc::new(
+      (fastrand::u64(..) & !Self::PRIVATE_BIT) | Self::PRIVATE_BIT,
+    ))
+  }
+
+  /// Whether this identity denotes an engine-private class name.
+  pub(crate) fn is_private(&self) -> bool {
+    self.as_u64() & Self::PRIVATE_BIT != 0
   }
 
   /// Create a well-known symbol id.

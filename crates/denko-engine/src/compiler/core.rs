@@ -109,11 +109,9 @@ pub(crate) struct Compiler {
   pub upvalue_indices: HashMap<String, u8>,
   /// Upvalue capture specs for the current function.
   pub captured_upvalues: Vec<UpvalueSpec>,
-  /// Synthetic private-name mapping: private identifier -> synthetic key string
-  /// The string is used as the constant value stored in each chunk that
-  /// represents the hidden private key. We store the string so inner
-  /// compilers can add the same constant into their own chunks.
-  pub private_names: HashMap<String, String>,
+  /// Private identifiers visible in the current class lexical environment.
+  /// Values are unforgeable engine-private symbols copied into nested method compilers.
+  pub private_names: HashMap<String, Value>,
   /// Instance fields awaiting initialization after `super()` in a derived constructor.
   pub pending_instance_fields: Vec<PreparedClassField>,
   /// First deferred emission failure. Emission helpers cannot return errors
@@ -137,8 +135,8 @@ pub struct PreparedClassField {
 pub enum PreparedClassFieldKey {
   /// Ordinary identifier property name.
   Named(String),
-  /// Private field's synthetic hidden key.
-  Private(String),
+  /// Private field's unforgeable key.
+  Private(Value),
   /// Outer local holding a computed property key evaluated during class definition.
   Computed(String),
 }
@@ -155,6 +153,8 @@ pub enum CaptureSource {
     slot: u8,
     /// Optional global property name mirrored by this binding.
     mirror_global_name: Option<String>,
+    /// Export name owned by the captured binding, if any.
+    module_export_name: Option<String>,
     /// Whether assignment to this binding must be rejected.
     immutable: bool,
     /// Whether writes in non-strict mode should be silently ignored.
@@ -164,11 +164,26 @@ pub enum CaptureSource {
   Upvalue {
     /// Upvalue index in the enclosing function.
     index: u8,
+    /// Export name owned by the captured binding, if any.
+    module_export_name: Option<String>,
     /// Whether assignment to this binding must be rejected.
     immutable: bool,
     /// Whether writes in non-strict mode should be silently ignored.
     sloppy_immutable_silent: bool,
   },
+}
+
+impl CaptureSource {
+  fn module_export_name(&self) -> Option<&str> {
+    match self {
+      Self::Local {
+        module_export_name, ..
+      }
+      | Self::Upvalue {
+        module_export_name, ..
+      } => module_export_name.as_deref(),
+    }
+  }
 }
 
 /// Kind of lexical scope in the compiler.
@@ -861,8 +876,15 @@ impl Compiler {
   /// Returns a snapshot of the current visible bindings from all scopes.
   pub(crate) fn visible_bindings_snapshot(&mut self) -> HashMap<String, CaptureSource> {
     let mut bindings = HashMap::new();
-    for scope in &self.scopes {
+    for (scope_index, scope) in self.scopes.iter().enumerate() {
       for (name, slot) in &scope.bindings {
+        let module_export_name = (self.is_root
+          && scope_index == 0
+          && self
+            .current_module
+            .as_ref()
+            .is_some_and(|module| module.exports.contains(name)))
+        .then(|| name.clone());
         bindings.insert(
           name.clone(),
           CaptureSource::Local {
@@ -872,6 +894,7 @@ impl Compiler {
             } else {
               None
             },
+            module_export_name,
             immutable: self
               .local_immutable
               .get(*slot)
@@ -897,6 +920,11 @@ impl Compiler {
         .entry(name.clone())
         .or_insert(CaptureSource::Upvalue {
           index: *idx,
+          module_export_name: self
+            .outer_bindings
+            .get(name)
+            .and_then(CaptureSource::module_export_name)
+            .map(str::to_owned),
           immutable,
           sloppy_immutable_silent,
         });
@@ -919,9 +947,14 @@ impl Compiler {
             (spec.immutable, spec.sloppy_immutable_silent)
           });
         bindings.insert(
-          name,
+          name.clone(),
           CaptureSource::Upvalue {
             index: idx,
+            module_export_name: self
+              .outer_bindings
+              .get(&name)
+              .and_then(CaptureSource::module_export_name)
+              .map(str::to_owned),
             immutable,
             sloppy_immutable_silent,
           },
@@ -941,6 +974,88 @@ impl Compiler {
       .get(slot)
       .copied()
       .unwrap_or(false)
+  }
+
+  /// Returns whether this root-scope slot is the binding that owns `name`'s
+  /// module export. Export membership alone is not sufficient: a nested scope
+  /// may legally contain a different binding with the same spelling.
+  pub(crate) fn owns_local_module_export(
+    &self,
+    name: &str,
+    slot: usize,
+  ) -> bool {
+    self.is_root
+      && self
+        .scopes
+        .first()
+        .and_then(|scope| scope.bindings.get(name))
+        == Some(&slot)
+      && self
+        .current_module
+        .as_ref()
+        .is_some_and(|module| module.exports.contains(name))
+  }
+
+  /// Returns whether this compiler may publish an update for `name`.
+  ///
+  /// The root compiler owns declarations and aliases. Nested compilers may
+  /// publish only when their captured source was identified as that root
+  /// module binding.
+  fn owns_module_export(
+    &self,
+    name: &str,
+  ) -> bool {
+    self.is_root
+      || self
+        .outer_bindings
+        .get(name)
+        .and_then(CaptureSource::module_export_name)
+        .is_some_and(|export_name| export_name == name)
+  }
+
+  pub(crate) fn emit_sync_local_module_export(
+    &mut self,
+    name: &str,
+    slot: usize,
+  ) -> Result<(), CompilerError> {
+    if self.owns_local_module_export(name, slot) {
+      self.emit(Op::LoadLocal, LINE);
+      self.emit_byte(self.slot_to_u8(slot)?, LINE);
+      self.emit_set_own_module_export(name)?;
+    }
+    Ok(())
+  }
+
+  pub(crate) fn emit_sync_upvalue_module_export(
+    &mut self,
+    upvalue: u8,
+  ) -> Result<(), CompilerError> {
+    if let Some((upvalue, export_name)) = self.module_export_for_upvalue(upvalue) {
+      self.emit(Op::GetUpvalue, LINE);
+      self.emit_byte(upvalue, LINE);
+      self.emit_set_own_module_export(&export_name)?;
+    }
+    Ok(())
+  }
+
+  fn module_export_for_upvalue(
+    &self,
+    upvalue: u8,
+  ) -> Option<(u8, String)> {
+    self
+      .upvalue_indices
+      .iter()
+      .find_map(|(name, index)| {
+        (*index == upvalue)
+          .then(|| {
+            self
+              .outer_bindings
+              .get(name)
+              .and_then(CaptureSource::module_export_name)
+              .map(|export_name| (upvalue, export_name.to_owned()))
+          })
+          .flatten()
+      })
   }
 
   /// Emits a `LoadLocal` or `GetUpvalue` operation for the given binding name.
@@ -977,6 +1092,12 @@ impl Compiler {
     &mut self,
     export_name: &str,
   ) -> Result<(), CompilerError> {
+    if !self.owns_module_export(export_name) {
+      // Keep the virtual value stack balanced when a caller found a module
+      // context by name but not the binding that owns that export.
+      self.emit(Op::Discard, LINE);
+      return Ok(());
+    }
     let module_index = self
       .current_module
       .as_ref()
@@ -1014,6 +1135,7 @@ impl Compiler {
         mirror_global_name,
         immutable,
         sloppy_immutable_silent,
+        ..
       } => UpvalueSpec {
         is_local: true,
         index: slot,
@@ -1025,6 +1147,7 @@ impl Compiler {
         index: upvalue,
         immutable,
         sloppy_immutable_silent,
+        ..
       } => UpvalueSpec {
         is_local: false,
         index: upvalue,
@@ -1063,22 +1186,19 @@ impl Compiler {
     idx
   }
 
-  /// Ensure a synthetic private key exists for `name` and return it as a
-  /// constant Value::String. The mapping is kept in `self.private_names` so
-  /// repeated references to the same private identifier use the same key.
+  /// Ensure an unforgeable private key exists for `name` in the active class scope.
   pub(crate) fn ensure_private_name_constant(
     &mut self,
     name: &str,
   ) -> Value {
-    if let Some(s) = self.private_names.get(name) {
-      return Value::String(s.clone().into());
+    if let Some(value) = self.private_names.get(name) {
+      return value.clone();
     }
-    // Create a synthetic key that is unlikely to collide with public names.
-    let key = format!("\u{1F}private#{}", name);
+    let value = Value::Symbol(crate::value::SymbolId::new_private(), None);
     self
       .private_names
-      .insert(name.to_string(), key.clone());
-    Value::String(key.into())
+      .insert(name.to_string(), value.clone());
+    value
   }
 
   /// Emits a `GetGlobal` operation for the given global name.
@@ -1260,5 +1380,41 @@ mod tests {
       .emission_error
       .expect("constant pool overflow must be reported");
     assert!(error.message.contains("constant pool exceeds"));
+  }
+
+  #[test]
+  fn module_export_ownership_follows_the_binding_slot() {
+    let mut compiler = Compiler {
+      current_module: Some(ModuleContext {
+        module_index: 0,
+        imports: HashMap::new(),
+        exports: HashSet::from(["x".to_string()]),
+        namespace_exports: HashMap::new(),
+      }),
+      ..Compiler::default()
+    };
+    let root_slot = compiler.add_local_with_mirror("x".to_string(), None, false);
+    assert!(compiler.owns_local_module_export("x", root_slot));
+
+    compiler.enter_block_scope();
+    let shadow_slot = compiler.add_local_with_mirror("x".to_string(), None, false);
+    assert!(!compiler.owns_local_module_export("x", shadow_slot));
+
+    let mut nested = Compiler {
+      is_root: false,
+      current_module: compiler.current_module.clone(),
+      ..Compiler::default()
+    };
+    nested.outer_bindings.insert(
+      "x".to_string(),
+      CaptureSource::Local {
+        slot: u8::try_from(root_slot).expect("test slot fits"),
+        mirror_global_name: None,
+        module_export_name: Some("x".to_string()),
+        immutable: false,
+        sloppy_immutable_silent: false,
+      },
+    );
+    assert!(nested.owns_module_export("x"));
   }
 }

@@ -721,11 +721,6 @@ impl Compiler {
                 .all(|declaration| matches!(declaration.id, OPat::BindingIdentifier(_)))
               {
                 for declaration in &v.declarations {
-                  if let Some(initializer) = &declaration.init {
-                    self.compile_expr_oast(initializer)?;
-                  } else {
-                    self.emit(Op::Undefined, LINE);
-                  }
                   let OPat::BindingIdentifier(identifier) = &declaration.id else {
                     unreachable!("simple for declarations were checked above");
                   };
@@ -737,14 +732,20 @@ impl Compiler {
                       .resolve_local(&name)
                       .unwrap_or_else(|| self.add_var_local(name.clone(), None, mirror_global))
                   } else {
-                    self.add_local_with_mirror(name.clone(), None, mirror_global)
-                  };
-                  if !matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var) {
+                    let slot = self.add_local_with_mirror(name.clone(), None, false);
                     self.mark_local_tdz(slot);
                     self.add_lexical_binding(&name);
-                  }
+                    slot
+                  };
                   if matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Const) {
                     self.mark_local_immutable(slot);
+                  }
+                  // Lexical bindings are instantiated before evaluating any
+                  // initializer, so self-references observe the TDZ.
+                  if let Some(initializer) = &declaration.init {
+                    self.compile_expr_oast(initializer)?;
+                  } else {
+                    self.emit(Op::Undefined, LINE);
                   }
                   if matches!(
                     v.kind,
@@ -1830,59 +1831,18 @@ impl Compiler {
       return Err(crate::errors::CompilerError::from(err));
     }
 
-    self.emit_class_from_oast(c, Some(&name))?;
-    let slot = self
-      .resolve_local(&name)
-      .unwrap_or_else(|| self.add_local_with_mirror(name.clone(), None, self.is_root));
-
-    if slot == self.locals.len() - 1 {
+    let slot = if let Some(slot) = self.resolve_local(&name) {
+      slot
+    } else {
+      let slot = self.add_local_with_mirror(name.clone(), None, false);
+      self.mark_local_tdz(slot);
+      self.mark_local_immutable(slot);
       self.add_lexical_binding(&name);
-    }
-
-    if self.is_root {
-      self.emit(Op::Copy, LINE);
-    }
+      slot
+    };
+    self.emit_class_from_oast(c, Some(&name))?;
     self.emit(Op::StoreLocal, LINE);
     self.emit_byte(self.slot_to_u8(slot)?, LINE);
-    if self.is_root {
-      self.emit_set_global_name(&name);
-    }
-    // Emit class elements (methods/fields). Minimal implementation:
-    // Create closures for methods and install them on the constructor
-    // (static) or constructor.prototype (instance). Computed keys and
-    // accessors are lowered through objectDefineProperty so we preserve
-    // symbol keys and accessor semantics.
-    let instance_home_slot = if c
-      .body
-      .body
-      .iter()
-      .any(|element| matches!(element, oast::ClassElement::MethodDefinition(md) if !md.r#static))
-    {
-      self.emit(Op::LoadLocal, LINE);
-      self.emit_byte(self.slot_to_u8(slot)?, LINE);
-      self.emit_constant(Value::String("prototype".to_string().into()), LINE);
-      self.emit(Op::GetProperty, LINE);
-      let home_slot = self.alloc_temp_local("class_home");
-      self.emit(Op::StoreLocal, LINE);
-      self.emit_byte(self.slot_to_u8(home_slot)?, LINE);
-      Some(home_slot)
-    } else {
-      None
-    };
-    for element in &c.body.body {
-      if let oast::ClassElement::MethodDefinition(md) = element {
-        let target_slot = if md.r#static {
-          slot
-        } else {
-          instance_home_slot.expect("instance home slot")
-        };
-        self.emit_class_member_installation(target_slot, md)?;
-      }
-    }
-
-    self.emit(Op::LoadLocal, LINE);
-    self.emit_byte(self.slot_to_u8(slot)?, LINE);
-
     Ok(())
   }
 
@@ -2008,8 +1968,8 @@ impl Compiler {
       crate::compiler::core::PreparedClassFieldKey::Named(name) => {
         self.emit_constant(Value::String(name.clone().into()), LINE);
       }
-      crate::compiler::core::PreparedClassFieldKey::Private(name) => {
-        self.emit_constant(Value::String(name.clone().into()), LINE);
+      crate::compiler::core::PreparedClassFieldKey::Private(key) => {
+        self.emit_constant(key.clone(), LINE);
       }
       crate::compiler::core::PreparedClassFieldKey::Computed(binding) => {
         self.emit_get_binding(binding);
@@ -2021,14 +1981,23 @@ impl Compiler {
     &mut self,
     target_slot: usize,
     field: &crate::compiler::core::PreparedClassField,
+    initializer: Option<&oast::Expression<'_>>,
   ) -> Result<(), crate::errors::CompilerError> {
     self.emit_get_builtin_name("objectDefineProperty");
     self.emit(Op::LoadLocal, LINE);
     self.emit_byte(self.slot_to_u8(target_slot)?, LINE);
     self.emit_prepared_class_field_key(&field.key);
     self.emit_constant(Value::String("value".to_string().into()), LINE);
-    if let Some(source) = &field.initializer_source {
-      self.compile_class_initializer_source(source)?;
+    if let Some(initializer) = initializer {
+      let proto = self.compile_static_field_initializer(initializer)?;
+      let function_index = self.chunk.add_function(proto);
+      self.emit(Op::LoadLocal, LINE);
+      self.emit_byte(self.slot_to_u8(target_slot)?, LINE);
+      self.emit(Op::MakeClosure, LINE);
+      self.emit_byte(self.function_index_to_u8(function_index)?, LINE);
+      self.emit_set_method_home_object(target_slot)?;
+      self.emit(Op::CallBuiltin, LINE);
+      self.emit_byte(0, LINE);
     } else {
       self.emit(Op::Undefined, LINE);
     }
@@ -2181,6 +2150,170 @@ impl Compiler {
     Ok(())
   }
 
+  fn compile_static_field_initializer(
+    &mut self,
+    initializer: &oast::Expression<'_>,
+  ) -> Result<FunctionProto, crate::errors::CompilerError> {
+    let outer_bindings = self.visible_bindings_snapshot();
+    let mut inner = Compiler {
+      chunk: Chunk::new(Arc::clone(&self.source_text)),
+      risc: super::risc::RiscBuilder::new(),
+      source_text: Arc::clone(&self.source_text),
+      locals: Vec::new(),
+      local_types: Vec::new(),
+      local_tdz: Vec::new(),
+      local_immutable: Vec::new(),
+      local_sloppy_immutable_silent: Vec::new(),
+      local_mirror_globals: Vec::new(),
+      scopes: vec![crate::compiler::Scope {
+        kind: crate::compiler::ScopeKind::Function,
+        bindings: HashMap::new(),
+        lexical_bindings: HashSet::new(),
+        block_var_names: HashSet::new(),
+      }],
+      globals: HashMap::new(),
+      is_root: false,
+      strict_context: true,
+      loop_depth: 0,
+      with_depth: 0,
+      handler_depth: 0,
+      continue_patches: Vec::new(),
+      break_patches: Vec::new(),
+      finally_patches: Vec::new(),
+      iterator_close_stack: Vec::new(),
+      label_patches: Vec::new(),
+      current_module: self.current_module.clone(),
+      pending_operand_bytes: 0,
+      allow_new_target: false,
+      allow_super: true,
+      outer_bindings,
+      upvalue_indices: HashMap::new(),
+      captured_upvalues: Vec::new(),
+      private_names: self.private_names.clone(),
+      pending_instance_fields: Vec::new(),
+      emission_error: None,
+    };
+    inner.chunk.allow_super = true;
+    inner.compile_expr_oast(initializer)?;
+    inner.emit(Op::Return, LINE);
+    let chunk = super::risc::RiscBuilder::finish(
+      std::mem::take(&mut inner.chunk),
+      std::mem::take(&mut inner.risc),
+    )?;
+    let slot_names = inner.environment_slot_names();
+    Ok(FunctionProto {
+      name: "<static field>".to_string(),
+      span: initializer.span(),
+      arity: 0,
+      chunk: Arc::new(chunk),
+      slot_types: inner.local_types,
+      slot_names,
+      lexical_tdz: inner.local_tdz,
+      slot_immutable: inner.local_immutable,
+      slot_sloppy_immutable_silent: inner.local_sloppy_immutable_silent,
+      upvalues: inner.captured_upvalues,
+      has_rest: false,
+      has_prototype_property: false,
+      captures_this: false,
+      arguments_slot: None,
+      self_binding_slot: None,
+      has_simple_parameter_list: true,
+      return_type: None,
+      is_strict: true,
+      is_constructor: false,
+      is_derived_constructor: false,
+      is_class_constructor: false,
+      is_async: false,
+      is_generator: false,
+    })
+  }
+
+  fn compile_static_block_function(
+    &mut self,
+    block: &oast::StaticBlock<'_>,
+  ) -> Result<FunctionProto, crate::errors::CompilerError> {
+    let outer_bindings = self.visible_bindings_snapshot();
+    let mut inner = Compiler {
+      chunk: Chunk::new(Arc::clone(&self.source_text)),
+      risc: super::risc::RiscBuilder::new(),
+      source_text: Arc::clone(&self.source_text),
+      locals: Vec::new(),
+      local_types: Vec::new(),
+      local_tdz: Vec::new(),
+      local_immutable: Vec::new(),
+      local_sloppy_immutable_silent: Vec::new(),
+      local_mirror_globals: Vec::new(),
+      scopes: vec![crate::compiler::Scope {
+        kind: crate::compiler::ScopeKind::Function,
+        bindings: HashMap::new(),
+        lexical_bindings: HashSet::new(),
+        block_var_names: HashSet::new(),
+      }],
+      globals: HashMap::new(),
+      is_root: false,
+      strict_context: true,
+      loop_depth: 0,
+      with_depth: 0,
+      handler_depth: 0,
+      continue_patches: Vec::new(),
+      break_patches: Vec::new(),
+      finally_patches: Vec::new(),
+      iterator_close_stack: Vec::new(),
+      label_patches: Vec::new(),
+      current_module: self.current_module.clone(),
+      pending_operand_bytes: 0,
+      allow_new_target: false,
+      allow_super: true,
+      outer_bindings,
+      upvalue_indices: HashMap::new(),
+      captured_upvalues: Vec::new(),
+      private_names: self.private_names.clone(),
+      pending_instance_fields: Vec::new(),
+      emission_error: None,
+    };
+    inner.chunk.allow_super = true;
+    inner.pre_declare_variables_oast_stmts(&block.body);
+    inner.pre_declare_functions_oast_stmts(&block.body);
+    inner.emit_hoisted_function_decls_oast_stmts(&block.body)?;
+    for statement in &block.body {
+      if !matches!(statement, oast::Statement::FunctionDeclaration(_)) {
+        inner.compile_statement_oast(statement)?;
+      }
+    }
+    inner.emit(Op::Undefined, LINE);
+    inner.emit(Op::Return, LINE);
+    let chunk = super::risc::RiscBuilder::finish(
+      std::mem::take(&mut inner.chunk),
+      std::mem::take(&mut inner.risc),
+    )?;
+    let slot_names = inner.environment_slot_names();
+    Ok(FunctionProto {
+      name: "<static block>".to_string(),
+      span: block.span,
+      arity: 0,
+      chunk: Arc::new(chunk),
+      slot_types: inner.local_types,
+      slot_names,
+      lexical_tdz: inner.local_tdz,
+      slot_immutable: inner.local_immutable,
+      slot_sloppy_immutable_silent: inner.local_sloppy_immutable_silent,
+      upvalues: inner.captured_upvalues,
+      has_rest: false,
+      has_prototype_property: false,
+      captures_this: false,
+      arguments_slot: None,
+      self_binding_slot: None,
+      has_simple_parameter_list: true,
+      return_type: None,
+      is_strict: true,
+      is_constructor: false,
+      is_derived_constructor: false,
+      is_class_constructor: false,
+      is_async: false,
+      is_generator: false,
+    })
+  }
+
   /// Emits a class declaration from an OAST class node.
   #[allow(clippy::too_many_lines)]
   pub(super) fn emit_class_from_oast(
@@ -2194,6 +2327,28 @@ impl Compiler {
       .map(|id| id.name.to_string())
       .or_else(|| declaration_name.map(ToString::to_string))
       .unwrap_or_else(|| "<anonymous>".to_string());
+
+    // Each class declaration creates fresh private-name identities while retaining
+    // access to private names from enclosing classes.
+    let enclosing_private_names = self.private_names.clone();
+    let mut declared_private_names = HashSet::new();
+    for element in &c.body.body {
+      let key = match element {
+        oast::ClassElement::MethodDefinition(method) => Some(&method.key),
+        oast::ClassElement::PropertyDefinition(property) => Some(&property.key),
+        oast::ClassElement::AccessorProperty(property) => Some(&property.key),
+        _ => None,
+      };
+      if let Some(oast::PropertyKey::PrivateIdentifier(identifier)) = key {
+        declared_private_names.insert(identifier.name.to_string());
+      }
+    }
+    for name in declared_private_names {
+      self.private_names.insert(
+        name,
+        Value::Symbol(crate::value::SymbolId::new_private(), None),
+      );
+    }
 
     let mut prepared_fields = Vec::new();
     for (index, element) in c.body.body.iter().enumerate() {
@@ -2220,10 +2375,9 @@ impl Compiler {
             ))
           }
           oast::PropertyKey::PrivateIdentifier(identifier) => {
-            let Value::String(key) = self.ensure_private_name_constant(&identifier.name) else {
-              unreachable!("private names use string keys")
-            };
-            crate::compiler::core::PreparedClassFieldKey::Private(key.to_string())
+            crate::compiler::core::PreparedClassFieldKey::Private(
+              self.ensure_private_name_constant(&identifier.name),
+            )
           }
           _ => {
             return Err(crate::errors::CompilerError::from(
@@ -2459,8 +2613,20 @@ impl Compiler {
             self.emit_byte(self.slot_to_u8(slot)?, LINE);
           }
           if field.is_static {
-            self.emit_static_class_field(ctor_slot, field)?;
+            self.emit_static_class_field(ctor_slot, field, property.value.as_ref())?;
           }
+        }
+        oast::ClassElement::StaticBlock(block) => {
+          let proto = self.compile_static_block_function(block)?;
+          let function_index = self.chunk.add_function(proto);
+          self.emit(Op::LoadLocal, LINE);
+          self.emit_byte(self.slot_to_u8(ctor_slot)?, LINE);
+          self.emit(Op::MakeClosure, LINE);
+          self.emit_byte(self.function_index_to_u8(function_index)?, LINE);
+          self.emit_set_method_home_object(ctor_slot)?;
+          self.emit(Op::CallBuiltin, LINE);
+          self.emit_byte(0, LINE);
+          self.emit(Op::Discard, LINE);
         }
         _ => {}
       }
@@ -2468,6 +2634,7 @@ impl Compiler {
 
     self.emit(Op::LoadLocal, LINE);
     self.emit_byte(self.slot_to_u8(ctor_slot)?, LINE);
+    self.private_names = enclosing_private_names;
     Ok(())
   }
 
@@ -2626,18 +2793,22 @@ impl Compiler {
 
     let mut raw_param_slots = Vec::new();
     if has_simple_parameter_list {
-      // Parameter placeholders (no type information available here).
-      for p in &func.params.items {
-        let pname = match &p.pattern {
-          oast::BindingPattern::BindingIdentifier(i) => i.name.to_string(),
-          _ => "_".to_string(),
-        };
-        inner.add_local_with_mirror(pname, None, false);
+      // Keep one positional slot per argument, but bind duplicate sloppy
+      // parameter names to their last occurrence.
+      let mut last_parameter_index = HashMap::new();
+      for (index, parameter) in func.params.items.iter().enumerate() {
+        if let oast::BindingPattern::BindingIdentifier(identifier) = &parameter.pattern {
+          last_parameter_index.insert(identifier.name.to_string(), index);
+        }
       }
-      if let Some(rest) = &func.params.rest {
-        let pname = match &rest.rest.argument {
-          oast::BindingPattern::BindingIdentifier(i) => i.name.to_string(),
-          _ => "_".to_string(),
+      for (index, parameter) in func.params.items.iter().enumerate() {
+        let pname = match &parameter.pattern {
+          oast::BindingPattern::BindingIdentifier(identifier)
+            if last_parameter_index.get(identifier.name.as_str()) == Some(&index) =>
+          {
+            identifier.name.to_string()
+          }
+          _ => format!("\0duplicate_param_{index}"),
         };
         inner.add_local_with_mirror(pname, None, false);
       }
@@ -2896,16 +3067,17 @@ impl Compiler {
 
     let mut raw_param_slots = Vec::new();
     if has_simple_parameter_list {
-      for p in &func.params.items {
-        let pname = match &p.pattern {
-          oast::BindingPattern::BindingIdentifier(i) => i.name.to_string(),
-          _ => "_".to_string(),
-        };
-        inner.add_local_with_mirror(pname, None, false);
-      }
-      if let Some(rest) = &func.params.rest {
-        let pname = match &rest.rest.argument {
-          oast::BindingPattern::BindingIdentifier(i) => i.name.to_string(),
+      let mut seen = HashSet::new();
+      for parameter in &func.params.items {
+        if let oast::BindingPattern::BindingIdentifier(identifier) = &parameter.pattern
+          && !seen.insert(identifier.name.to_string())
+        {
+          return Err(crate::errors::CompilerError::from(
+            "SyntaxError: duplicate parameter name in arrow function",
+          ));
+        }
+        let pname = match &parameter.pattern {
+          oast::BindingPattern::BindingIdentifier(identifier) => identifier.name.to_string(),
           _ => "_".to_string(),
         };
         inner.add_local_with_mirror(pname, None, false);

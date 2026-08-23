@@ -10,9 +10,7 @@ use crate::runtime_utils::{
   array_from_values, builtin_object, collect_iterable_values, set_builtin_length, set_builtin_name,
   static_builtin_arg_offset, to_length, usize_to_f64,
 };
-use crate::value::{
-  ArrayData, BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value,
-};
+use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value};
 use crate::{RuntimeError, Vm};
 
 /// The preallocated Object constructor and prototype intrinsic values.
@@ -90,6 +88,9 @@ pub(crate) fn install_object_intrinsics(
         }
         if object.internal_slot("[[BooleanData]]").is_some() {
           return Ok(Value::String("[object Boolean]".into()));
+        }
+        if object.internal_slot("[[NumberData]]").is_some() {
+          return Ok(Value::String("[object Number]".into()));
         }
       }
       if let Value::Object(obj) = &this
@@ -541,19 +542,20 @@ pub(crate) fn install_object_intrinsics(
     .insert(PKey::String("getOwnPropertySymbols".to_string().into()), {
       let builtin = builtin_object(
         Rc::new(|vm, args| {
-          let target = args.get(1).cloned().unwrap_or(Value::Undefined);
+          let off = static_builtin_arg_offset(vm, args, "Object");
+          let target = vm.to_object_value(args.get(off).cloned().unwrap_or(Value::Undefined))?;
           let symbols = vm
             .own_property_keys_value(&target)?
             .into_iter()
             .filter_map(|key| {
               if let PropertyKey::Symbol(id) = key {
-                Some(Value::Symbol(id, None))
+                Some(Some(Value::Symbol(id, None)))
               } else {
                 None
               }
             })
-            .collect::<Vec<_>>();
-          Ok(array_from_values(symbols))
+            .collect();
+          Ok(vm.new_array(symbols))
         }),
         function_prototype,
       );
@@ -599,25 +601,19 @@ pub(crate) fn install_object_intrinsics(
         let builtin = builtin_object(
           Rc::new(|vm, args| {
             let off = static_builtin_arg_offset(vm, args, "Object");
-            let target = args.get(off).cloned().unwrap_or(Value::Undefined);
-            let mut names: Vec<String> = Vec::new();
-            for key in vm.own_property_keys_value(&target)? {
-              if let PropertyKey::String(name) = key {
-                names.push(name.to_string());
-              }
-            }
-            let arr_rc = Rc::new(RefCell::new(ArrayData::from(
-              names
-                .into_iter()
-                .map(|s| Some(Value::String(s.into())))
-                .collect::<Vec<_>>(),
-            )));
-            let props = Rc::new(RefCell::new(ObjectData::new()));
-            props.borrow_mut().properties.insert(
-              PropertyKey::String("length".to_string().into()),
-              PropertyDescriptor::ordinary_data(Value::Number(usize_to_f64(arr_rc.borrow().len()))),
-            );
-            Ok(Value::Array(arr_rc, props))
+            let target = vm.to_object_value(args.get(off).cloned().unwrap_or(Value::Undefined))?;
+            let names = vm
+              .own_property_keys_value(&target)?
+              .into_iter()
+              .filter_map(|key| {
+                if let PropertyKey::String(name) = key {
+                  Some(Some(Value::String(name)))
+                } else {
+                  None
+                }
+              })
+              .collect();
+            Ok(vm.new_array(names))
           }),
           function_prototype,
         );

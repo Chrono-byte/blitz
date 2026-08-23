@@ -253,6 +253,13 @@ fn boxed_primitive(value: &Value) -> Option<Value> {
   }
   if let Some(value) = data
     .borrow()
+    .internal_slot("[[NumberData]]")
+    .cloned()
+  {
+    return Some(value);
+  }
+  if let Some(value) = data
+    .borrow()
     .internal_slot("[[PrimitiveValue]]")
     .cloned()
   {
