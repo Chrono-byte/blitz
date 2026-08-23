@@ -5,8 +5,7 @@ bytecode compilation, execution, garbage collection, built-ins, and language
 semantics. Denko powers the Blitz application runtime but can be embedded or
 run independently without Blitz host APIs.
 
-The name comes from the romanized Japanese **denkō** (電光), meaning “lightning
-flash” or “electric light.”
+The name comes from the romanized Japanese **denkō** (電光), meaning “lightning flash.”
 
 ## Raw engine harness
 
