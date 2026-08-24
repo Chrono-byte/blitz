@@ -255,15 +255,21 @@ pub(super) enum QuickenedKind {
   NumericPropertyAdd,
   NumericIncrement,
   NumericAddLocal,
-  NumericLoop,
-  NumericCallLoop,
-  NumericPropertyLoop,
   DenseArrayPushLoop,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) enum SiteAction {
+  #[default]
+  Interpret,
+  Legacy(QuickenedKind),
+  Region(crate::vm::region::RegionId),
 }
 
 pub(super) struct QuickenedPlan {
   pub(super) _chunk: Arc<Chunk>,
-  pub(super) sites: Arc<[QuickenedKind]>,
+  pub(super) sites: Arc<[SiteAction]>,
+  pub(super) regions: Arc<[crate::vm::region::NativeRegion]>,
   pub(super) direct_calls: Rc<RefCell<Vec<Option<DirectCallSite>>>>,
 }
 
@@ -280,7 +286,8 @@ pub(super) struct CacheState {
   /// VM-local quickened plans keyed by portable chunk identity.
   pub(super) quickened: HashMap<usize, QuickenedPlan>,
   pub(super) active_quickened_chunk: usize,
-  pub(super) active_quickened_sites: Arc<[QuickenedKind]>,
+  pub(super) active_quickened_sites: Arc<[SiteAction]>,
+  pub(super) active_regions: Arc<[crate::vm::region::NativeRegion]>,
   pub(super) active_direct_calls: Rc<RefCell<Vec<Option<DirectCallSite>>>>,
 }
 

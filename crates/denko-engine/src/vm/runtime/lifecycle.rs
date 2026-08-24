@@ -117,6 +117,7 @@ impl Vm {
         quickened: HashMap::new(),
         active_quickened_chunk: 0,
         active_quickened_sites: Arc::from([]),
+        active_regions: Arc::from([]),
         active_direct_calls: Rc::new(RefCell::new(Vec::new())),
       },
       profiling: ProfilingState {
@@ -224,6 +225,7 @@ impl Vm {
         quickened: HashMap::new(),
         active_quickened_chunk: 0,
         active_quickened_sites: Arc::from([]),
+        active_regions: Arc::from([]),
         active_direct_calls: Rc::new(RefCell::new(Vec::new())),
       },
       profiling: ProfilingState {

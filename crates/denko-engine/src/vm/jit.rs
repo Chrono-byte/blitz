@@ -485,7 +485,8 @@ impl DirectCallTarget {
 pub(crate) struct JitRuntime {
   pub(crate) code: HashMap<FunctionId, Vec<JitCode>>,
   next_version: u64,
-  numeric_call_loop: Option<Rc<NativeCode>>,
+  numeric_constant_loop: Option<Rc<NativeCode>>,
+  numeric_index_loop: Option<Rc<NativeCode>>,
 }
 
 impl JitRuntime {
@@ -588,17 +589,21 @@ impl JitRuntime {
       .and_then(|code| code.direct_call.clone())
   }
 
-  pub(crate) fn run_numeric_call_loop(
+  pub(crate) fn run_numeric_region(
     &mut self,
-    frame: &mut native::NumericCallLoopFrame,
+    frame: &mut native::NumericLoopFrame,
+    addend: native::NumericLoopAddend,
   ) -> Result<(), String> {
-    if self.numeric_call_loop.is_none() {
-      self.numeric_call_loop = Some(Rc::new(NativeCode::numeric_call_loop()?));
+    let slot = match addend {
+      native::NumericLoopAddend::Constant => &mut self.numeric_constant_loop,
+      native::NumericLoopAddend::Index => &mut self.numeric_index_loop,
+    };
+    if slot.is_none() {
+      *slot = Some(Rc::new(NativeCode::numeric_loop(addend)?));
     }
-    let code = self
-      .numeric_call_loop
+    let code = slot
       .as_ref()
-      .expect("numeric call-loop code was initialized");
+      .expect("numeric region code was initialized");
     unsafe { code.call_numeric_loop_frame(frame) };
     Ok(())
   }

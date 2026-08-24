@@ -16,6 +16,7 @@
 
 /// VM-owned profiling and future native compilation metadata.
 mod jit;
+mod region;
 /// Runtime helpers split into structured submodules.
 pub mod runtime;
 pub mod state;

@@ -32,15 +32,21 @@ pub(crate) struct DirectCallFrame {
   pub(crate) argument_count: usize,
 }
 
-/// Unboxed state for an allocation-free numeric call-loop batch.
+/// Unboxed state for an allocation-free counted numeric-loop batch.
 #[repr(C)]
-pub(crate) struct NumericCallLoopFrame {
+pub(crate) struct NumericLoopFrame {
   pub(crate) index: f64,
   pub(crate) limit: f64,
   pub(crate) accumulator: f64,
   pub(crate) step: f64,
   pub(crate) leaf_value: f64,
   pub(crate) iterations: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum NumericLoopAddend {
+  Constant,
+  Index,
 }
 
 pub(crate) type JitExitCode = u32;
@@ -342,7 +348,7 @@ impl NativeCode {
   }
 
   #[cfg(all(unix, target_arch = "x86_64"))]
-  pub(crate) fn numeric_call_loop() -> Result<Self, String> {
+  pub(crate) fn numeric_loop(addend: NumericLoopAddend) -> Result<Self, String> {
     let mut bytes = vec![
       0xF2, 0x0F, 0x10, 0x07, // movsd xmm0, [rdi]       index
       0xF2, 0x0F, 0x10, 0x4F, 0x08, // movsd xmm1, [rdi+8]   limit
@@ -359,8 +365,15 @@ impl NativeCode {
     bytes.push(0x73); // jae exit
     let completed_exit = bytes.len();
     bytes.push(0);
+    match addend {
+      NumericLoopAddend::Constant => {
+        bytes.extend_from_slice(&[0xF2, 0x0F, 0x58, 0xD4]); // addsd xmm2, xmm4
+      }
+      NumericLoopAddend::Index => {
+        bytes.extend_from_slice(&[0xF2, 0x0F, 0x58, 0xD0]); // addsd xmm2, xmm0
+      }
+    }
     bytes.extend_from_slice(&[
-      0xF2, 0x0F, 0x58, 0xD4, // addsd xmm2, xmm4
       0xF2, 0x0F, 0x58, 0xC3, // addsd xmm0, xmm3
       0xFF, 0xC0, // inc eax
       0x83, 0xF8, 0x40, // cmp eax, 64
@@ -627,9 +640,9 @@ impl NativeCode {
   #[cfg(all(unix, target_arch = "x86_64"))]
   pub(crate) unsafe fn call_numeric_loop_frame(
     &self,
-    frame: *mut NumericCallLoopFrame,
+    frame: *mut NumericLoopFrame,
   ) {
-    let entry: unsafe extern "C" fn(*mut NumericCallLoopFrame) =
+    let entry: unsafe extern "C" fn(*mut NumericLoopFrame) =
       unsafe { std::mem::transmute(self.ptr.as_ptr()) };
     unsafe { entry(frame) };
   }
@@ -654,7 +667,7 @@ impl Drop for NativeCode {
 
 #[cfg(all(test, unix, target_arch = "x86_64"))]
 mod tests {
-  use super::{JIT_EXIT_RETURN, JitFrame, NativeCode, NumericCallLoopFrame};
+  use super::{JIT_EXIT_RETURN, JitFrame, NativeCode, NumericLoopAddend, NumericLoopFrame};
   use crate::value::Value;
 
   #[test]
@@ -744,8 +757,8 @@ mod tests {
 
   #[test]
   fn executes_a_bounded_numeric_call_loop_batch() {
-    let code = NativeCode::numeric_call_loop().expect("native allocation");
-    let mut frame = NumericCallLoopFrame {
+    let code = NativeCode::numeric_loop(NumericLoopAddend::Constant).expect("native allocation");
+    let mut frame = NumericLoopFrame {
       index: 0.0,
       limit: 100.0,
       accumulator: 0.0,
@@ -762,5 +775,22 @@ mod tests {
     assert_eq!(frame.index, 100.0);
     assert_eq!(frame.accumulator, 4_200.0);
     assert_eq!(frame.iterations, 36);
+  }
+
+  #[test]
+  fn executes_a_bounded_numeric_index_loop_batch() {
+    let code = NativeCode::numeric_loop(NumericLoopAddend::Index).expect("native allocation");
+    let mut frame = NumericLoopFrame {
+      index: 0.0,
+      limit: 100.0,
+      accumulator: 0.0,
+      step: 1.0,
+      leaf_value: 0.0,
+      iterations: 0,
+    };
+    unsafe { code.call_numeric_loop_frame(&mut frame) };
+    assert_eq!(frame.index, 64.0);
+    assert_eq!(frame.accumulator, 2_016.0);
+    assert_eq!(frame.iterations, 64);
   }
 }

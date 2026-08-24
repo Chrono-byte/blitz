@@ -111,8 +111,80 @@ mod test {
       vm.get_global("native_identity_total"),
       Some(Value::Number(25_300.0))
     );
+    assert!(vm.caches.quickened.values().any(|plan| {
+      !plan.regions.is_empty()
+        && plan
+          .sites
+          .iter()
+          .any(|site| matches!(site, SiteAction::Region(_)))
+    }));
     assert!(vm.profiling.jit_stats.native_loop_entries > 0);
     assert!(vm.profiling.jit_stats.native_loop_iterations > 0);
+  }
+
+  #[cfg(all(unix, target_arch = "x86_64"))]
+  #[test]
+  fn numeric_accumulator_loop_migrates_to_native_code() {
+    let (vm, _) = run_script(
+      "let total = 0; for (let i = 0; i < 1100; i++) total += i; globalThis.native_accumulator_total = total;",
+    );
+    assert_eq!(
+      vm.get_global("native_accumulator_total"),
+      Some(Value::Number(604_450.0))
+    );
+    assert!(vm.caches.quickened.values().any(|plan| {
+      plan.regions.iter().any(|region| {
+        matches!(
+          region,
+          crate::vm::region::NativeRegion::NumericLoop(crate::vm::region::NumericLoopRegion {
+            body: crate::vm::region::NumericLoopBody::AddIndex { .. },
+            ..
+          })
+        )
+      })
+    }));
+    assert!(vm.profiling.jit_stats.native_loop_entries > 0);
+    assert!(vm.profiling.jit_stats.native_loop_iterations >= 1100);
+  }
+
+  #[cfg(all(unix, target_arch = "x86_64"))]
+  #[test]
+  fn numeric_property_loop_migrates_to_native_code() {
+    let (vm, _) = run_script(
+      "let object = { value: 3 }; let total = 0; for (let i = 0; i < 1100; i++) total += object.value; globalThis.native_property_total = total;",
+    );
+    assert_eq!(
+      vm.get_global("native_property_total"),
+      Some(Value::Number(3_300.0))
+    );
+    assert!(vm.caches.quickened.values().any(|plan| {
+      plan.regions.iter().any(|region| {
+        matches!(
+          region,
+          crate::vm::region::NativeRegion::NumericLoop(crate::vm::region::NumericLoopRegion {
+            body: crate::vm::region::NumericLoopBody::AddProperty { .. },
+            ..
+          })
+        )
+      })
+    }));
+    assert!(vm.profiling.jit_stats.native_loop_entries > 0);
+    assert!(vm.profiling.jit_stats.native_loop_iterations >= 1100);
+  }
+
+  #[test]
+  fn numeric_property_region_falls_back_for_accessors() {
+    let (vm, _) = run_script(
+      "let calls = 0; let object = {}; Object.defineProperty(object, 'value', { get() { calls++; return 1; } }); let total = 0; for (let i = 0; i < 1100; i++) total += object.value; globalThis.accessor_total = total; globalThis.accessor_calls = calls;",
+    );
+    assert_eq!(
+      vm.get_global("accessor_total"),
+      Some(Value::Number(1_100.0))
+    );
+    assert_eq!(
+      vm.get_global("accessor_calls"),
+      Some(Value::Number(1_100.0))
+    );
   }
 
   #[cfg(all(unix, target_arch = "x86_64"))]
