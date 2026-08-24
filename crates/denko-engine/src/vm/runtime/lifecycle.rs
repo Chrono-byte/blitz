@@ -119,6 +119,8 @@ impl Vm {
         active_quickened_sites: Arc::from([]),
         active_regions: Arc::from([]),
         active_direct_calls: Rc::new(RefCell::new(Vec::new())),
+        optimized_execution_enabled: true,
+        native_regions_enabled: std::env::var_os("DENKO_DISABLE_NATIVE_REGIONS").is_none(),
       },
       profiling: ProfilingState {
         enabled: std::env::var("BLITZ_VM_PROFILE")
@@ -227,6 +229,8 @@ impl Vm {
         active_quickened_sites: Arc::from([]),
         active_regions: Arc::from([]),
         active_direct_calls: Rc::new(RefCell::new(Vec::new())),
+        optimized_execution_enabled: true,
+        native_regions_enabled: std::env::var_os("DENKO_DISABLE_NATIVE_REGIONS").is_none(),
       },
       profiling: ProfilingState {
         enabled: self.profiling.enabled,

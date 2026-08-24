@@ -32,17 +32,6 @@ pub(crate) struct DirectCallFrame {
   pub(crate) argument_count: usize,
 }
 
-/// Unboxed state for an allocation-free counted numeric-loop batch.
-#[repr(C)]
-pub(crate) struct NumericLoopFrame {
-  pub(crate) index: f64,
-  pub(crate) limit: f64,
-  pub(crate) accumulator: f64,
-  pub(crate) step: f64,
-  pub(crate) leaf_value: f64,
-  pub(crate) iterations: u32,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum NumericLoopAddend {
   Constant,
@@ -400,6 +389,50 @@ impl NativeCode {
   }
 
   #[cfg(all(unix, target_arch = "x86_64"))]
+  pub(crate) fn dense_array_push_loop() -> Result<Self, String> {
+    let mut bytes = vec![
+      0xF2, 0x0F, 0x10, 0x07, // movsd xmm0, [rdi]       index
+      0xF2, 0x0F, 0x10, 0x4F, 0x08, // movsd xmm1, [rdi+8]   limit
+      0xF2, 0x0F, 0x10, 0x57, 0x10, // movsd xmm2, [rdi+16]  step
+      0x48, 0x8D, 0x57, 0x20, // lea rdx, [rdi+32]       values
+      0x31, 0xC0, // xor eax, eax             iterations
+    ];
+    let loop_start = bytes.len();
+    bytes.extend_from_slice(&[0x66, 0x0F, 0x2E, 0xC1]); // ucomisd xmm0, xmm1
+    bytes.push(0x7A); // jp exit
+    let unordered_exit = bytes.len();
+    bytes.push(0);
+    bytes.push(0x73); // jae exit
+    let completed_exit = bytes.len();
+    bytes.push(0);
+    bytes.extend_from_slice(&[
+      0xF2, 0x0F, 0x11, 0x02, // movsd [rdx], xmm0
+      0x48, 0x83, 0xC2, 0x08, // add rdx, 8
+      0xF2, 0x0F, 0x58, 0xC2, // addsd xmm0, xmm2
+      0xFF, 0xC0, // inc eax
+      0x83, 0xF8, 0x40, // cmp eax, 64
+      0x72, // jb loop
+    ]);
+    let backedge = bytes.len();
+    bytes.push(0);
+    let exit = bytes.len();
+    bytes.extend_from_slice(&[
+      0xF2, 0x0F, 0x11, 0x07, // movsd [rdi], xmm0
+      0x89, 0x47, 0x18, // mov [rdi+24], eax
+      0xC3,
+    ]);
+    let relative = |from: usize, to: usize| -> Result<u8, String> {
+      i8::try_from(to as isize - (from + 1) as isize)
+        .map(|offset| offset as u8)
+        .map_err(|_| "dense array loop branch is out of range".to_string())
+    };
+    bytes[unordered_exit] = relative(unordered_exit, exit)?;
+    bytes[completed_exit] = relative(completed_exit, exit)?;
+    bytes[backedge] = relative(backedge, loop_start)?;
+    Self::from_bytes(&bytes, &[])
+  }
+
+  #[cfg(all(unix, target_arch = "x86_64"))]
   pub(crate) fn return_u64(value: u64) -> Result<Self, String> {
     // mov rax, imm64; ret
     let mut bytes = [0u8; 11];
@@ -640,11 +673,21 @@ impl NativeCode {
   #[cfg(all(unix, target_arch = "x86_64"))]
   pub(crate) unsafe fn call_numeric_loop_frame(
     &self,
-    frame: *mut NumericLoopFrame,
+    frame: *mut crate::vm::region::PreparedNumericRegion,
   ) {
-    let entry: unsafe extern "C" fn(*mut NumericLoopFrame) =
+    let entry: unsafe extern "C" fn(*mut crate::vm::region::PreparedNumericRegion) =
       unsafe { std::mem::transmute(self.ptr.as_ptr()) };
     unsafe { entry(frame) };
+  }
+
+  #[cfg(all(unix, target_arch = "x86_64"))]
+  pub(crate) unsafe fn call_dense_array_push_frame(
+    &self,
+    frame: &mut crate::vm::region::PreparedArrayPushRegion,
+  ) {
+    let function: unsafe extern "C" fn(*mut crate::vm::region::PreparedArrayPushRegion) =
+      unsafe { std::mem::transmute(self.ptr.as_ptr()) };
+    unsafe { function(frame) };
   }
 
   #[cfg(all(unix, target_arch = "x86_64"))]
@@ -667,8 +710,9 @@ impl Drop for NativeCode {
 
 #[cfg(all(test, unix, target_arch = "x86_64"))]
 mod tests {
-  use super::{JIT_EXIT_RETURN, JitFrame, NativeCode, NumericLoopAddend, NumericLoopFrame};
+  use super::{JIT_EXIT_RETURN, JitFrame, NativeCode, NumericLoopAddend};
   use crate::value::Value;
+  use crate::vm::region::{NumericRegionShape, PreparedNumericRegion};
 
   #[test]
   fn patches_a_direct_jump_between_native_blocks() {
@@ -758,13 +802,14 @@ mod tests {
   #[test]
   fn executes_a_bounded_numeric_call_loop_batch() {
     let code = NativeCode::numeric_loop(NumericLoopAddend::Constant).expect("native allocation");
-    let mut frame = NumericLoopFrame {
+    let mut frame = PreparedNumericRegion {
       index: 0.0,
       limit: 100.0,
       accumulator: 0.0,
       step: 1.0,
-      leaf_value: 42.0,
+      addend: 42.0,
       iterations: 0,
+      shape: NumericRegionShape::AddPrepared,
     };
     unsafe { code.call_numeric_loop_frame(&mut frame) };
     assert_eq!(frame.index, 64.0);
@@ -778,15 +823,33 @@ mod tests {
   }
 
   #[test]
+  fn prepares_a_bounded_dense_array_push_batch() {
+    let code = NativeCode::dense_array_push_loop().expect("native allocation");
+    let mut frame = crate::vm::region::PreparedArrayPushRegion {
+      index: 3.0,
+      limit: 100.0,
+      step: 2.0,
+      iterations: 0,
+      values: [0.0; 64],
+    };
+    unsafe { code.call_dense_array_push_frame(&mut frame) };
+    assert_eq!(frame.iterations, 49);
+    assert_eq!(frame.index, 101.0);
+    assert_eq!(frame.values[0], 3.0);
+    assert_eq!(frame.values[48], 99.0);
+  }
+
+  #[test]
   fn executes_a_bounded_numeric_index_loop_batch() {
     let code = NativeCode::numeric_loop(NumericLoopAddend::Index).expect("native allocation");
-    let mut frame = NumericLoopFrame {
+    let mut frame = PreparedNumericRegion {
       index: 0.0,
       limit: 100.0,
       accumulator: 0.0,
       step: 1.0,
-      leaf_value: 0.0,
+      addend: 0.0,
       iterations: 0,
+      shape: NumericRegionShape::AddIndex,
     };
     unsafe { code.call_numeric_loop_frame(&mut frame) };
     assert_eq!(frame.index, 64.0);

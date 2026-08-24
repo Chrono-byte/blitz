@@ -255,7 +255,6 @@ pub(super) enum QuickenedKind {
   NumericPropertyAdd,
   NumericIncrement,
   NumericAddLocal,
-  DenseArrayPushLoop,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -289,6 +288,10 @@ pub(super) struct CacheState {
   pub(super) active_quickened_sites: Arc<[SiteAction]>,
   pub(super) active_regions: Arc<[crate::vm::region::NativeRegion]>,
   pub(super) active_direct_calls: Rc<RefCell<Vec<Option<DirectCallSite>>>>,
+  /// Test and conformance switch for authoritative portable execution.
+  pub(super) optimized_execution_enabled: bool,
+  /// Diagnostic switch that leaves legacy quickening active.
+  pub(super) native_regions_enabled: bool,
 }
 
 pub(super) struct ProfilingState {

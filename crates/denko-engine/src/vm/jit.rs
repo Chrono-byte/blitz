@@ -485,8 +485,16 @@ impl DirectCallTarget {
 pub(crate) struct JitRuntime {
   pub(crate) code: HashMap<FunctionId, Vec<JitCode>>,
   next_version: u64,
-  numeric_constant_loop: Option<Rc<NativeCode>>,
-  numeric_index_loop: Option<Rc<NativeCode>>,
+  numeric_regions: [NumericRegionCode; 2],
+  dense_array_push_region: NumericRegionCode,
+}
+
+#[derive(Default)]
+enum NumericRegionCode {
+  #[default]
+  Uncompiled,
+  Ready(Rc<NativeCode>),
+  Unavailable,
 }
 
 impl JitRuntime {
@@ -591,21 +599,41 @@ impl JitRuntime {
 
   pub(crate) fn run_numeric_region(
     &mut self,
-    frame: &mut native::NumericLoopFrame,
-    addend: native::NumericLoopAddend,
-  ) -> Result<(), String> {
-    let slot = match addend {
-      native::NumericLoopAddend::Constant => &mut self.numeric_constant_loop,
-      native::NumericLoopAddend::Index => &mut self.numeric_index_loop,
+    prepared: &mut crate::vm::region::PreparedNumericRegion,
+  ) -> bool {
+    let addend = match prepared.shape {
+      crate::vm::region::NumericRegionShape::AddIndex => native::NumericLoopAddend::Index,
+      crate::vm::region::NumericRegionShape::AddPrepared => native::NumericLoopAddend::Constant,
     };
-    if slot.is_none() {
-      *slot = Some(Rc::new(NativeCode::numeric_loop(addend)?));
+    let slot = &mut self.numeric_regions[prepared.shape.index()];
+    if matches!(slot, NumericRegionCode::Uncompiled) {
+      *slot = match NativeCode::numeric_loop(addend) {
+        Ok(code) => NumericRegionCode::Ready(Rc::new(code)),
+        Err(_) => NumericRegionCode::Unavailable,
+      };
     }
-    let code = slot
-      .as_ref()
-      .expect("numeric region code was initialized");
-    unsafe { code.call_numeric_loop_frame(frame) };
-    Ok(())
+    let NumericRegionCode::Ready(code) = slot else {
+      return false;
+    };
+    unsafe { code.call_numeric_loop_frame(prepared) };
+    true
+  }
+
+  pub(crate) fn run_dense_array_push_region(
+    &mut self,
+    prepared: &mut crate::vm::region::PreparedArrayPushRegion,
+  ) -> bool {
+    if matches!(self.dense_array_push_region, NumericRegionCode::Uncompiled) {
+      self.dense_array_push_region = match NativeCode::dense_array_push_loop() {
+        Ok(code) => NumericRegionCode::Ready(Rc::new(code)),
+        Err(_) => NumericRegionCode::Unavailable,
+      };
+    }
+    let NumericRegionCode::Ready(code) = &self.dense_array_push_region else {
+      return false;
+    };
+    unsafe { code.call_dense_array_push_frame(prepared) };
+    true
   }
 
   pub(crate) fn execute(
@@ -1092,6 +1120,27 @@ mod tests {
     assert_eq!(unsafe { code.call_frame(&mut frame) }, 1);
     assert_eq!(frame.vm_pc, 1);
     assert!(matches!(registers[0], Value::Number(value) if value == 42.0));
+  }
+
+  #[cfg(all(unix, target_arch = "x86_64"))]
+  #[test]
+  fn unavailable_numeric_shape_falls_back_without_mutating_inputs() {
+    let shape = crate::vm::region::NumericRegionShape::AddPrepared;
+    let mut runtime = JitRuntime::default();
+    runtime.numeric_regions[shape.index()] = NumericRegionCode::Unavailable;
+    let mut prepared = crate::vm::region::PreparedNumericRegion {
+      index: 2.0,
+      limit: 10.0,
+      accumulator: 7.0,
+      step: 1.0,
+      addend: 3.0,
+      iterations: 0,
+      shape,
+    };
+    assert!(!runtime.run_numeric_region(&mut prepared));
+    assert_eq!(prepared.index, 2.0);
+    assert_eq!(prepared.accumulator, 7.0);
+    assert_eq!(prepared.iterations, 0);
   }
 }
 

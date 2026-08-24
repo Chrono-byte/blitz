@@ -21,11 +21,19 @@ fn test_globals() -> Rc<RefCell<ObjectData>> {
 }
 
 fn run_script(src: &str) -> (Vm, Rc<RefCell<ObjectData>>) {
+  run_script_with_optimizations(src, true)
+}
+
+fn run_script_with_optimizations(
+  src: &str,
+  enabled: bool,
+) -> (Vm, Rc<RefCell<ObjectData>>) {
   let session = Parser::parse_source(src).expect("parse ok");
   let chunk = compiler::compile_session(&session).expect("compile ok");
 
   let globals = test_globals();
   let mut vm = Vm::new(Clone::clone(&globals));
+  vm.caches.optimized_execution_enabled = enabled;
   vm.run(chunk).expect("run ok");
   (vm, globals)
 }
@@ -137,7 +145,7 @@ mod test {
         matches!(
           region,
           crate::vm::region::NativeRegion::NumericLoop(crate::vm::region::NumericLoopRegion {
-            body: crate::vm::region::NumericLoopBody::AddIndex { .. },
+            prerequisites: crate::vm::region::NumericLoopPrerequisites::AddIndex,
             ..
           })
         )
@@ -162,7 +170,7 @@ mod test {
         matches!(
           region,
           crate::vm::region::NativeRegion::NumericLoop(crate::vm::region::NumericLoopRegion {
-            body: crate::vm::region::NumericLoopBody::AddProperty { .. },
+            prerequisites: crate::vm::region::NumericLoopPrerequisites::AddProperty { .. },
             ..
           })
         )
@@ -185,6 +193,64 @@ mod test {
       vm.get_global("accessor_calls"),
       Some(Value::Number(1_100.0))
     );
+  }
+
+  #[cfg(all(unix, target_arch = "x86_64"))]
+  #[test]
+  fn numeric_regions_match_portable_interpretation() {
+    let source = "function identity(value) { return value; } let object = { value: 3 }; let indexTotal = 0; let propertyTotal = 0; let callTotal = 0; for (let i = 0; i < 1100; i++) indexTotal += i; for (let i = 0; i < 1100; i++) propertyTotal += object.value; for (let i = 0; i < 1100; i += 1) callTotal += identity(7); globalThis.indexTotal = indexTotal; globalThis.propertyTotal = propertyTotal; globalThis.callTotal = callTotal;";
+    let (optimized, _) = run_script_with_optimizations(source, true);
+    let (portable, _) = run_script_with_optimizations(source, false);
+    for name in ["indexTotal", "propertyTotal", "callTotal"] {
+      assert_eq!(optimized.get_global(name), portable.get_global(name));
+    }
+    assert!(
+      optimized
+        .profiling
+        .jit_stats
+        .native_loop_iterations
+        > 0
+    );
+    assert_eq!(
+      portable
+        .profiling
+        .jit_stats
+        .native_loop_iterations,
+      0
+    );
+  }
+
+  #[cfg(all(unix, target_arch = "x86_64"))]
+  #[test]
+  fn dense_array_push_region_matches_portable_interpretation() {
+    let source = "let values = []; for (let i = 0; i < 1100; i++) values.push(i); globalThis.arrayLength = values.length; globalThis.arrayFirst = values[0]; globalThis.arrayLast = values[1099];";
+    let (optimized, _) = run_script_with_optimizations(source, true);
+    let (portable, _) = run_script_with_optimizations(source, false);
+    for name in ["arrayLength", "arrayFirst", "arrayLast"] {
+      assert_eq!(optimized.get_global(name), portable.get_global(name));
+    }
+    assert!(optimized.caches.quickened.values().any(|plan| {
+      plan
+        .regions
+        .iter()
+        .any(|region| matches!(region, crate::vm::region::NativeRegion::DenseArrayPush(_)))
+    }));
+    assert!(
+      optimized
+        .profiling
+        .jit_stats
+        .native_loop_iterations
+        >= 1100
+    );
+  }
+
+  #[test]
+  fn dense_array_push_region_falls_back_for_an_overridden_method() {
+    let (vm, _) = run_script(
+      "let values = []; let calls = 0; values.push = function(value) { calls += 1; return value; }; for (let i = 0; i < 20; i++) values.push(i); globalThis.overrideCalls = calls; globalThis.overrideLength = values.length;",
+    );
+    assert_eq!(vm.get_global("overrideCalls"), Some(Value::Number(20.0)));
+    assert_eq!(vm.get_global("overrideLength"), Some(Value::Number(0.0)));
   }
 
   #[cfg(all(unix, target_arch = "x86_64"))]

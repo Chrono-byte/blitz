@@ -219,7 +219,7 @@ impl Vm {
     loop {
       // Portable RISC remains unchanged; the VM quickens recognized sites once
       // per chunk and only invokes the matching guarded operation here.
-      let action = if crate::trace::enabled() {
+      let action = if crate::trace::enabled() || !self.caches.optimized_execution_enabled {
         SiteAction::Interpret
       } else {
         self.site_action()
@@ -243,16 +243,6 @@ impl Vm {
         SiteAction::Legacy(kind) => kind,
         SiteAction::Interpret | SiteAction::Region(_) => QuickenedKind::Ordinary,
       };
-      if quickened == QuickenedKind::DenseArrayPushLoop
-        && self.try_dense_array_push_loop_sequence(registers)?
-      {
-        self.record_jit_backedge(self.execution.active.ip.saturating_sub(1));
-        gc_poll_countdown = gc_poll_countdown.saturating_sub(27);
-        if gc_poll_countdown == 0 {
-          gc_poll_countdown = GC_POLL_INTERVAL;
-        }
-        continue;
-      }
       if quickened == QuickenedKind::NumericCompareBranch
         && self.try_numeric_compare_branch_sequence(registers)?
       {
@@ -1739,7 +1729,7 @@ impl Vm {
         Arc::clone(&plan.sites)
       } else {
         let chunk = Arc::clone(&self.execution.active.chunk);
-        let (sites, regions) = build_quickened_sites(&chunk);
+        let (sites, regions) = build_quickened_sites(&chunk, self.caches.native_regions_enabled);
         let sites = Arc::<[SiteAction]>::from(sites);
         let regions = Arc::<[crate::vm::region::NativeRegion]>::from(regions);
         let direct_calls = Rc::new(RefCell::new(vec![None; chunk.code.len()]));
@@ -1767,31 +1757,12 @@ impl Vm {
       .unwrap_or(SiteAction::Interpret)
   }
 
-  fn try_dense_array_push_loop_sequence(
+  fn try_dense_array_push_region(
     &mut self,
+    region: crate::vm::region::DenseArrayPushRegion,
     registers: &mut [Value; 16],
   ) -> Result<bool, RuntimeError> {
-    let ip = self.execution.active.ip;
-    let Some(words) = self.execution.active.chunk.code.get(ip..ip + 27) else {
-      return Ok(false);
-    };
-    let index_slot = decode_risc_aux16(words[0]) as usize;
-    let array_slot = decode_risc_aux16(words[3]) as usize;
-    let call_temporary_slot = decode_risc_aux16(words[4]) as usize;
-    let increment_temporary_slot = decode_risc_aux16(words[22]) as usize;
-    let (condition, left, right, exit_offset) = decode_compare_jump(words[2]);
-    if condition != 2
-      || left != decode_rd(words[0])
-      || right != decode_rd(words[1])
-      || exit_offset <= 0
-      || decode_risc_aux16(words[5]) as usize != call_temporary_slot
-      || decode_risc_aux16(words[6]) as usize != call_temporary_slot
-      || decode_risc_aux16(words[9]) as usize != index_slot
-      || decode_risc_aux16(words[16]) as usize != index_slot
-      || decode_risc_aux16(words[23]) as usize != index_slot
-      || decode_risc_aux16(words[24]) as usize != increment_temporary_slot
-      || decode_risc_aux16(words[25]) as usize != index_slot
-      || decode_risc_aux16(words[19]) as usize >= self.execution.active.chunk.constants.len()
+    if self.execution.active.ip != region.entry_pc
       || self.execution.active.arguments.object.is_some()
       || self
         .execution
@@ -1803,20 +1774,24 @@ impl Vm {
         .execution
         .active
         .locals
-        .get(index_slot)
+        .get(region.index_slot)
         .is_some_and(|cell| Rc::strong_count(cell) != 1)
-      || [index_slot, call_temporary_slot, increment_temporary_slot]
-        .into_iter()
-        .any(|slot| {
-          self
-            .execution
-            .active
-            .slots
-            .as_ref()
-            .and_then(|slots| slots.immutable.get(slot))
-            .copied()
-            .unwrap_or(false)
-        })
+      || [
+        region.index_slot,
+        region.call_temporary_slot,
+        region.increment_temporary_slot,
+      ]
+      .into_iter()
+      .any(|slot| {
+        self
+          .execution
+          .active
+          .slots
+          .as_ref()
+          .and_then(|slots| slots.immutable.get(slot))
+          .copied()
+          .unwrap_or(false)
+      })
     {
       return Ok(false);
     }
@@ -1831,44 +1806,24 @@ impl Vm {
           _ => None,
         })
     };
-    let Some(index) = number(index_slot) else {
+    let Some(index) = number(region.index_slot) else {
       return Ok(false);
     };
-    let Some(crate::bytecode::Constant::Number(limit)) = self
-      .execution
-      .active
-      .chunk
-      .constants
-      .get(decode_risc_aux16(words[1]) as usize)
-    else {
-      return Ok(false);
-    };
-    let limit = *limit;
-    if index >= limit {
-      self.execution.active.ip = ip + 27;
+    if index.partial_cmp(&region.limit) != Some(std::cmp::Ordering::Less) {
+      registers[region.index_register] = Value::Number(index);
+      registers[region.limit_register] = Value::Number(region.limit);
+      self.execution.active.ip = region.completed_pc;
       return Ok(true);
     }
     let receiver = self
       .execution
       .active
       .locals
-      .get(array_slot)
+      .get(region.array_slot)
       .map(|cell| cell.borrow().clone());
     let Some(Value::Array(elements, properties)) = receiver else {
       return Ok(false);
     };
-    let Some(crate::bytecode::Constant::String(method_key)) = self
-      .execution
-      .active
-      .chunk
-      .constants
-      .get(decode_risc_aux16(words[7]) as usize)
-    else {
-      return Ok(false);
-    };
-    if method_key.as_str_lossy() != "push" {
-      return Ok(false);
-    }
     let property_key_is_index = |key: &PropertyKey| match key {
       PropertyKey::String(key) => key.as_str_lossy().parse::<u32>().is_ok(),
       PropertyKey::Symbol(_) => false,
@@ -1919,22 +1874,29 @@ impl Vm {
     if !canonical_push {
       return Ok(false);
     }
-    let Some(crate::bytecode::Constant::Number(step)) = self
-      .execution
-      .active
-      .chunk
-      .constants
-      .get(decode_risc_aux16(words[19]) as usize)
-    else {
-      return Ok(false);
+    let mut prepared = crate::vm::region::PreparedArrayPushRegion {
+      index,
+      limit: region.limit,
+      step: region.step,
+      iterations: 0,
+      values: [0.0; 64],
     };
-    let step = *step;
-    let mut next = index;
-    let mut values = Vec::with_capacity(64);
-    while values.len() < 64 && next < limit {
-      values.push(Some(Value::Number(next)));
-      next += step;
+    if !self
+      .profiling
+      .jit
+      .run_dense_array_push_region(&mut prepared)
+    {
+      return Ok(false);
     }
+    if prepared.iterations > 64 {
+      return Err(RuntimeError::from(
+        "native dense array loop exceeded its batch bound",
+      ));
+    }
+    let values = prepared.values[..prepared.iterations as usize]
+      .iter()
+      .map(|value| Some(Value::Number(*value)))
+      .collect::<Vec<_>>();
     let new_length = elements
       .borrow()
       .len()
@@ -1944,19 +1906,41 @@ impl Vm {
       return Ok(false);
     };
     elements.borrow_mut().extend(values);
-    let index_register = decode_rd(words[0]) as usize;
-    let limit_register = decode_rd(words[1]) as usize;
-    let step_register = decode_rd(words[19]) as usize;
+    if let Some(PropertyDescriptor::Data { value, .. }) = properties
+      .borrow_mut()
+      .properties
+      .get_mut(&PropertyKey::String("length".into()))
+    {
+      *value = Value::Number(usize_to_f64(new_length));
+    }
     let receiver = Value::Array(Rc::clone(&elements), Rc::clone(&properties));
     self.bump_object_generation(&receiver);
-    ensure_slot(&mut self.execution.active.locals, increment_temporary_slot);
-    *self.execution.active.locals[increment_temporary_slot].borrow_mut() = Value::Number(next);
-    *self.execution.active.locals[index_slot].borrow_mut() = Value::Number(next);
-    registers[index_register] = Value::Number(next);
-    registers[limit_register] = Value::Number(limit);
+    ensure_slot(
+      &mut self.execution.active.locals,
+      region.increment_temporary_slot,
+    );
+    *self.execution.active.locals[region.increment_temporary_slot].borrow_mut() =
+      Value::Number(prepared.index);
+    *self.execution.active.locals[region.index_slot].borrow_mut() = Value::Number(prepared.index);
+    registers[region.index_register] = Value::Number(prepared.index);
+    registers[region.limit_register] = Value::Number(region.limit);
     registers[0] = Value::Number(usize_to_f64(new_length));
-    registers[step_register] = Value::Number(step);
-    self.execution.active.ip = if next < limit { ip } else { ip + 27 };
+    registers[region.step_register] = Value::Number(region.step);
+    self.execution.active.ip = if prepared.index < region.limit {
+      region.entry_pc
+    } else {
+      region.completed_pc
+    };
+    self.profiling.jit_stats.native_loop_entries = self
+      .profiling
+      .jit_stats
+      .native_loop_entries
+      .saturating_add(1);
+    self.profiling.jit_stats.native_loop_iterations = self
+      .profiling
+      .jit_stats
+      .native_loop_iterations
+      .saturating_add(prepared.iterations as u64);
     Ok(true)
   }
 
@@ -1976,6 +1960,9 @@ impl Vm {
     match region {
       crate::vm::region::NativeRegion::NumericLoop(region) => {
         self.try_numeric_loop_region(region, registers)
+      }
+      crate::vm::region::NativeRegion::DenseArrayPush(region) => {
+        self.try_dense_array_push_region(region, registers)
       }
     }
   }
@@ -2035,14 +2022,11 @@ impl Vm {
     let Some(accumulator) = number_local(region.accumulator_slot) else {
       return Ok(false);
     };
-    let (leaf_value, addend) = match region.body {
-      crate::vm::region::NumericLoopBody::AddIndex { .. } => {
-        (0.0, crate::vm::jit::native::NumericLoopAddend::Index)
-      }
-      crate::vm::region::NumericLoopBody::AddProperty {
+    let addend = match region.prerequisites {
+      crate::vm::region::NumericLoopPrerequisites::AddIndex => 0.0,
+      crate::vm::region::NumericLoopPrerequisites::AddProperty {
         object_slot,
         key_constant,
-        ..
       } => {
         let object = self
           .execution
@@ -2081,12 +2065,9 @@ impl Vm {
         let Some(property) = property else {
           return Ok(false);
         };
-        (
-          property,
-          crate::vm::jit::native::NumericLoopAddend::Constant,
-        )
+        property
       }
-      crate::vm::region::NumericLoopBody::DirectCall {
+      crate::vm::region::NumericLoopPrerequisites::DirectCall {
         callee_slot,
         call_site,
         arguments,
@@ -2114,7 +2095,7 @@ impl Vm {
           crate::vm::region::NumericLeafArguments::None => None,
           crate::vm::region::NumericLeafArguments::OneConstant { value, .. } => Some(value),
         };
-        let leaf_value = match direct.target.leaf() {
+        match direct.target.leaf() {
           crate::vm::jit::DirectLeaf::Number(value) => value,
           crate::vm::jit::DirectLeaf::Parameter(0) => {
             let Some(value) = argument_value else {
@@ -2123,53 +2104,47 @@ impl Vm {
             value
           }
           crate::vm::jit::DirectLeaf::Parameter(_) => return Ok(false),
-        };
-        (
-          leaf_value,
-          crate::vm::jit::native::NumericLoopAddend::Constant,
-        )
+        }
       }
     };
-    let mut frame = crate::vm::jit::native::NumericLoopFrame {
+    let mut prepared = crate::vm::region::PreparedNumericRegion {
       index,
       limit: region.limit,
       accumulator,
       step: region.step,
-      leaf_value,
+      addend,
       iterations: 0,
+      shape: region.program.shape(),
     };
-    self
+    if !self
       .profiling
       .jit
-      .run_numeric_region(&mut frame, addend)
-      .map_err(RuntimeError::from)?;
-    if frame.iterations > u32::from(region.cost.max_iterations) {
+      .run_numeric_region(&mut prepared)
+    {
+      return Ok(false);
+    }
+    if prepared.iterations > u32::from(region.program.cost().max_iterations) {
       return Err(RuntimeError::from(
         "native numeric loop exceeded its batch bound",
       ));
     }
-    if frame.iterations > 0 {
+    if prepared.iterations > 0 {
       ensure_slot(&mut self.execution.active.locals, region.temporary_slot);
       *self.execution.active.locals[region.temporary_slot].borrow_mut() =
-        Value::Number(frame.index);
+        Value::Number(prepared.index);
       *self.execution.active.locals[region.accumulator_slot].borrow_mut() =
-        Value::Number(frame.accumulator);
-      *self.execution.active.locals[region.index_slot].borrow_mut() = Value::Number(frame.index);
-      match region.body {
-        crate::vm::region::NumericLoopBody::AddIndex {
+        Value::Number(prepared.accumulator);
+      *self.execution.active.locals[region.index_slot].borrow_mut() = Value::Number(prepared.index);
+      match region.exits.body {
+        crate::vm::region::NumericBodyWriteback::Numeric {
           accumulator_register,
           step_register,
-        }
-        | crate::vm::region::NumericLoopBody::AddProperty {
-          accumulator_register,
-          step_register,
-          ..
         } => {
-          registers[accumulator_register] = Value::Number(frame.accumulator);
+          registers[accumulator_register] = Value::Number(prepared.accumulator);
           registers[step_register] = Value::Number(region.step);
         }
-        crate::vm::region::NumericLoopBody::DirectCall { arguments, .. } => {
-          registers[0] = Value::Number(leaf_value);
+        crate::vm::region::NumericBodyWriteback::DirectCall { arguments } => {
+          registers[0] = Value::Number(addend);
           if let crate::vm::region::NumericLeafArguments::OneConstant { value, register } =
             arguments
           {
@@ -2178,9 +2153,9 @@ impl Vm {
         }
       }
     }
-    registers[region.index_register] = Value::Number(frame.index);
-    registers[region.limit_register] = Value::Number(region.limit);
-    self.execution.active.ip = if frame.index < frame.limit {
+    registers[region.exits.index_register] = Value::Number(prepared.index);
+    registers[region.exits.limit_register] = Value::Number(region.limit);
+    self.execution.active.ip = if prepared.index < prepared.limit {
       region.entry_pc
     } else {
       region.completed_pc
@@ -2194,7 +2169,7 @@ impl Vm {
       .profiling
       .jit_stats
       .native_loop_iterations
-      .saturating_add(frame.iterations as u64);
+      .saturating_add(prepared.iterations as u64);
     Ok(true)
   }
   /// Execute `LoadLocal, Const, CompareJump` with numeric guards in one dispatch.
@@ -2920,7 +2895,10 @@ impl Vm {
 // Free functions
 // ---------------------------------------------------------------------------
 
-fn build_quickened_sites(chunk: &Chunk) -> (Vec<SiteAction>, Vec<crate::vm::region::NativeRegion>) {
+fn build_quickened_sites(
+  chunk: &Chunk,
+  native_regions_enabled: bool,
+) -> (Vec<SiteAction>, Vec<crate::vm::region::NativeRegion>) {
   let code = &chunk.code;
   fn matches_ops(
     code: &[u32],
@@ -3077,35 +3055,6 @@ fn build_quickened_sites(chunk: &Chunk) -> (Vec<SiteAction>, Vec<crate::vm::regi
       && decode_rd(words[3]) == decode_rd(words[0])
   }
 
-  const ARRAY_PUSH_LOOP: &[Op] = &[
-    Op::LoadLocal,
-    Op::Const,
-    Op::CompareJump,
-    Op::LoadLocal,
-    Op::StoreLocal,
-    Op::LoadLocal,
-    Op::LoadLocal,
-    Op::Const,
-    Op::GetProperty,
-    Op::LoadLocal,
-    Op::Move,
-    Op::Move,
-    Op::Move,
-    Op::CallBuiltin,
-    Op::Move,
-    Op::CloneLocalCell,
-    Op::LoadLocal,
-    Op::Neg,
-    Op::Neg,
-    Op::Const,
-    Op::Move,
-    Op::Add,
-    Op::StoreLocal,
-    Op::LoadLocal,
-    Op::LoadLocal,
-    Op::StoreLocal,
-    Op::Jump,
-  ];
   const COMPARE: &[Op] = &[Op::LoadLocal, Op::Const, Op::CompareJump];
   const METHOD_CALL: &[Op] = &[
     Op::LoadLocal,
@@ -3149,24 +3098,30 @@ fn build_quickened_sites(chunk: &Chunk) -> (Vec<SiteAction>, Vec<crate::vm::regi
   let mut regions = Vec::new();
   let sites = (0..code.len())
     .map(|ip| {
-      if let Some(region) = crate::vm::region::NumericLoopRegion::decode_call(chunk, ip)
+      if native_regions_enabled
+        && let Some(region) = crate::vm::region::NumericLoopRegion::decode_call(chunk, ip)
         && let Some(id) = crate::vm::region::RegionId::from_index(regions.len())
       {
         regions.push(crate::vm::region::NativeRegion::NumericLoop(region));
         SiteAction::Region(id)
-      } else if let Some(region) = crate::vm::region::NumericLoopRegion::decode_property(chunk, ip)
+      } else if native_regions_enabled
+        && let Some(region) = crate::vm::region::NumericLoopRegion::decode_property(chunk, ip)
         && let Some(id) = crate::vm::region::RegionId::from_index(regions.len())
       {
         regions.push(crate::vm::region::NativeRegion::NumericLoop(region));
         SiteAction::Region(id)
-      } else if let Some(region) =
-        crate::vm::region::NumericLoopRegion::decode_accumulator(chunk, ip)
+      } else if native_regions_enabled
+        && let Some(region) = crate::vm::region::NumericLoopRegion::decode_accumulator(chunk, ip)
         && let Some(id) = crate::vm::region::RegionId::from_index(regions.len())
       {
         regions.push(crate::vm::region::NativeRegion::NumericLoop(region));
         SiteAction::Region(id)
-      } else if matches_ops(code, ip, ARRAY_PUSH_LOOP) {
-        SiteAction::Legacy(QuickenedKind::DenseArrayPushLoop)
+      } else if native_regions_enabled
+        && let Some(region) = crate::vm::region::DenseArrayPushRegion::decode(chunk, ip)
+        && let Some(id) = crate::vm::region::RegionId::from_index(regions.len())
+      {
+        regions.push(crate::vm::region::NativeRegion::DenseArrayPush(region));
+        SiteAction::Region(id)
       } else if is_numeric_compare(code, ip, COMPARE) {
         SiteAction::Legacy(QuickenedKind::NumericCompareBranch)
       } else if is_single_argument_method_call(code, ip, METHOD_CALL) {
