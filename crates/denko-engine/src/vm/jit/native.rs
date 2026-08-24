@@ -433,6 +433,60 @@ impl NativeCode {
   }
 
   #[cfg(all(unix, target_arch = "x86_64"))]
+  pub(crate) fn dense_masked_read_loop() -> Result<Self, String> {
+    let mut bytes = vec![
+      0xF2, 0x0F, 0x10, 0x07, // movsd xmm0, [rdi]       index
+      0xF2, 0x0F, 0x10, 0x4F, 0x08, // movsd xmm1, [rdi+8]   limit
+      0xF2, 0x0F, 0x10, 0x57, 0x10, // movsd xmm2, [rdi+16]  accumulator
+      0x48, 0x8D, 0x57, 0x18, // lea rdx, [rdi+24]       elements
+      0xF2, 0x48, 0x0F, 0x2C, 0xC8, // cvttsd2si rcx, xmm0   phase
+      0x83, 0xE1, 0x03, // and ecx, 3
+      0x49, 0xB8, // movabs r8, 1.0 bits
+    ];
+    bytes.extend_from_slice(&1.0f64.to_bits().to_le_bytes());
+    bytes.extend_from_slice(&[
+      0x66, 0x49, 0x0F, 0x6E, 0xE0, // movq xmm4, r8
+      0x31, 0xC0, // xor eax, eax             iterations
+    ]);
+    let loop_start = bytes.len();
+    bytes.extend_from_slice(&[0x66, 0x0F, 0x2E, 0xC1]); // ucomisd xmm0, xmm1
+    bytes.push(0x7A); // jp exit
+    let unordered_exit = bytes.len();
+    bytes.push(0);
+    bytes.push(0x73); // jae exit
+    let completed_exit = bytes.len();
+    bytes.push(0);
+    bytes.extend_from_slice(&[
+      0xF2, 0x0F, 0x10, 0x1C, 0xCA, // movsd xmm3, [rdx+rcx*8]
+      0xF2, 0x0F, 0x58, 0xD3, // addsd xmm2, xmm3
+      0xFF, 0xC1, // inc ecx
+      0x83, 0xE1, 0x03, // and ecx, 3
+      0xF2, 0x0F, 0x58, 0xC4, // addsd xmm0, xmm4
+      0xFF, 0xC0, // inc eax
+      0x83, 0xF8, 0x40, // cmp eax, 64
+      0x72, // jb loop
+    ]);
+    let backedge = bytes.len();
+    bytes.push(0);
+    let exit = bytes.len();
+    bytes.extend_from_slice(&[
+      0xF2, 0x0F, 0x11, 0x07, // movsd [rdi], xmm0
+      0xF2, 0x0F, 0x11, 0x57, 0x10, // movsd [rdi+16], xmm2
+      0x89, 0x47, 0x38, // mov [rdi+56], eax
+      0xC3,
+    ]);
+    let relative = |from: usize, to: usize| -> Result<u8, String> {
+      i8::try_from(to as isize - (from + 1) as isize)
+        .map(|offset| offset as u8)
+        .map_err(|_| "dense masked read loop branch is out of range".to_string())
+    };
+    bytes[unordered_exit] = relative(unordered_exit, exit)?;
+    bytes[completed_exit] = relative(completed_exit, exit)?;
+    bytes[backedge] = relative(backedge, loop_start)?;
+    Self::from_bytes(&bytes, &[])
+  }
+
+  #[cfg(all(unix, target_arch = "x86_64"))]
   pub(crate) fn return_u64(value: u64) -> Result<Self, String> {
     // mov rax, imm64; ret
     let mut bytes = [0u8; 11];
@@ -691,6 +745,16 @@ impl NativeCode {
   }
 
   #[cfg(all(unix, target_arch = "x86_64"))]
+  pub(crate) unsafe fn call_dense_masked_read_frame(
+    &self,
+    frame: &mut crate::vm::region::PreparedDenseMaskedReadRegion,
+  ) {
+    let function: unsafe extern "C" fn(*mut crate::vm::region::PreparedDenseMaskedReadRegion) =
+      unsafe { std::mem::transmute(self.ptr.as_ptr()) };
+    unsafe { function(frame) };
+  }
+
+  #[cfg(all(unix, target_arch = "x86_64"))]
   pub(crate) unsafe fn call_u64(&self) -> u64 {
     // SAFETY: callers must only invoke code produced by return_u64.
     let entry: unsafe extern "C" fn() -> u64 = unsafe { std::mem::transmute(self.ptr.as_ptr()) };
@@ -837,6 +901,22 @@ mod tests {
     assert_eq!(frame.index, 101.0);
     assert_eq!(frame.values[0], 3.0);
     assert_eq!(frame.values[48], 99.0);
+  }
+
+  #[test]
+  fn executes_a_bounded_dense_masked_read_batch() {
+    let code = NativeCode::dense_masked_read_loop().expect("native allocation");
+    let mut frame = crate::vm::region::PreparedDenseMaskedReadRegion {
+      index: 0.0,
+      limit: 100.0,
+      accumulator: 0.0,
+      elements: [1.0, 2.0, 3.0, 4.0],
+      iterations: 0,
+    };
+    unsafe { code.call_dense_masked_read_frame(&mut frame) };
+    assert_eq!(frame.iterations, 64);
+    assert_eq!(frame.index, 64.0);
+    assert_eq!(frame.accumulator, 160.0);
   }
 
   #[test]

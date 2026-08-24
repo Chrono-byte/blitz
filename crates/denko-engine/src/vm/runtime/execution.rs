@@ -1944,6 +1944,161 @@ impl Vm {
     Ok(true)
   }
 
+  fn try_dense_masked_read_region(
+    &mut self,
+    region: crate::vm::region::DenseMaskedReadRegion,
+    registers: &mut [Value; 16],
+  ) -> Result<bool, RuntimeError> {
+    if self.execution.active.ip != region.entry_pc
+      || self.execution.active.arguments.object.is_some()
+      || self
+        .execution
+        .active
+        .lexical_env
+        .borrow()
+        .has_object_environment()
+      || self
+        .execution
+        .active
+        .locals
+        .get(region.index_slot)
+        .is_some_and(|cell| Rc::strong_count(cell) != 1)
+      || [
+        region.index_slot,
+        region.accumulator_slot,
+        region.temporary_slot,
+      ]
+      .into_iter()
+      .any(|slot| {
+        self
+          .execution
+          .active
+          .slots
+          .as_ref()
+          .and_then(|slots| slots.immutable.get(slot))
+          .copied()
+          .unwrap_or(false)
+      })
+    {
+      return Ok(false);
+    }
+    let number_local = |slot: usize| {
+      self
+        .execution
+        .active
+        .locals
+        .get(slot)
+        .and_then(|cell| match *cell.borrow() {
+          Value::Number(value) => Some(value),
+          _ => None,
+        })
+    };
+    let Some(index) = number_local(region.index_slot) else {
+      return Ok(false);
+    };
+    let Some(accumulator) = number_local(region.accumulator_slot) else {
+      return Ok(false);
+    };
+    if index.partial_cmp(&region.limit) != Some(std::cmp::Ordering::Less) {
+      registers[region.index_register] = Value::Number(index);
+      registers[region.limit_register] = Value::Number(region.limit);
+      self.execution.active.ip = region.completed_pc;
+      return Ok(true);
+    }
+    const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+    if !index.is_finite()
+      || index < 0.0
+      || (index == 0.0 && index.is_sign_negative())
+      || index.fract() != 0.0
+      || index > MAX_SAFE_INTEGER
+      || !region.limit.is_finite()
+      || region.limit > MAX_SAFE_INTEGER
+    {
+      return Ok(false);
+    }
+    let receiver = self
+      .execution
+      .active
+      .locals
+      .get(region.array_slot)
+      .map(|cell| cell.borrow().clone());
+    let Some(Value::Array(elements, properties)) = receiver else {
+      return Ok(false);
+    };
+    let snapshot = {
+      let elements = elements.borrow();
+      let Some(values) = elements.get(..4) else {
+        return Ok(false);
+      };
+      let mut snapshot = [0.0; 4];
+      for (destination, value) in snapshot.iter_mut().zip(values) {
+        let Some(Value::Number(number)) = value else {
+          return Ok(false);
+        };
+        *destination = *number;
+      }
+      snapshot
+    };
+    let indexed_key = |key: &PropertyKey| match key {
+      PropertyKey::String(key) => key
+        .as_str_lossy()
+        .parse::<u32>()
+        .is_ok_and(|index| index < 4),
+      PropertyKey::Symbol(_) => false,
+    };
+    {
+      let properties = properties.borrow();
+      if properties.properties.keys().any(&indexed_key) {
+        return Ok(false);
+      }
+    }
+    let mut prepared = crate::vm::region::PreparedDenseMaskedReadRegion {
+      index,
+      limit: region.limit,
+      accumulator,
+      elements: snapshot,
+      iterations: 0,
+    };
+    if !self
+      .profiling
+      .jit
+      .run_dense_masked_read_region(&mut prepared)
+    {
+      return Ok(false);
+    }
+    if prepared.iterations > 64 {
+      return Err(RuntimeError::from(
+        "native dense masked read loop exceeded its batch bound",
+      ));
+    }
+    ensure_slot(&mut self.execution.active.locals, region.temporary_slot);
+    *self.execution.active.locals[region.temporary_slot].borrow_mut() =
+      Value::Number(prepared.index);
+    *self.execution.active.locals[region.accumulator_slot].borrow_mut() =
+      Value::Number(prepared.accumulator);
+    *self.execution.active.locals[region.index_slot].borrow_mut() = Value::Number(prepared.index);
+    registers[region.previous_index_register] = Value::Number(prepared.index - 1.0);
+    registers[region.next_index_register] = Value::Number(prepared.index);
+    registers[region.step_register] = Value::Number(1.0);
+    registers[region.mask_register] = Value::Number(3.0);
+    self.execution.active.ip = if prepared.index < region.limit {
+      region.entry_pc
+    } else {
+      region.completed_pc
+    };
+    self.profiling.jit_stats.native_loop_entries = self
+      .profiling
+      .jit_stats
+      .native_loop_entries
+      .saturating_add(1);
+    self.profiling.jit_stats.native_loop_iterations = self
+      .profiling
+      .jit_stats
+      .native_loop_iterations
+      .saturating_add(prepared.iterations as u64);
+    Ok(true)
+  }
+
   fn try_native_region(
     &mut self,
     id: crate::vm::region::RegionId,
@@ -1963,6 +2118,9 @@ impl Vm {
       }
       crate::vm::region::NativeRegion::DenseArrayPush(region) => {
         self.try_dense_array_push_region(region, registers)
+      }
+      crate::vm::region::NativeRegion::DenseMaskedRead(region) => {
+        self.try_dense_masked_read_region(region, registers)
       }
     }
   }
@@ -3099,6 +3257,12 @@ fn build_quickened_sites(
   let sites = (0..code.len())
     .map(|ip| {
       if native_regions_enabled
+        && let Some(region) = crate::vm::region::DenseMaskedReadRegion::decode(chunk, ip)
+        && let Some(id) = crate::vm::region::RegionId::from_index(regions.len())
+      {
+        regions.push(crate::vm::region::NativeRegion::DenseMaskedRead(region));
+        SiteAction::Region(id)
+      } else if native_regions_enabled
         && let Some(region) = crate::vm::region::NumericLoopRegion::decode_call(chunk, ip)
         && let Some(id) = crate::vm::region::RegionId::from_index(regions.len())
       {

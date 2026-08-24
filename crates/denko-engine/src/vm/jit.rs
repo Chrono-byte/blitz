@@ -487,6 +487,7 @@ pub(crate) struct JitRuntime {
   next_version: u64,
   numeric_regions: [NumericRegionCode; 2],
   dense_array_push_region: NumericRegionCode,
+  dense_masked_read_region: NumericRegionCode,
 }
 
 #[derive(Default)]
@@ -633,6 +634,23 @@ impl JitRuntime {
       return false;
     };
     unsafe { code.call_dense_array_push_frame(prepared) };
+    true
+  }
+
+  pub(crate) fn run_dense_masked_read_region(
+    &mut self,
+    prepared: &mut crate::vm::region::PreparedDenseMaskedReadRegion,
+  ) -> bool {
+    if matches!(self.dense_masked_read_region, NumericRegionCode::Uncompiled) {
+      self.dense_masked_read_region = match NativeCode::dense_masked_read_loop() {
+        Ok(code) => NumericRegionCode::Ready(Rc::new(code)),
+        Err(_) => NumericRegionCode::Unavailable,
+      };
+    }
+    let NumericRegionCode::Ready(code) = &self.dense_masked_read_region else {
+      return false;
+    };
+    unsafe { code.call_dense_masked_read_frame(prepared) };
     true
   }
 

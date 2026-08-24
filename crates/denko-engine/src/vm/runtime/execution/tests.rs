@@ -255,6 +255,61 @@ mod test {
 
   #[cfg(all(unix, target_arch = "x86_64"))]
   #[test]
+  fn dense_masked_read_region_matches_portable_interpretation() {
+    let source = "const values = [1, 2, 3, 4]; let total = 0; for (let i = 0; i < 1100; i++) total += values[i & 3]; globalThis.maskedTotal = total;";
+    let (optimized, _) = run_script_with_optimizations(source, true);
+    let (portable, _) = run_script_with_optimizations(source, false);
+    assert_eq!(
+      optimized.get_global("maskedTotal"),
+      portable.get_global("maskedTotal")
+    );
+    assert!(optimized.caches.quickened.values().any(|plan| {
+      plan
+        .regions
+        .iter()
+        .any(|region| matches!(region, crate::vm::region::NativeRegion::DenseMaskedRead(_)))
+    }));
+    assert!(
+      optimized
+        .profiling
+        .jit_stats
+        .native_loop_iterations
+        >= 1100
+    );
+  }
+
+  #[test]
+  fn dense_masked_read_region_falls_back_for_indexed_descriptors() {
+    let source = "const values = [1, 2, 3, 4]; let gets = 0; Object.defineProperty(values, '0', { get() { gets++; return 9; } }); let total = 0; for (let i = 0; i < 20; i++) total += values[i & 3]; globalThis.maskedDescriptorTotal = total; globalThis.maskedDescriptorGets = gets;";
+    let (optimized, _) = run_script_with_optimizations(source, true);
+    let (portable, _) = run_script_with_optimizations(source, false);
+    for name in ["maskedDescriptorTotal", "maskedDescriptorGets"] {
+      assert_eq!(optimized.get_global(name), portable.get_global(name));
+    }
+  }
+
+  #[test]
+  fn dense_masked_read_region_falls_back_for_holes_and_proxies() {
+    let source = "const hole = [1, 2, 3, 4]; delete hole[2]; const proxy = new Proxy([1, 2, 3, 4], { get(target, key) { return target[key]; } }); let holeTotal = 0; let proxyTotal = 0; for (let i = 0; i < 20; i++) holeTotal += hole[i & 3]; for (let i = 0; i < 20; i++) proxyTotal += proxy[i & 3]; globalThis.holeTotalIsNaN = Number.isNaN(holeTotal); globalThis.proxyTotal = proxyTotal;";
+    let (optimized, _) = run_script_with_optimizations(source, true);
+    let (portable, _) = run_script_with_optimizations(source, false);
+    for name in ["holeTotalIsNaN", "proxyTotal"] {
+      assert_eq!(optimized.get_global(name), portable.get_global(name));
+    }
+  }
+
+  #[test]
+  fn dense_masked_read_region_preserves_numeric_index_edges() {
+    let source = "const values = [-0, NaN, 3, 4]; let negative = 0; for (let i = -1; i < 2; i++) negative += values[i & 3]; let large = 0; for (let i = 9007199254740990; i < 9007199254740991; i++) large += values[i & 3]; globalThis.negativeIsNaN = Number.isNaN(negative); globalThis.largeMaskedValue = large;";
+    let (optimized, _) = run_script_with_optimizations(source, true);
+    let (portable, _) = run_script_with_optimizations(source, false);
+    for name in ["negativeIsNaN", "largeMaskedValue"] {
+      assert_eq!(optimized.get_global(name), portable.get_global(name));
+    }
+  }
+
+  #[cfg(all(unix, target_arch = "x86_64"))]
+  #[test]
   fn native_call_loop_preserves_ordered_addition_across_batch_boundary() {
     let (vm, _) = run_script(
       "function tenth() { return 0.1; } let nativeTotal = 0; for (let i = 0; i < 2130; i += 2) nativeTotal += tenth(); let expected = 0; for (let i = 0; i < 2130; i += 2) expected += 0.1; globalThis.native_batch_matches = nativeTotal === expected;",

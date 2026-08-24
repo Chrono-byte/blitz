@@ -27,6 +27,7 @@ impl RegionId {
 pub(super) enum NativeRegion {
   NumericLoop(NumericLoopRegion),
   DenseArrayPush(DenseArrayPushRegion),
+  DenseMaskedRead(DenseMaskedReadRegion),
 }
 
 impl NativeRegion {
@@ -34,8 +35,36 @@ impl NativeRegion {
     match self {
       Self::NumericLoop(region) => region.program.cost(),
       Self::DenseArrayPush(_) => RegionCost { max_iterations: 64 },
+      Self::DenseMaskedRead(_) => RegionCost { max_iterations: 64 },
     }
   }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct DenseMaskedReadRegion {
+  pub(super) entry_pc: usize,
+  pub(super) completed_pc: usize,
+  pub(super) index_slot: usize,
+  pub(super) accumulator_slot: usize,
+  pub(super) array_slot: usize,
+  pub(super) temporary_slot: usize,
+  pub(super) index_register: usize,
+  pub(super) limit_register: usize,
+  pub(super) previous_index_register: usize,
+  pub(super) next_index_register: usize,
+  pub(super) step_register: usize,
+  pub(super) mask_register: usize,
+  pub(super) limit: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[repr(C)]
+pub(crate) struct PreparedDenseMaskedReadRegion {
+  pub(crate) index: f64,
+  pub(crate) limit: f64,
+  pub(crate) accumulator: f64,
+  pub(crate) elements: [f64; 4],
+  pub(crate) iterations: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -483,6 +512,104 @@ impl DenseArrayPushRegion {
   }
 }
 
+impl DenseMaskedReadRegion {
+  pub(super) fn decode(
+    chunk: &Chunk,
+    ip: usize,
+  ) -> Option<Self> {
+    let words = chunk
+      .code
+      .get(ip..ip + DENSE_MASKED_READ_LOOP.len())?;
+    if !words
+      .iter()
+      .zip(DENSE_MASKED_READ_LOOP)
+      .all(|(word, expected)| opcode(*word) == *expected)
+    {
+      return None;
+    }
+    let index_slot = decode_risc_aux16(words[0]) as usize;
+    let accumulator_slot = decode_risc_aux16(words[3]) as usize;
+    let array_slot = decode_risc_aux16(words[4]) as usize;
+    let temporary_slot = decode_risc_aux16(words[10]) as usize;
+    let index_register = decode_rd(words[0]);
+    let limit_register = decode_rd(words[1]);
+    let accumulator_register = decode_rd(words[3]);
+    let array_register = decode_rd(words[4]);
+    let masked_index_register = decode_rd(words[5]);
+    let mask_register = decode_rd(words[6]);
+    let previous_index_register = decode_rd(words[15]);
+    let step_register = decode_rd(words[18]);
+    let next_index_register = decode_rd(words[19]);
+    let (condition, left, right, exit_offset) = decode_compare_jump(words[2]);
+    let jump_payload = ((words[25] >> 8) & 0x00ff_ffff) as i32;
+    let jump_offset = if jump_payload & 0x0080_0000 != 0 {
+      jump_payload | !0x00ff_ffff
+    } else {
+      jump_payload
+    };
+    let completed_pc = ip + words.len();
+    let actual_exit = (ip as i64 + 3 + exit_offset as i64) as usize;
+    let actual_backedge = (ip as i64 + words.len() as i64 + jump_offset as i64) as usize;
+    if condition != 2
+      || left != index_register
+      || right != limit_register
+      || actual_exit != completed_pc
+      || actual_backedge != ip
+      || decode_risc_aux16(words[5]) as usize != index_slot
+      || decode_rd(words[7]) != masked_index_register
+      || decode_rs(words[7]) != mask_register
+      || decode_rd(words[8]) != array_register
+      || decode_rs(words[8]) != masked_index_register
+      || decode_rd(words[9]) != accumulator_register
+      || decode_rs(words[9]) != array_register
+      || decode_rd(words[10]) != accumulator_register
+      || decode_risc_aux16(words[11]) as usize != accumulator_slot
+      || decode_risc_aux16(words[12]) as usize != temporary_slot
+      || decode_risc_aux16(words[13]) as usize != accumulator_slot
+      || decode_risc_aux16(words[14]) as usize != index_slot
+      || decode_risc_aux16(words[15]) as usize != index_slot
+      || decode_rd(words[16]) != previous_index_register
+      || decode_rs(words[16]) != previous_index_register
+      || decode_rd(words[17]) != previous_index_register
+      || decode_rs(words[17]) != previous_index_register
+      || decode_rd(words[19]) != decode_rd(words[20])
+      || decode_rs(words[19]) != previous_index_register
+      || decode_rs(words[20]) != step_register
+      || decode_rd(words[21]) != next_index_register
+      || decode_rd(words[22]) != next_index_register
+      || decode_rd(words[23]) != next_index_register
+      || decode_rd(words[24]) != next_index_register
+      || decode_risc_aux16(words[21]) as usize != temporary_slot
+      || decode_risc_aux16(words[22]) as usize != index_slot
+      || decode_risc_aux16(words[23]) as usize != temporary_slot
+      || decode_risc_aux16(words[24]) as usize != index_slot
+      || index_slot == accumulator_slot
+      || index_slot == temporary_slot
+      || accumulator_slot == temporary_slot
+      || number_constant(chunk, words[6])? != 3.0
+      || number_constant(chunk, words[18])? != 1.0
+    {
+      return None;
+    }
+
+    Some(Self {
+      entry_pc: ip,
+      completed_pc,
+      index_slot,
+      accumulator_slot,
+      array_slot,
+      temporary_slot,
+      index_register: index_register as usize,
+      limit_register: limit_register as usize,
+      previous_index_register: previous_index_register as usize,
+      next_index_register: next_index_register as usize,
+      step_register: step_register as usize,
+      mask_register: mask_register as usize,
+      limit: number_constant(chunk, words[1])?,
+    })
+  }
+}
+
 impl NumericLoopRegion {
   pub(super) fn decode_call(
     chunk: &Chunk,
@@ -692,6 +819,35 @@ const DENSE_ARRAY_PUSH_LOOP: &[Op] = &[
   Op::Move,
   Op::CallBuiltin,
   Op::Move,
+  Op::CloneLocalCell,
+  Op::LoadLocal,
+  Op::Neg,
+  Op::Neg,
+  Op::Const,
+  Op::Move,
+  Op::Add,
+  Op::StoreLocal,
+  Op::LoadLocal,
+  Op::LoadLocal,
+  Op::StoreLocal,
+  Op::Jump,
+];
+
+const DENSE_MASKED_READ_LOOP: &[Op] = &[
+  Op::LoadLocal,
+  Op::Const,
+  Op::CompareJump,
+  Op::LoadLocal,
+  Op::LoadLocal,
+  Op::LoadLocal,
+  Op::Const,
+  Op::BitAnd,
+  Op::GetProperty,
+  Op::Add,
+  Op::StoreLocal,
+  Op::LoadLocal,
+  Op::LoadLocal,
+  Op::StoreLocal,
   Op::CloneLocalCell,
   Op::LoadLocal,
   Op::Neg,
