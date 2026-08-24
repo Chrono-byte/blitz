@@ -1037,7 +1037,7 @@ pub(crate) fn install_typed_arrays(
         let proto_map_rc = proto_map.clone();
         let ctor_name = $name.to_string();
         Rc::new(move |vm, args| {
-          if vm.current_new_target().is_none() {
+          if vm.pending_constructor_new_target().is_none() {
             return Err(vm.throw_type_error("TypedArray constructor requires new"));
           }
           let off = static_builtin_arg_offset(vm, args, $name);
@@ -1157,7 +1157,7 @@ pub(crate) fn install_typed_arrays(
             }
           };
 
-          let instance_proto = if let Some(new_target) = vm.current_new_target() {
+          let instance_proto = if let Some(new_target) = vm.pending_constructor_new_target() {
             let prototype = vm.get_property_host(
               &new_target,
               &PropertyKey::String("prototype".to_string().into()),

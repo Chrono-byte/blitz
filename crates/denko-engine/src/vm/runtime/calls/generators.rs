@@ -72,6 +72,9 @@ impl Vm {
     let gen_obj = gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
     gen_obj
       .borrow_mut()
+      .set_internal_slot("[[GeneratorState]]", Value::Bool(true));
+    gen_obj
+      .borrow_mut()
       .set_prototype_value(self.realm_state.realm.generator_prototype());
     gen_obj.borrow_mut().properties.insert(
       PropertyKey::String("next".to_string().into()),

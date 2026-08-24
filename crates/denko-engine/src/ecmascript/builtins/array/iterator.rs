@@ -60,6 +60,25 @@ pub(super) fn install(
         (iterated, index, kind)
       };
 
+      if matches!(iterated, Value::Undefined) {
+        let result = Rc::new(RefCell::new(ObjectData::new()));
+        result.borrow_mut().properties.insert(
+          PKey::String("done".into()),
+          PropertyDescriptor::ordinary_data(Value::Bool(true)),
+        );
+        result.borrow_mut().properties.insert(
+          PKey::String("value".into()),
+          PropertyDescriptor::ordinary_data(Value::Undefined),
+        );
+        return Ok(Value::Object(result));
+      }
+
+      if let Some((buffer, ..)) = crate::ecmascript::semantics::byte_view_metadata(&iterated)
+        && crate::ecmascript::semantics::array_buffer_backing(&buffer).is_none()
+      {
+        return Err(vm.throw_type_error("Cannot iterate a detached TypedArray"));
+      }
+
       let len = vm
         .get_property_host(&iterated, &PKey::String("length".to_string().into()))
         .ok()
@@ -71,6 +90,9 @@ pub(super) fn install(
 
       let result = Rc::new(RefCell::new(ObjectData::new()));
       if index >= len {
+        iter_obj
+          .borrow_mut()
+          .set_internal_slot("[[IteratedObject]]", Value::Undefined);
         result.borrow_mut().properties.insert(
           PKey::String("done".to_string().into()),
           PropertyDescriptor::ordinary_data(Value::Bool(true)),

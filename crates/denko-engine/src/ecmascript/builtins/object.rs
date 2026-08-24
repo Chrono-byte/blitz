@@ -119,12 +119,20 @@ pub(crate) fn install_object_intrinsics(
       if matches!(this, Value::Null) {
         return Ok(Value::String("[object Null]".to_string().into()));
       }
+      let is_array = super::array::is_array_value(vm, &this)?;
       let tag = vm.get_property_host(&this, &PKey::Symbol(SymbolId::well_known_to_string_tag()))?;
-      if let Value::String(tag) = tag {
+      if let Value::String(tag) = &tag {
         return Ok(Value::String(format!("[object {tag}]").into()));
       }
       if let Value::Object(obj) = &this {
         let object = obj.borrow();
+        if matches!(tag, Value::Undefined)
+          && object
+            .internal_slot("[[GeneratorState]]")
+            .is_some()
+        {
+          return Ok(Value::String("[object Generator]".into()));
+        }
         if object
           .internal_slot("[[ArgumentsData]]")
           .is_some()
@@ -144,7 +152,7 @@ pub(crate) fn install_object_intrinsics(
           .internal_slot("[[SymbolData]]")
           .is_some()
       {
-        return Ok(Value::String("[object Symbol]".into()));
+        return Ok(Value::String("[object Object]".into()));
       }
       if let Value::Object(obj) = &this {
         let object = obj.borrow();
@@ -162,9 +170,16 @@ pub(crate) fn install_object_intrinsics(
           ));
         }
       }
-      Ok(Value::String(
-        format!("[object {}]", this.object_tag()).into(),
-      ))
+      let builtin_tag = if is_array {
+        "Array"
+      } else {
+        match this {
+          Value::Closure { .. } | Value::Builtin(_) | Value::BuiltinObject(_, _) => "Function",
+          Value::Promise(..) | Value::Symbol(..) => "Object",
+          _ => this.object_tag(),
+        }
+      };
+      Ok(Value::String(format!("[object {builtin_tag}]").into()))
     }),
     function_prototype,
   );

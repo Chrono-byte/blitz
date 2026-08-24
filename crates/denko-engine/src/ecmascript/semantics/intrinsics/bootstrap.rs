@@ -96,6 +96,9 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     .clone();
   let set_ctor_val = collection_intrinsics.set_constructor.clone();
   let iterator_proto = collection_intrinsics.iterator_prototype.clone();
+  array_iterator_proto
+    .borrow_mut()
+    .set_prototype_value(iterator_proto.clone());
   let map_iterator_proto = collection_intrinsics
     .map_iterator_prototype
     .clone();

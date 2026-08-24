@@ -327,9 +327,7 @@ pub(crate) fn encode_typed_element(
   value: &Value,
 ) -> Result<Vec<u8>, RuntimeError> {
   if matches!(kind, "BigInt64Array" | "BigUint64Array") {
-    let Value::BigInt(value) = value else {
-      return Err(vm.throw_type_error("Cannot convert Number to BigInt typed array element"));
-    };
+    let value = crate::ecmascript::builtins::primitives::to_bigint(vm, value)?;
     let modulus = BigInt::from(1u8) << 64;
     let mut bits: BigInt = value % &modulus;
     if bits.sign() == Sign::Minus {

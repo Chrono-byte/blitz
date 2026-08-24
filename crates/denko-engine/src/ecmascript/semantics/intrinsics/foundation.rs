@@ -36,6 +36,30 @@ pub(crate) fn create_foundation() -> FoundationIntrinsics {
   let generator_function_prototype = Rc::new(RefCell::new(ObjectData::with_prototype(
     Value::Object(Rc::clone(&function_prototype)),
   )));
+  generator_prototype
+    .borrow_mut()
+    .properties
+    .insert(
+      PropertyKey::Symbol(crate::value::SymbolId::well_known_to_string_tag()),
+      PropertyDescriptor::Data {
+        value: Value::String("Generator".into()),
+        writable: false,
+        enumerable: false,
+        configurable: true,
+      },
+    );
+  generator_function_prototype
+    .borrow_mut()
+    .properties
+    .insert(
+      PropertyKey::Symbol(crate::value::SymbolId::well_known_to_string_tag()),
+      PropertyDescriptor::Data {
+        value: Value::String("GeneratorFunction".into()),
+        writable: false,
+        enumerable: false,
+        configurable: true,
+      },
+    );
   generator_function_prototype
     .borrow_mut()
     .properties

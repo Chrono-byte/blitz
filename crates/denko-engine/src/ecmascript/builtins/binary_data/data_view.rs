@@ -214,7 +214,12 @@ fn number_bytes(
   little: bool,
 ) -> Result<Vec<u8>, crate::RuntimeError> {
   let value = vm.to_number_value(value)?;
-  Ok(integer_bytes(value.trunc() as i128, size, little))
+  let integer = if value.is_finite() {
+    value.trunc()
+  } else {
+    0.0
+  };
+  Ok(integer_bytes(integer as i128, size, little))
 }
 
 fn bigint_bytes(
@@ -385,9 +390,13 @@ pub(crate) fn install_data_view(
   let dataview_ctor_map = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
     Rc::clone(function_proto_map),
   ))));
+  dataview_ctor_map
+    .borrow_mut()
+    .set_internal_slot("[[DefersInstanceAllocation]]", Value::Bool(true));
   let dataview_ctor_fn: BuiltinFn = {
     let proto_map_rc = Rc::clone(&dataview_proto_map);
     Rc::new(move |vm, args| {
+      let new_target = vm.pending_constructor_new_target();
       let off = static_builtin_arg_offset(vm, args, "DataView");
       let buffer = args.get(off).cloned().unwrap_or(Value::Undefined);
       if !is_array_buffer(&buffer) {
@@ -396,7 +405,7 @@ pub(crate) fn install_data_view(
         );
       }
       let buffer_byte_length = array_buffer_backing(&buffer)
-        .ok_or_else(|| vm.throw_range_error("Invalid DataView length"))?
+        .ok_or_else(|| vm.throw_type_error("Cannot construct a DataView over a detached buffer"))?
         .borrow()
         .len();
       let byte_offset_arg = args
@@ -419,10 +428,29 @@ pub(crate) fn install_data_view(
       } else {
         to_index(vm, &byte_length_arg)?
       };
-      if byte_offset + byte_length > buffer_byte_length {
+      if byte_offset > buffer_byte_length
+        || byte_length > buffer_byte_length.saturating_sub(byte_offset)
+      {
         return Err(vm.throw_range_error("Invalid DataView length"));
       }
-      let mut dataview_data = ObjectData::with_prototype(Value::Object(Rc::clone(&proto_map_rc)));
+      let instance_proto = if let Some(new_target) = new_target {
+        let prototype =
+          vm.get_property_host(&new_target, &PropertyKey::String("prototype".into()))?;
+        match prototype {
+          Value::Object(_)
+          | Value::Array(..)
+          | Value::Closure { .. }
+          | Value::BuiltinObject(_, _)
+          | Value::Proxy(_) => prototype,
+          _ => Value::Object(Rc::clone(&proto_map_rc)),
+        }
+      } else {
+        Value::Object(Rc::clone(&proto_map_rc))
+      };
+      if array_buffer_backing(&buffer).is_none() {
+        return Err(vm.throw_type_error("Buffer was detached during DataView construction"));
+      }
+      let mut dataview_data = ObjectData::with_prototype(instance_proto);
       dataview_data.set_internal_slot(DATA_VIEW_BUFFER, buffer);
       dataview_data.set_internal_slot(
         DATA_VIEW_BYTE_OFFSET,
@@ -446,6 +474,15 @@ pub(crate) fn install_data_view(
   dataview_proto_map.borrow_mut().properties.insert(
     PropertyKey::String("constructor".to_string().into()),
     PropertyDescriptor::builtin_data(dataview_ctor_val.clone()),
+  );
+  dataview_proto_map.borrow_mut().properties.insert(
+    PropertyKey::Symbol(crate::value::SymbolId::well_known_to_string_tag()),
+    PropertyDescriptor::Data {
+      value: Value::String("DataView".into()),
+      writable: false,
+      enumerable: false,
+      configurable: true,
+    },
   );
   for name in ["buffer", "byteLength", "byteOffset"] {
     let field = name.to_string();

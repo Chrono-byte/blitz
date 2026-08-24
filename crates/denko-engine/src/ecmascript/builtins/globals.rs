@@ -3,6 +3,8 @@
 
 use std::rc::Rc;
 
+use js_string::JsString;
+
 use crate::compiler;
 use crate::parser::Parser;
 use crate::runtime_utils::{
@@ -10,6 +12,69 @@ use crate::runtime_utils::{
   global_parse_float, global_parse_int, static_builtin_arg_offset, syntax_error,
 };
 use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
+
+fn annex_b_escape(
+  vm: &mut crate::Vm,
+  args: &[Value],
+) -> Result<Value, crate::RuntimeError> {
+  let value = args.first().cloned().unwrap_or(Value::Undefined);
+  let string = vm.to_string(&value)?;
+  let mut output = String::new();
+  for unit in string.code_units() {
+    if matches!(unit, 0x41..=0x5A | 0x61..=0x7A | 0x30..=0x39)
+      || matches!(unit, 0x40 | 0x2A | 0x5F | 0x2B | 0x2D | 0x2E | 0x2F)
+    {
+      output.push(char::from_u32(u32::from(unit)).expect("ASCII escape unit"));
+    } else if unit < 0x100 {
+      output.push_str(&format!("%{unit:02X}"));
+    } else {
+      output.push_str(&format!("%u{unit:04X}"));
+    }
+  }
+  Ok(Value::String(output.into()))
+}
+
+fn annex_b_unescape(
+  vm: &mut crate::Vm,
+  args: &[Value],
+) -> Result<Value, crate::RuntimeError> {
+  let value = args.first().cloned().unwrap_or(Value::Undefined);
+  let string = vm.to_string(&value)?;
+  let units = string.code_units().collect::<Vec<_>>();
+  let mut output = Vec::with_capacity(units.len());
+  let hex = |unit: u16| match unit {
+    0x30..=0x39 => Some(unit - 0x30),
+    0x41..=0x46 => Some(unit - 0x41 + 10),
+    0x61..=0x66 => Some(unit - 0x61 + 10),
+    _ => None,
+  };
+  let mut index = 0;
+  while index < units.len() {
+    if units[index] == 0x25 {
+      let (digits, offset) = if units.get(index + 1) == Some(&0x75) {
+        (4, 2)
+      } else {
+        (2, 1)
+      };
+      if index + offset + digits <= units.len() {
+        let decoded = units[index + offset..index + offset + digits]
+          .iter()
+          .copied()
+          .try_fold(0_u16, |value, unit| {
+            hex(unit).map(|digit| value * 16 + digit)
+          });
+        if let Some(decoded) = decoded {
+          output.push(decoded);
+          index += offset + digits;
+          continue;
+        }
+      }
+    }
+    output.push(units[index]);
+    index += 1;
+  }
+  Ok(Value::String(JsString::from_utf16(output)))
+}
 
 fn is_js_line_terminator(c: char) -> bool {
   matches!(c, '\u{000A}' | '\u{000D}' | '\u{2028}' | '\u{2029}')
@@ -170,6 +235,14 @@ pub(crate) fn install_global_function_builtins(g: &mut ObjectData) {
   g.properties.insert(
     PKey::String("decodeURIComponent".to_string().into()),
     PropertyDescriptor::builtin_data(Value::Builtin(Rc::new(global_decode_uri_component))),
+  );
+  g.properties.insert(
+    PKey::String("escape".into()),
+    PropertyDescriptor::builtin_data(Value::Builtin(Rc::new(annex_b_escape))),
+  );
+  g.properties.insert(
+    PKey::String("unescape".into()),
+    PropertyDescriptor::builtin_data(Value::Builtin(Rc::new(annex_b_unescape))),
   );
 }
 

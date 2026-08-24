@@ -335,6 +335,15 @@ pub(crate) fn create_promise_intrinsics(
     PKey::String("constructor".to_string().into()),
     PropertyDescriptor::builtin_data(promise_ctor_val.clone()),
   );
+  promise_proto_map.borrow_mut().properties.insert(
+    PKey::Symbol(crate::value::SymbolId::well_known_to_string_tag()),
+    PropertyDescriptor::Data {
+      value: Value::String("Promise".into()),
+      writable: false,
+      enumerable: false,
+      configurable: true,
+    },
+  );
   let promise_then_function_proto = Rc::clone(function_proto_map);
   promise_proto_map.borrow_mut().properties.insert(
     PKey::String("then".to_string().into()),

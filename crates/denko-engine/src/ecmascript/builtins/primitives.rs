@@ -185,7 +185,7 @@ fn parse_bigint_string(source: &str) -> Option<BigIntValue> {
   Some(if negative { -value } else { value })
 }
 
-fn to_bigint(
+pub(crate) fn to_bigint(
   vm: &mut crate::Vm,
   value: &Value,
 ) -> Result<BigIntValue, crate::RuntimeError> {

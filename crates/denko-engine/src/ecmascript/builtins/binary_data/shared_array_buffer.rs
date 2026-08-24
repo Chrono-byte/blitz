@@ -24,7 +24,7 @@ pub(crate) fn install_shared_array_buffer(
     let proto_map_rc = Rc::clone(&sharedarraybuffer_proto_map);
     Rc::new(move |vm, args| {
       let instance_proto = vm
-        .current_new_target()
+        .pending_constructor_new_target()
         .and_then(|new_target| {
           vm.get_property_host(
             &new_target,

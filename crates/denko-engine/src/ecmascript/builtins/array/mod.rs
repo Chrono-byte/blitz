@@ -212,7 +212,7 @@ pub(super) fn delete_property_or_throw(
   }
 }
 
-pub(super) fn is_array_value(
+pub(crate) fn is_array_value(
   vm: &mut Vm,
   value: &Value,
 ) -> Result<bool, RuntimeError> {

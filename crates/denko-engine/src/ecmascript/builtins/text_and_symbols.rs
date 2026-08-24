@@ -259,6 +259,15 @@ pub(crate) fn install_string_boolean_symbol_builtins(
     PKey::String("constructor".to_string().into()),
     PropertyDescriptor::builtin_data(symbol_ctor_val.clone()),
   );
+  symbol_proto_map.borrow_mut().properties.insert(
+    PKey::Symbol(SymbolId::well_known_to_string_tag()),
+    PropertyDescriptor::Data {
+      value: Value::String("Symbol".into()),
+      writable: false,
+      enumerable: false,
+      configurable: true,
+    },
+  );
   let symbol_to_string = builtin_object(
     Rc::new(|vm, args| {
       let undefined = Value::Undefined;

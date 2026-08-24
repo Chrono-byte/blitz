@@ -396,17 +396,19 @@ impl Vm {
     Ok(())
   }
 
-  /// Return the current `[[NewTarget]]` value.
+  /// Return the current ECMAScript execution context's `[[NewTarget]]` value.
   pub fn current_new_target(&self) -> Option<Value> {
-    // A nested construction temporarily overrides the suspended caller's
-    // `new.target`; builtin constructors must observe that pending value.
-    self.construction.new_target.clone().or_else(|| {
-      self
-        .execution
-        .call_stack
-        .last()
-        .and_then(|frame| frame.new_target.clone())
-    })
+    self
+      .execution
+      .call_stack
+      .last()
+      .and_then(|frame| frame.new_target.clone())
+      .or_else(|| self.construction.new_target.clone())
+  }
+
+  /// Return the `new.target` pending for a host constructor call.
+  pub(crate) fn pending_constructor_new_target(&self) -> Option<Value> {
+    self.construction.new_target.clone()
   }
 
   /// Return the dynamic eval context flags for the currently executing code.

@@ -5496,6 +5496,8 @@ mod test {
       "encodeURIComponent",
       "decodeURI",
       "decodeURIComponent",
+      "escape",
+      "unescape",
       "Object",
       "Function",
       "Boolean",
