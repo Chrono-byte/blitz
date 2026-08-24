@@ -1197,6 +1197,20 @@ impl Op {
     Op::try_from(b).ok()
   }
 
+  /// Decode an opcode after bytecode verification has established validity.
+  ///
+  /// # Safety
+  ///
+  /// `b` must be a valid [`Op`] discriminant. In particular, the retired
+  /// discriminants 50 through 53 are invalid.
+  #[inline(always)]
+  pub(crate) unsafe fn from_byte_unchecked(b: u8) -> Op {
+    debug_assert!(Self::from_byte(b).is_some());
+    // SAFETY: the caller guarantees that `b` is a valid `#[repr(u8)]` Op
+    // discriminant. Chunk verification enforces this before VM execution.
+    unsafe { std::mem::transmute::<u8, Op>(b) }
+  }
+
   /// Returns the byte representation of this opcode.
   pub fn to_byte(self) -> u8 {
     self as u8

@@ -14,6 +14,8 @@
 //! // construct a VM and run bytecode
 //! ```
 
+/// VM-owned profiling and future native compilation metadata.
+mod jit;
 /// Runtime helpers split into structured submodules.
 pub mod runtime;
 pub mod state;

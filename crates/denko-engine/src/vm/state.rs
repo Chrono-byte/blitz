@@ -246,16 +246,50 @@ pub(super) struct JobState {
   pub(super) unhandled_rejection_hook: Option<UnhandledRejectionHook>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) enum QuickenedKind {
+  #[default]
+  Ordinary,
+  NumericCompareBranch,
+  SingleArgumentMethodCall,
+  NumericPropertyAdd,
+  NumericIncrement,
+  NumericAddLocal,
+  NumericLoop,
+}
+
+pub(super) struct QuickenedPlan {
+  pub(super) _chunk: Arc<Chunk>,
+  pub(super) sites: Arc<[QuickenedKind]>,
+}
+
 pub(super) struct CacheState {
   pub(super) property_get: HashMap<(usize, usize), PropertyGetIcEntry>,
   /// O(1) invalidation boundary for mutation-opaque native callbacks.
   pub(super) property_get_epoch: u64,
+  /// VM-local quickened plans keyed by portable chunk identity.
+  pub(super) quickened: HashMap<usize, QuickenedPlan>,
+  pub(super) active_quickened_chunk: usize,
+  pub(super) active_quickened_sites: Arc<[QuickenedKind]>,
 }
 
 pub(super) struct ProfilingState {
   pub(super) enabled: bool,
   pub(super) opcode_counts: [u64; OP_COUNT],
   pub(super) run_started_at: Option<Instant>,
+  /// Feedback keyed by stable portable chunk identity, never native code.
+  pub(super) functions: HashMap<crate::vm::jit::FunctionId, crate::vm::jit::FunctionProfile>,
+  /// Temporary identity bridge until executable code owns a stable ID. The
+  /// retained Arc intentionally prevents pointer reuse during this phase.
+  pub(super) chunk_ids: HashMap<usize, crate::vm::jit::FunctionId>,
+  pub(super) chunk_refs: HashMap<usize, Arc<Chunk>>,
+  pub(super) next_function_id: u64,
+  #[allow(
+    dead_code,
+    reason = "native code lifecycle is introduced before emission"
+  )]
+  pub(super) jit: crate::vm::jit::JitRuntime,
+  pub(super) jit_stats: crate::vm::jit::JitStats,
 }
 
 pub(super) struct RootState {

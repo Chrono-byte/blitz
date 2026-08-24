@@ -378,36 +378,42 @@ pub(in crate::ecmascript::builtins::array) fn install_before_iterator(
       builtin
     }),
   );
-  array_proto_map.borrow_mut().properties.insert(
-    PKey::String("push".to_string().into()),
-    PropertyDescriptor::builtin_data(builtin_object(
-      Rc::new(|vm, args| {
-        let receiver = vm.to_object_value(args.first().cloned().unwrap_or(Value::Undefined))?;
-        let length = array_like_length(vm, &receiver)?;
-        let item_count = args.len().saturating_sub(1);
-        let new_length = length
-          .checked_add(item_count)
-          .filter(|length| *length <= 9_007_199_254_740_991usize)
-          .ok_or_else(|| vm.throw_type_error("Array.prototype.push result is too large"))?;
-        if !array_length_is_writable(&receiver) && item_count > 0 {
-          return Err(vm.throw_type_error("Array length is not writable"));
-        }
-        for (offset, item) in args.iter().skip(1).cloned().enumerate() {
-          vm.set_property_host(
-            &receiver,
-            &Value::String((length + offset).to_string().into()),
-            item,
-          )?;
-        }
+  let push = builtin_object(
+    Rc::new(|vm, args| {
+      let receiver = vm.to_object_value(args.first().cloned().unwrap_or(Value::Undefined))?;
+      let length = array_like_length(vm, &receiver)?;
+      let item_count = args.len().saturating_sub(1);
+      let new_length = length
+        .checked_add(item_count)
+        .filter(|length| *length <= 9_007_199_254_740_991usize)
+        .ok_or_else(|| vm.throw_type_error("Array.prototype.push result is too large"))?;
+      if !array_length_is_writable(&receiver) && item_count > 0 {
+        return Err(vm.throw_type_error("Array length is not writable"));
+      }
+      for (offset, item) in args.iter().skip(1).cloned().enumerate() {
         vm.set_property_host(
           &receiver,
-          &Value::String("length".to_string().into()),
-          Value::Number(usize_to_f64(new_length)),
+          &Value::String((length + offset).to_string().into()),
+          item,
         )?;
-        Ok(Value::Number(usize_to_f64(new_length)))
-      }),
-      function_proto_map,
-    )),
+      }
+      vm.set_property_host(
+        &receiver,
+        &Value::String("length".to_string().into()),
+        Value::Number(usize_to_f64(new_length)),
+      )?;
+      Ok(Value::Number(usize_to_f64(new_length)))
+    }),
+    function_proto_map,
+  );
+  if let Value::BuiltinObject(_, properties) = &push {
+    properties
+      .borrow_mut()
+      .set_internal_slot("[[DenkoArrayPush]]", Value::Bool(true));
+  }
+  array_proto_map.borrow_mut().properties.insert(
+    PKey::String("push".to_string().into()),
+    PropertyDescriptor::builtin_data(push),
   );
   array_proto_map
     .borrow_mut()

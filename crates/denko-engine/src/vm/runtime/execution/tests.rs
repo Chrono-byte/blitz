@@ -35,6 +35,22 @@ mod test {
   use super::*;
 
   #[test]
+  fn ordinary_function_call_enters_baseline_and_returns() {
+    let (mut vm, _) = run_script("function answer() { return 42; }");
+    let function = vm.get_global("answer").expect("answer function");
+    vm.install_baseline_for_function(&function)
+      .expect("install baseline");
+    let result = vm
+      .call_value_with_this(&function, &Value::Undefined, &[])
+      .expect("call answer");
+
+    assert!(matches!(result, Value::Number(value) if value == 42.0));
+    assert_eq!(vm.profiling.jit_stats.baseline_entries, 1);
+    assert_eq!(vm.profiling.jit_stats.baseline_returns, 1);
+    assert_eq!(vm.profiling.jit_stats.interpreter_resumes, 0);
+  }
+
+  #[test]
   fn abrupt_completions_run_all_finalizers_and_preserve_override_rules() {
     let (vm, _) = run_script(crate::js!(
       r#"
@@ -477,6 +493,49 @@ mod test {
     assert_eq!(
       vm.get_global("client_names"),
       Some(Value::String("Alice,Bob,".to_string().into()))
+    );
+  }
+
+  #[test]
+  fn array_push_fast_path_preserves_overrides_and_descriptors() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        const overridden = [];
+        let calls = 0;
+        overridden.push = function(value) { calls += value; return 99; };
+        for (let index = 0; index < 3; index += 1) overridden.push(index + 1);
+
+        let setterValue = 0;
+        Object.defineProperty(Array.prototype, "0", {
+          configurable: true,
+          set(value) { setterValue = value; }
+        });
+        const inheritedSetter = [];
+        inheritedSetter.push(42);
+        delete Array.prototype["0"];
+
+        const frozenLength = [];
+        Object.defineProperty(frozenLength, "length", { writable: false });
+        let lengthThrew = false;
+        try { frozenLength.push(1); } catch (error) { lengthThrew = error instanceof TypeError; }
+
+        globalThis.push_override_result = calls + ":" + overridden.length;
+        globalThis.push_setter_result = setterValue + ":" + inheritedSetter.length;
+        globalThis.push_frozen_length_threw = lengthThrew;
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("push_override_result"),
+      Some(Value::String("6:0".into()))
+    );
+    assert_eq!(
+      vm.get_global("push_setter_result"),
+      Some(Value::String("42:1".into()))
+    );
+    assert_eq!(
+      vm.get_global("push_frozen_length_threw"),
+      Some(Value::Bool(true))
     );
   }
 

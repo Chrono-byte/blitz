@@ -502,6 +502,7 @@ dependencies = [
  "fastrand",
  "indexmap",
  "js-string",
+ "libc",
  "num-bigint 0.4.8",
  "num-traits",
  "ouroboros",

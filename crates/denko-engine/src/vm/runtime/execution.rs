@@ -8,7 +8,7 @@ use crate::bytecode::{
 use crate::environment::EnvironmentRecord;
 use crate::errors::RuntimeError;
 use crate::gc;
-use crate::runtime_utils::{array_from_values, number_exponentiate};
+use crate::runtime_utils::{array_from_values, number_exponentiate, usize_to_f64};
 #[cfg(test)]
 use crate::value::PromiseState;
 use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, SharedValue, Value};
@@ -120,6 +120,13 @@ impl Vm {
     &mut self,
     _root_execution: bool,
   ) -> Result<Value, RuntimeError> {
+    let function_id = self.active_function_id();
+    self
+      .profiling
+      .functions
+      .entry(function_id)
+      .or_default()
+      .record_call();
     let mut state = RiscExecutionState::new(
       self.execution.active.this_value.clone(),
       self.execution.active.chunk.risc_spill_count as usize,
@@ -174,7 +181,14 @@ impl Vm {
     stop_at_generator_init: bool,
   ) -> Result<RiscRunOutcome, RuntimeError> {
     self.execution.interpreter_depth += 1;
-    let result = self.run_risc_state_inner(state, stop_at_generator_init);
+    let result = if !stop_at_generator_init {
+      self.try_run_baseline(state)?.map_or_else(
+        || self.run_risc_state_inner(state, stop_at_generator_init),
+        Ok,
+      )
+    } else {
+      self.run_risc_state_inner(state, stop_at_generator_init)
+    };
     self.execution.interpreter_depth -= 1;
     result
   }
@@ -202,6 +216,120 @@ impl Vm {
     }
 
     loop {
+      // Portable RISC remains unchanged; the VM quickens recognized sites once
+      // per chunk and only invokes the matching guarded operation here.
+      let quickened = if crate::trace::enabled() {
+        QuickenedKind::Ordinary
+      } else {
+        self.quickened_kind()
+      };
+      if quickened == QuickenedKind::NumericLoop && self.try_numeric_loop_sequence(registers)? {
+        gc_poll_countdown = gc_poll_countdown.saturating_sub(22);
+        if gc_poll_countdown == 0 {
+          gc_poll_countdown = GC_POLL_INTERVAL;
+        }
+        continue;
+      }
+      if quickened == QuickenedKind::NumericCompareBranch
+        && self.try_numeric_compare_branch_sequence(registers)?
+      {
+        if self.profiling.enabled {
+          self.profiling.opcode_counts[Op::LoadLocal as usize] =
+            self.profiling.opcode_counts[Op::LoadLocal as usize].saturating_add(1);
+          self.profiling.opcode_counts[Op::Const as usize] =
+            self.profiling.opcode_counts[Op::Const as usize].saturating_add(1);
+          self.profiling.opcode_counts[Op::CompareJump as usize] =
+            self.profiling.opcode_counts[Op::CompareJump as usize].saturating_add(1);
+        }
+        gc_poll_countdown = gc_poll_countdown.saturating_sub(3);
+        if gc_poll_countdown == 0 {
+          gc_poll_countdown = GC_POLL_INTERVAL;
+        }
+        continue;
+      }
+      if quickened == QuickenedKind::SingleArgumentMethodCall
+        && self.try_single_argument_method_call_sequence(registers)?
+      {
+        if self.profiling.enabled {
+          for (op, count) in [
+            (Op::LoadLocal, 4),
+            (Op::StoreLocal, 1),
+            (Op::Const, 1),
+            (Op::GetProperty, 1),
+            (Op::Move, 4),
+            (Op::CallBuiltin, 1),
+          ] {
+            self.profiling.opcode_counts[op as usize] =
+              self.profiling.opcode_counts[op as usize].saturating_add(count);
+          }
+        }
+        gc_poll_countdown = gc_poll_countdown.saturating_sub(12);
+        if gc_poll_countdown == 0 {
+          gc_poll_countdown = GC_POLL_INTERVAL;
+        }
+        continue;
+      }
+      if quickened == QuickenedKind::NumericPropertyAdd
+        && self.try_numeric_property_add_sequence(registers)?
+      {
+        if self.profiling.enabled {
+          for (op, count) in [
+            (Op::LoadLocal, 4),
+            (Op::Const, 1),
+            (Op::GetProperty, 1),
+            (Op::Add, 1),
+            (Op::StoreLocal, 2),
+          ] {
+            self.profiling.opcode_counts[op as usize] =
+              self.profiling.opcode_counts[op as usize].saturating_add(count);
+          }
+        }
+        gc_poll_countdown = gc_poll_countdown.saturating_sub(9);
+        if gc_poll_countdown == 0 {
+          gc_poll_countdown = GC_POLL_INTERVAL;
+        }
+        continue;
+      }
+      if quickened == QuickenedKind::NumericIncrement
+        && self.try_numeric_increment_sequence(registers)?
+      {
+        if self.profiling.enabled {
+          for (op, count) in [
+            (Op::LoadLocal, 3),
+            (Op::Neg, 2),
+            (Op::Const, 1),
+            (Op::Move, 1),
+            (Op::Add, 1),
+            (Op::StoreLocal, 2),
+          ] {
+            self.profiling.opcode_counts[op as usize] =
+              self.profiling.opcode_counts[op as usize].saturating_add(count);
+          }
+        }
+        gc_poll_countdown = gc_poll_countdown.saturating_sub(10);
+        if gc_poll_countdown == 0 {
+          gc_poll_countdown = GC_POLL_INTERVAL;
+        }
+        continue;
+      }
+      if quickened == QuickenedKind::NumericAddLocal
+        && self.try_numeric_add_local_sequence(registers)?
+      {
+        if self.profiling.enabled {
+          self.profiling.opcode_counts[Op::LoadLocal as usize] =
+            self.profiling.opcode_counts[Op::LoadLocal as usize].saturating_add(2);
+          self.profiling.opcode_counts[Op::Add as usize] =
+            self.profiling.opcode_counts[Op::Add as usize].saturating_add(1);
+          self.profiling.opcode_counts[Op::StoreLocal as usize] =
+            self.profiling.opcode_counts[Op::StoreLocal as usize].saturating_add(1);
+        }
+        gc_poll_countdown = gc_poll_countdown.saturating_sub(4);
+        if gc_poll_countdown == 0 {
+          gc_poll_countdown = GC_POLL_INTERVAL;
+        }
+        continue;
+      }
+
       let word = *self
         .execution
         .active
@@ -211,8 +339,9 @@ impl Vm {
         .ok_or_else(|| RuntimeError::from("RISC instruction pointer out of bounds"))?;
       let instruction_ip = self.execution.active.ip;
       self.execution.active.ip += 1;
-      let op = Op::from_byte((word & 0xFF) as u8)
-        .ok_or_else(|| RuntimeError::from("invalid RISC opcode"))?;
+      // SAFETY: every public execution entry verifies the chunk recursively
+      // before this loop runs, including nested function chunks.
+      let op = unsafe { Op::from_byte_unchecked((word & 0xFF) as u8) };
       let rd = decode_rd(word) as usize;
       let rs = decode_rs(word) as usize;
       if self.profiling.enabled {
@@ -632,6 +761,9 @@ impl Vm {
             } else {
               offset
             };
+            if offset < 0 {
+              self.record_jit_backedge(instruction_ip);
+            }
             self.execution.active.ip =
               usize::try_from(self.execution.active.ip as i64 + offset as i64)
                 .map_err(|_| RuntimeError::from("negative RISC jump target"))?;
@@ -644,11 +776,14 @@ impl Vm {
               Op::JumpIfNullish => matches!(value, Value::Null | Value::Undefined),
               _ => unreachable!(),
             };
+            let offset = decode_risc_cond_offset(word);
+            if take && offset < 0 {
+              self.record_jit_backedge(instruction_ip);
+            }
             if take {
-              self.execution.active.ip = usize::try_from(
-                self.execution.active.ip as i64 + decode_risc_cond_offset(word) as i64,
-              )
-              .map_err(|_| RuntimeError::from("negative RISC conditional target"))?;
+              self.execution.active.ip =
+                usize::try_from(self.execution.active.ip as i64 + offset as i64)
+                  .map_err(|_| RuntimeError::from("negative RISC conditional target"))?;
             }
           }
           Op::CompareJump => {
@@ -675,6 +810,9 @@ impl Vm {
               _ => unreachable!(),
             };
             if !result {
+              if offset < 0 {
+                self.record_jit_backedge(instruction_ip);
+              }
               self.execution.active.ip =
                 usize::try_from(self.execution.active.ip as i64 + offset as i64)
                   .map_err(|_| RuntimeError::from("negative RISC compare target"))?;
@@ -1110,6 +1248,705 @@ impl Vm {
     }
   }
 
+  #[allow(
+    dead_code,
+    reason = "explicit baseline controller used by tier integration"
+  )]
+  pub(super) fn install_baseline_for_function(
+    &mut self,
+    function_value: &Value,
+  ) -> Result<(), RuntimeError> {
+    let Value::Closure { proto, .. } = function_value else {
+      return Err(RuntimeError::from("baseline target is not a closure"));
+    };
+    let chunk = std::sync::Arc::clone(&proto.chunk);
+    let function = self.function_id_for_chunk(&chunk);
+    let version = self
+      .profiling
+      .jit
+      .install_const_prefix(function, &chunk)
+      .map_err(RuntimeError::from)?;
+    self
+      .profiling
+      .functions
+      .entry(function)
+      .or_default()
+      .baseline = crate::vm::jit::BaselineState::Ready(version);
+    Ok(())
+  }
+
+  #[allow(dead_code, reason = "compatibility helper for active root execution")]
+  pub(super) fn install_baseline_const_return(&mut self) -> Result<(), RuntimeError> {
+    let function = self.active_function_id();
+    let version = self
+      .profiling
+      .jit
+      .install_const_prefix(function, &self.execution.active.chunk)
+      .map_err(RuntimeError::from)?;
+    self
+      .profiling
+      .functions
+      .entry(function)
+      .or_default()
+      .baseline = crate::vm::jit::BaselineState::Ready(version);
+    Ok(())
+  }
+
+  fn try_run_baseline(
+    &mut self,
+    state: &mut RiscExecutionState,
+  ) -> Result<Option<RiscRunOutcome>, RuntimeError> {
+    let function = self.active_function_id();
+    let baseline_ready = self
+      .profiling
+      .functions
+      .get(&function)
+      .is_some_and(|profile| matches!(profile.baseline, crate::vm::jit::BaselineState::Ready(_)));
+    if !baseline_ready {
+      return Ok(None);
+    }
+    let mut result = Value::Undefined;
+    let mut frame = crate::vm::jit::native::JitFrame {
+      vm: self as *mut Vm,
+      function_id: 0,
+      vm_pc: self.execution.active.ip,
+      registers: state.registers.as_mut_ptr(),
+      register_count: state.registers.len(),
+      result: &mut result,
+    };
+    let Some(exit) = self.profiling.jit.execute(function, &mut frame) else {
+      return Ok(None);
+    };
+    self.profiling.jit_stats.baseline_entries = self
+      .profiling
+      .jit_stats
+      .baseline_entries
+      .saturating_add(1);
+    match exit {
+      crate::vm::jit::native::JIT_EXIT_RETURN => {
+        self.profiling.jit_stats.baseline_returns = self
+          .profiling
+          .jit_stats
+          .baseline_returns
+          .saturating_add(1);
+        Ok(Some(RiscRunOutcome::Return(result)))
+      }
+      crate::vm::jit::native::JIT_EXIT_INTERPRETER => {
+        self.profiling.jit_stats.interpreter_resumes = self
+          .profiling
+          .jit_stats
+          .interpreter_resumes
+          .saturating_add(1);
+        self.execution.active.ip = frame.vm_pc;
+        Ok(None)
+      }
+      crate::vm::jit::native::JIT_EXIT_INVALIDATED => Ok(None),
+      crate::vm::jit::native::JIT_EXIT_EXCEPTION => {
+        Err(RuntimeError::from("baseline JIT reported an exception"))
+      }
+      _ => Err(RuntimeError::from("invalid baseline JIT exit code")),
+    }
+  }
+
+  fn function_id_for_chunk(
+    &mut self,
+    chunk: &std::sync::Arc<crate::bytecode::Chunk>,
+  ) -> crate::vm::jit::FunctionId {
+    let chunk_identity = std::sync::Arc::as_ptr(chunk) as usize;
+    if let Some(id) = self
+      .profiling
+      .chunk_ids
+      .get(&chunk_identity)
+      .copied()
+    {
+      return id;
+    }
+    self.profiling.next_function_id = self.profiling.next_function_id.saturating_add(1);
+    let id = crate::vm::jit::FunctionId::new(self.profiling.next_function_id);
+    self
+      .profiling
+      .chunk_refs
+      .insert(chunk_identity, std::sync::Arc::clone(chunk));
+    self
+      .profiling
+      .chunk_ids
+      .insert(chunk_identity, id);
+    id
+  }
+
+  fn active_function_id(&mut self) -> crate::vm::jit::FunctionId {
+    let chunk = std::sync::Arc::clone(&self.execution.active.chunk);
+    self.function_id_for_chunk(&chunk)
+  }
+
+  fn record_jit_backedge(
+    &mut self,
+    pc: usize,
+  ) {
+    let function_id = self.active_function_id();
+    self
+      .profiling
+      .functions
+      .entry(function_id)
+      .or_default()
+      .record_backedge(pc);
+  }
+
+  fn quickened_kind(&mut self) -> QuickenedKind {
+    let identity = Arc::as_ptr(&self.execution.active.chunk) as usize;
+    if self.caches.active_quickened_chunk != identity {
+      let sites = if let Some(plan) = self.caches.quickened.get(&identity) {
+        Arc::clone(&plan.sites)
+      } else {
+        let chunk = Arc::clone(&self.execution.active.chunk);
+        let sites = Arc::<[QuickenedKind]>::from(build_quickened_sites(&chunk.code));
+        self.caches.quickened.insert(
+          identity,
+          QuickenedPlan {
+            _chunk: chunk,
+            sites: Arc::clone(&sites),
+          },
+        );
+        sites
+      };
+      self.caches.active_quickened_chunk = identity;
+      self.caches.active_quickened_sites = sites;
+    }
+    self
+      .caches
+      .active_quickened_sites
+      .get(self.execution.active.ip)
+      .copied()
+      .unwrap_or(QuickenedKind::Ordinary)
+  }
+
+  fn try_numeric_loop_sequence(
+    &mut self,
+    registers: &mut [Value; 16],
+  ) -> Result<bool, RuntimeError> {
+    let ip = self.execution.active.ip;
+    let Some(words) = self.execution.active.chunk.code.get(ip..ip + 22) else {
+      return Ok(false);
+    };
+    let ops = [
+      Op::LoadLocal,
+      Op::Const,
+      Op::CompareJump,
+      Op::LoadLocal,
+      Op::LoadLocal,
+      Op::Add,
+      Op::StoreLocal,
+      Op::LoadLocal,
+      Op::LoadLocal,
+      Op::StoreLocal,
+      Op::CloneLocalCell,
+      Op::LoadLocal,
+      Op::Neg,
+      Op::Neg,
+      Op::Const,
+      Op::Move,
+      Op::Add,
+      Op::StoreLocal,
+      Op::LoadLocal,
+      Op::LoadLocal,
+      Op::StoreLocal,
+      Op::Jump,
+    ];
+    if !words
+      .iter()
+      .zip(ops)
+      .all(|(word, op)| (*word & 0xff) as u8 == op as u8)
+    {
+      return Ok(false);
+    }
+    let index_slot = decode_risc_aux16(words[0]) as usize;
+    let accumulator_slot = decode_risc_aux16(words[3]) as usize;
+    let temporary_slot = decode_risc_aux16(words[6]) as usize;
+    let (condition, left, right, exit_offset) = decode_compare_jump(words[2]);
+    if condition != 2
+      || left != decode_rd(words[0])
+      || right != decode_rd(words[1])
+      || exit_offset <= 0
+      || decode_risc_aux16(words[7]) as usize != accumulator_slot
+      || decode_risc_aux16(words[8]) as usize != temporary_slot
+      || decode_risc_aux16(words[9]) as usize != accumulator_slot
+      || decode_risc_aux16(words[11]) as usize != index_slot
+      || decode_risc_aux16(words[17]) as usize != temporary_slot
+      || decode_risc_aux16(words[18]) as usize != index_slot
+      || decode_risc_aux16(words[19]) as usize != temporary_slot
+      || decode_risc_aux16(words[20]) as usize != index_slot
+      || self.execution.active.arguments.object.is_some()
+      || self
+        .execution
+        .active
+        .lexical_env
+        .borrow()
+        .has_object_environment()
+    {
+      return Ok(false);
+    }
+    let number = |slot: usize| {
+      self
+        .execution
+        .active
+        .locals
+        .get(slot)
+        .and_then(|cell| match *cell.borrow() {
+          Value::Number(value) => Some(value),
+          _ => None,
+        })
+    };
+    let Some(index) = number(index_slot) else {
+      return Ok(false);
+    };
+    let Some(accumulator) = number(accumulator_slot) else {
+      return Ok(false);
+    };
+    let Some(crate::bytecode::Constant::Number(limit)) = self
+      .execution
+      .active
+      .chunk
+      .constants
+      .get(decode_risc_aux16(words[1]) as usize)
+    else {
+      return Ok(false);
+    };
+    if index >= *limit {
+      self.execution.active.ip = ip + 22;
+      return Ok(true);
+    }
+    let Some(crate::bytecode::Constant::Number(step)) = self
+      .execution
+      .active
+      .chunk
+      .constants
+      .get(decode_risc_aux16(words[14]) as usize)
+    else {
+      return Ok(false);
+    };
+    let sum = accumulator + index;
+    let next = index + *step;
+    ensure_slot(&mut self.execution.active.locals, temporary_slot);
+    *self.execution.active.locals[temporary_slot].borrow_mut() = Value::Number(sum);
+    *self.execution.active.locals[accumulator_slot].borrow_mut() = Value::Number(sum);
+    *self.execution.active.locals[temporary_slot].borrow_mut() = Value::Number(next);
+    *self.execution.active.locals[index_slot].borrow_mut() = Value::Number(next);
+    registers[decode_rd(words[0]) as usize] = Value::Number(index);
+    registers[decode_rd(words[3]) as usize] = Value::Number(sum);
+    self.execution.active.ip = ip;
+    Ok(true)
+  }
+
+  /// Execute `LoadLocal, Const, CompareJump` with numeric guards in one dispatch.
+  fn try_numeric_compare_branch_sequence(
+    &mut self,
+    registers: &mut [Value; 16],
+  ) -> Result<bool, RuntimeError> {
+    let ip = self.execution.active.ip;
+    let words = &self.execution.active.chunk.code[ip..ip + 3];
+    let left_register = decode_rd(words[0]) as usize;
+    let right_register = decode_rd(words[1]) as usize;
+    let (condition, _, _, offset) = decode_compare_jump(words[2]);
+
+    let left = {
+      let slot = decode_risc_aux16(words[0]) as usize;
+      let Some(cell) = self.execution.active.locals.get(slot) else {
+        return Ok(false);
+      };
+      match *cell.borrow() {
+        Value::Number(value) => Some(value),
+        _ => None,
+      }
+    };
+    let Some(left) = left else {
+      return Ok(false);
+    };
+    let Some(crate::bytecode::Constant::Number(right)) = self
+      .execution
+      .active
+      .chunk
+      .constants
+      .get(decode_risc_aux16(words[1]) as usize)
+    else {
+      return Ok(false);
+    };
+    let right = *right;
+    let ordered = !left.is_nan() && !right.is_nan();
+    let result = match condition {
+      0 | 6 => left == right,
+      1 | 7 => left != right,
+      2 => ordered && left < right,
+      3 => ordered && left <= right,
+      4 => ordered && left > right,
+      5 => ordered && left >= right,
+      _ => return Ok(false),
+    };
+
+    registers[left_register] = Value::Number(left);
+    registers[right_register] = Value::Number(right);
+    self.execution.active.ip = if result {
+      ip + 3
+    } else {
+      usize::try_from(ip as i64 + 3 + offset as i64)
+        .map_err(|_| RuntimeError::from("negative RISC compare target"))?
+    };
+    Ok(true)
+  }
+
+  /// Execute the compiler's one-argument method-call setup in one dispatch.
+  fn try_single_argument_method_call_sequence(
+    &mut self,
+    registers: &mut [Value; 16],
+  ) -> Result<bool, RuntimeError> {
+    let ip = self.execution.active.ip;
+    // The quickening pass has already validated this complete instruction
+    // shape and all register relationships.
+    let words = &self.execution.active.chunk.code[ip..ip + 12];
+    let receiver_register = decode_rd(words[0]) as usize;
+    let callee_register = decode_rd(words[3]) as usize;
+    let argument_register = decode_rd(words[6]) as usize;
+    let key_register = decode_rd(words[4]) as usize;
+
+    let receiver_slot = decode_risc_aux16(words[0]) as usize;
+    let temporary_slot = decode_risc_aux16(words[1]) as usize;
+    let argument_slot = decode_risc_aux16(words[6]) as usize;
+    if self.execution.active.arguments.object.is_some()
+      || self
+        .execution
+        .active
+        .lexical_env
+        .borrow()
+        .has_object_environment()
+      || self
+        .execution
+        .active
+        .slots
+        .as_ref()
+        .and_then(|slots| slots.immutable.get(temporary_slot))
+        .copied()
+        .unwrap_or(false)
+    {
+      return Ok(false);
+    }
+
+    let Some(receiver) = self
+      .execution
+      .active
+      .locals
+      .get(receiver_slot)
+      .map(|cell| cell.borrow().clone())
+    else {
+      return Ok(false);
+    };
+    let Some(argument) = self
+      .execution
+      .active
+      .locals
+      .get(argument_slot)
+      .map(|cell| cell.borrow().clone())
+    else {
+      return Ok(false);
+    };
+    let Some(crate::bytecode::Constant::String(key)) = self
+      .execution
+      .active
+      .chunk
+      .constants
+      .get(decode_risc_aux16(words[4]) as usize)
+    else {
+      return Ok(false);
+    };
+    let key = PropertyKey::String(key.clone());
+
+    ensure_slot(&mut self.execution.active.locals, temporary_slot);
+    *self.execution.active.locals[temporary_slot].borrow_mut() = receiver.clone();
+    let callee = self.get_property_value_cached(ip + 5, &receiver, &key)?;
+    let canonical_push = matches!(
+      &callee,
+      Value::BuiltinObject(_, properties)
+        if matches!(properties.borrow().internal_slot("[[DenkoArrayPush]]"), Some(Value::Bool(true)))
+    );
+    let direct_push = if canonical_push {
+      if let Value::Array(elements, properties) = &receiver {
+        let length = elements.borrow().len();
+        let index_key = PropertyKey::String(length.to_string().into());
+        let properties_allow_push = {
+          let properties = properties.borrow();
+          properties.extensible
+            && properties
+              .properties
+              .get(&PropertyKey::String("length".into()))
+              .is_none_or(|descriptor| {
+                matches!(descriptor, PropertyDescriptor::Data { writable: true, .. })
+              })
+        };
+        if properties_allow_push
+          && self
+            .lookup_property_descriptor(&receiver, &index_key, 0)?
+            .is_none()
+        {
+          elements.borrow_mut().push(Some(argument.clone()));
+          self.bump_object_generation(&receiver);
+          Some(Value::Number(usize_to_f64(length + 1)))
+        } else {
+          None
+        }
+      } else {
+        None
+      }
+    } else {
+      None
+    };
+    let result = if let Some(result) = direct_push {
+      result
+    } else {
+      self.call_value_with_this(&callee, &receiver, std::slice::from_ref(&argument))?
+    };
+
+    registers[receiver_register] = result.clone();
+    registers[callee_register] = callee;
+    registers[argument_register] = argument.clone();
+    registers[key_register] = match key {
+      PropertyKey::String(key) => Value::String(key),
+      PropertyKey::Symbol(_) => unreachable!(),
+    };
+    registers[0] = result;
+    registers[1] = receiver;
+    registers[2] = argument;
+    self.execution.active.ip += 12;
+    Ok(true)
+  }
+
+  /// Execute a guarded own-data-property numeric accumulation in one dispatch.
+  fn try_numeric_property_add_sequence(
+    &mut self,
+    registers: &mut [Value; 16],
+  ) -> Result<bool, RuntimeError> {
+    let ip = self.execution.active.ip;
+    // The quickening pass has already validated this complete instruction
+    // shape, register flow, and slot flow.
+    let words = &self.execution.active.chunk.code[ip..ip + 9];
+    let accumulator_register = decode_rd(words[0]) as usize;
+    let property_register = decode_rd(words[1]) as usize;
+    let key_register = decode_rd(words[2]) as usize;
+    let accumulator_slot = decode_risc_aux16(words[0]) as usize;
+    let object_slot = decode_risc_aux16(words[1]) as usize;
+    let temporary_slot = decode_risc_aux16(words[5]) as usize;
+    if self.execution.active.arguments.object.is_some()
+      || self
+        .execution
+        .active
+        .lexical_env
+        .borrow()
+        .has_object_environment()
+      || [temporary_slot, accumulator_slot]
+        .into_iter()
+        .any(|slot| {
+          self
+            .execution
+            .active
+            .slots
+            .as_ref()
+            .and_then(|slots| slots.immutable.get(slot))
+            .copied()
+            .unwrap_or(false)
+        })
+    {
+      return Ok(false);
+    }
+
+    let accumulator = {
+      let Some(cell) = self.execution.active.locals.get(accumulator_slot) else {
+        return Ok(false);
+      };
+      match *cell.borrow() {
+        Value::Number(value) => Some(value),
+        _ => None,
+      }
+    };
+    let Some(accumulator) = accumulator else {
+      return Ok(false);
+    };
+    let object = {
+      let Some(cell) = self.execution.active.locals.get(object_slot) else {
+        return Ok(false);
+      };
+      match &*cell.borrow() {
+        Value::Object(object) => Some(Rc::clone(object)),
+        _ => None,
+      }
+    };
+    let Some(object) = object else {
+      return Ok(false);
+    };
+    let Some(crate::bytecode::Constant::String(key)) = self
+      .execution
+      .active
+      .chunk
+      .constants
+      .get(decode_risc_aux16(words[2]) as usize)
+    else {
+      return Ok(false);
+    };
+    let key = PropertyKey::String(key.clone());
+    let property = {
+      let object = object.borrow();
+      match object.properties.get(&key) {
+        Some(PropertyDescriptor::Data {
+          value: Value::Number(value),
+          ..
+        }) => Some(*value),
+        _ => None,
+      }
+    };
+    let Some(property) = property else {
+      return Ok(false);
+    };
+    let result = accumulator + property;
+
+    ensure_slot(&mut self.execution.active.locals, temporary_slot);
+    registers[accumulator_register] = Value::Number(result);
+    registers[property_register] = Value::Number(result);
+    registers[key_register] = Value::String(match key {
+      PropertyKey::String(key) => key,
+      PropertyKey::Symbol(_) => unreachable!(),
+    });
+    *self.execution.active.locals[temporary_slot].borrow_mut() = Value::Number(result);
+    *self.execution.active.locals[accumulator_slot].borrow_mut() = Value::Number(result);
+    self.execution.active.ip += 9;
+    Ok(true)
+  }
+
+  /// Execute the compiler's guarded numeric increment sequence in one dispatch.
+  fn try_numeric_increment_sequence(
+    &mut self,
+    registers: &mut [Value; 16],
+  ) -> Result<bool, RuntimeError> {
+    let ip = self.execution.active.ip;
+    let words = &self.execution.active.chunk.code[ip..ip + 10];
+    let source_register = decode_rd(words[0]) as usize;
+    let constant_register = decode_rd(words[3]) as usize;
+    let result_register = decode_rd(words[4]) as usize;
+    let target_slot = decode_risc_aux16(words[0]) as usize;
+    let temporary_slot = decode_risc_aux16(words[6]) as usize;
+    if self.execution.active.arguments.object.is_some()
+      || self
+        .execution
+        .active
+        .lexical_env
+        .borrow()
+        .has_object_environment()
+      || [temporary_slot, target_slot]
+        .into_iter()
+        .any(|slot| {
+          self
+            .execution
+            .active
+            .slots
+            .as_ref()
+            .and_then(|slots| slots.immutable.get(slot))
+            .copied()
+            .unwrap_or(false)
+        })
+    {
+      return Ok(false);
+    }
+
+    let value = {
+      let Some(cell) = self.execution.active.locals.get(target_slot) else {
+        return Ok(false);
+      };
+      match *cell.borrow() {
+        Value::Number(value) => Some(value),
+        _ => None,
+      }
+    };
+    let Some(value) = value else {
+      return Ok(false);
+    };
+    let Some(crate::bytecode::Constant::Number(constant)) = self
+      .execution
+      .active
+      .chunk
+      .constants
+      .get(decode_risc_aux16(words[3]) as usize)
+    else {
+      return Ok(false);
+    };
+    let constant = *constant;
+    let result = value + constant;
+
+    ensure_slot(&mut self.execution.active.locals, temporary_slot);
+    registers[source_register] = Value::Number(value);
+    registers[constant_register] = Value::Number(constant);
+    registers[result_register] = Value::Number(result);
+    *self.execution.active.locals[temporary_slot].borrow_mut() = Value::Number(result);
+    *self.execution.active.locals[target_slot].borrow_mut() = Value::Number(result);
+    self.execution.active.ip += 10;
+    Ok(true)
+  }
+
+  /// Execute the common `LoadLocal, LoadLocal, Add, StoreLocal` sequence in
+  /// one interpreter dispatch when every value is already numeric.
+  fn try_numeric_add_local_sequence(
+    &mut self,
+    registers: &mut [Value; 16],
+  ) -> Result<bool, RuntimeError> {
+    let ip = self.execution.active.ip;
+    let words = &self.execution.active.chunk.code[ip..ip + 4];
+    let left_register = decode_rd(words[0]) as usize;
+    let right_register = decode_rd(words[1]) as usize;
+
+    let left_slot = decode_risc_aux16(words[0]) as usize;
+    let right_slot = decode_risc_aux16(words[1]) as usize;
+    let destination_slot = decode_risc_aux16(words[3]) as usize;
+    if self.execution.active.arguments.object.is_some()
+      || self
+        .execution
+        .active
+        .lexical_env
+        .borrow()
+        .has_object_environment()
+      || self
+        .execution
+        .active
+        .slots
+        .as_ref()
+        .and_then(|slots| slots.immutable.get(destination_slot))
+        .copied()
+        .unwrap_or(false)
+    {
+      return Ok(false);
+    }
+
+    let operands = {
+      let Some(left_cell) = self.execution.active.locals.get(left_slot) else {
+        return Ok(false);
+      };
+      let Some(right_cell) = self.execution.active.locals.get(right_slot) else {
+        return Ok(false);
+      };
+      let left = left_cell.borrow();
+      let right = right_cell.borrow();
+      match (&*left, &*right) {
+        (Value::Number(left), Value::Number(right)) => Some((*left, *right)),
+        _ => None,
+      }
+    };
+    let Some((left, right)) = operands else {
+      return Ok(false);
+    };
+    let result = left + right;
+
+    ensure_slot(&mut self.execution.active.locals, destination_slot);
+    registers[left_register] = Value::Number(left);
+    registers[right_register] = Value::Number(right);
+    *self.execution.active.locals[destination_slot].borrow_mut() = Value::Number(result);
+    registers[left_register] = Value::Number(result);
+    self.execution.active.ip += 4;
+    Ok(true)
+  }
+
   /// Execute a chunk without resetting the caller's live lexical bindings.
   ///
   /// This is used for direct `eval`, where the evaluated code must observe
@@ -1422,6 +2259,247 @@ impl Vm {
 // ---------------------------------------------------------------------------
 // Free functions
 // ---------------------------------------------------------------------------
+
+fn build_quickened_sites(code: &[u32]) -> Vec<QuickenedKind> {
+  fn matches_ops(
+    code: &[u32],
+    ip: usize,
+    ops: &[Op],
+  ) -> bool {
+    code
+      .get(ip..ip.saturating_add(ops.len()))
+      .is_some_and(|words| {
+        words
+          .iter()
+          .zip(ops)
+          .all(|(word, op)| (*word & 0xff) as u8 == *op as u8)
+      })
+  }
+
+  fn is_single_argument_method_call(
+    code: &[u32],
+    ip: usize,
+    ops: &[Op],
+  ) -> bool {
+    let Some(words) = code.get(ip..ip.saturating_add(ops.len())) else {
+      return false;
+    };
+    if !words
+      .iter()
+      .zip(ops)
+      .all(|(word, op)| (*word & 0xff) as u8 == *op as u8)
+      || decode_risc_aux16(words[10]) != 1
+    {
+      return false;
+    }
+
+    let receiver_register = decode_rd(words[0]);
+    let callee_register = decode_rd(words[3]);
+    let argument_register = decode_rd(words[6]);
+    let key_register = decode_rd(words[4]);
+    decode_rd(words[1]) == receiver_register
+      && decode_rd(words[2]) == receiver_register
+      && decode_rd(words[5]) == callee_register
+      && decode_rs(words[5]) == key_register
+      && decode_rd(words[7]) == 2
+      && decode_rs(words[7]) == argument_register
+      && decode_rd(words[8]) == 1
+      && decode_rs(words[8]) == receiver_register
+      && decode_rd(words[9]) == 0
+      && decode_rs(words[9]) == callee_register
+      && decode_rd(words[11]) == receiver_register
+      && decode_rs(words[11]) == 0
+      && decode_risc_aux16(words[2]) == decode_risc_aux16(words[1])
+      && decode_risc_aux16(words[3]) == decode_risc_aux16(words[1])
+  }
+
+  fn is_numeric_property_add(
+    code: &[u32],
+    ip: usize,
+    ops: &[Op],
+  ) -> bool {
+    let Some(words) = code.get(ip..ip.saturating_add(ops.len())) else {
+      return false;
+    };
+    if !words
+      .iter()
+      .zip(ops)
+      .all(|(word, op)| (*word & 0xff) as u8 == *op as u8)
+    {
+      return false;
+    }
+
+    let accumulator_register = decode_rd(words[0]);
+    let property_register = decode_rd(words[1]);
+    let key_register = decode_rd(words[2]);
+    let accumulator_slot = decode_risc_aux16(words[0]);
+    let temporary_slot = decode_risc_aux16(words[5]);
+    decode_rd(words[3]) == property_register
+      && decode_rs(words[3]) == key_register
+      && decode_rd(words[4]) == accumulator_register
+      && decode_rs(words[4]) == property_register
+      && decode_rd(words[5]) == accumulator_register
+      && decode_rd(words[6]) == property_register
+      && decode_rd(words[7]) == property_register
+      && decode_rd(words[8]) == property_register
+      && decode_risc_aux16(words[6]) == accumulator_slot
+      && decode_risc_aux16(words[7]) == temporary_slot
+      && decode_risc_aux16(words[8]) == accumulator_slot
+  }
+
+  fn is_numeric_compare(
+    code: &[u32],
+    ip: usize,
+    ops: &[Op],
+  ) -> bool {
+    let Some(words) = code.get(ip..ip.saturating_add(ops.len())) else {
+      return false;
+    };
+    if !words
+      .iter()
+      .zip(ops)
+      .all(|(word, op)| (*word & 0xff) as u8 == *op as u8)
+    {
+      return false;
+    }
+    let (_, left, right, _) = decode_compare_jump(words[2]);
+    left == decode_rd(words[0]) && right == decode_rd(words[1])
+  }
+
+  fn is_numeric_increment(
+    code: &[u32],
+    ip: usize,
+    ops: &[Op],
+  ) -> bool {
+    let Some(words) = code.get(ip..ip.saturating_add(ops.len())) else {
+      return false;
+    };
+    if !words
+      .iter()
+      .zip(ops)
+      .all(|(word, op)| (*word & 0xff) as u8 == *op as u8)
+    {
+      return false;
+    }
+    let source = decode_rd(words[0]);
+    let constant = decode_rd(words[3]);
+    let result = decode_rd(words[4]);
+    let target_slot = decode_risc_aux16(words[0]);
+    let temporary_slot = decode_risc_aux16(words[6]);
+    decode_rd(words[1]) == source
+      && decode_rs(words[1]) == source
+      && decode_rd(words[2]) == source
+      && decode_rs(words[2]) == source
+      && decode_rs(words[4]) == source
+      && decode_rd(words[5]) == result
+      && decode_rs(words[5]) == constant
+      && decode_rd(words[6]) == result
+      && decode_rd(words[7]) == result
+      && decode_rd(words[8]) == result
+      && decode_rd(words[9]) == result
+      && decode_risc_aux16(words[7]) == target_slot
+      && decode_risc_aux16(words[8]) == temporary_slot
+      && decode_risc_aux16(words[9]) == target_slot
+  }
+
+  fn is_numeric_add_local(
+    code: &[u32],
+    ip: usize,
+    ops: &[Op],
+  ) -> bool {
+    let Some(words) = code.get(ip..ip.saturating_add(ops.len())) else {
+      return false;
+    };
+    matches_ops(code, ip, ops)
+      && decode_rd(words[2]) == decode_rd(words[0])
+      && decode_rs(words[2]) == decode_rd(words[1])
+      && decode_rd(words[3]) == decode_rd(words[0])
+  }
+
+  const LOOP: &[Op] = &[
+    Op::LoadLocal,
+    Op::Const,
+    Op::CompareJump,
+    Op::LoadLocal,
+    Op::LoadLocal,
+    Op::Add,
+    Op::StoreLocal,
+    Op::LoadLocal,
+    Op::LoadLocal,
+    Op::StoreLocal,
+    Op::CloneLocalCell,
+    Op::LoadLocal,
+    Op::Neg,
+    Op::Neg,
+    Op::Const,
+    Op::Move,
+    Op::Add,
+    Op::StoreLocal,
+    Op::LoadLocal,
+    Op::LoadLocal,
+    Op::StoreLocal,
+    Op::Jump,
+  ];
+  const COMPARE: &[Op] = &[Op::LoadLocal, Op::Const, Op::CompareJump];
+  const METHOD_CALL: &[Op] = &[
+    Op::LoadLocal,
+    Op::StoreLocal,
+    Op::LoadLocal,
+    Op::LoadLocal,
+    Op::Const,
+    Op::GetProperty,
+    Op::LoadLocal,
+    Op::Move,
+    Op::Move,
+    Op::Move,
+    Op::CallBuiltin,
+    Op::Move,
+  ];
+  const PROPERTY_ADD: &[Op] = &[
+    Op::LoadLocal,
+    Op::LoadLocal,
+    Op::Const,
+    Op::GetProperty,
+    Op::Add,
+    Op::StoreLocal,
+    Op::LoadLocal,
+    Op::LoadLocal,
+    Op::StoreLocal,
+  ];
+  const INCREMENT: &[Op] = &[
+    Op::LoadLocal,
+    Op::Neg,
+    Op::Neg,
+    Op::Const,
+    Op::Move,
+    Op::Add,
+    Op::StoreLocal,
+    Op::LoadLocal,
+    Op::LoadLocal,
+    Op::StoreLocal,
+  ];
+  const ADD_LOCAL: &[Op] = &[Op::LoadLocal, Op::LoadLocal, Op::Add, Op::StoreLocal];
+
+  (0..code.len())
+    .map(|ip| {
+      if matches_ops(code, ip, LOOP) {
+        QuickenedKind::NumericLoop
+      } else if is_numeric_compare(code, ip, COMPARE) {
+        QuickenedKind::NumericCompareBranch
+      } else if is_single_argument_method_call(code, ip, METHOD_CALL) {
+        QuickenedKind::SingleArgumentMethodCall
+      } else if is_numeric_property_add(code, ip, PROPERTY_ADD) {
+        QuickenedKind::NumericPropertyAdd
+      } else if is_numeric_increment(code, ip, INCREMENT) {
+        QuickenedKind::NumericIncrement
+      } else if is_numeric_add_local(code, ip, ADD_LOCAL) {
+        QuickenedKind::NumericAddLocal
+      } else {
+        QuickenedKind::Ordinary
+      }
+    })
+    .collect()
+}
 
 /// Grow a locals vector so that `slot` is a valid index.
 #[inline(always)]

@@ -114,6 +114,9 @@ impl Vm {
       caches: CacheState {
         property_get: HashMap::new(),
         property_get_epoch: 0,
+        quickened: HashMap::new(),
+        active_quickened_chunk: 0,
+        active_quickened_sites: Arc::from([]),
       },
       profiling: ProfilingState {
         enabled: std::env::var("BLITZ_VM_PROFILE")
@@ -121,6 +124,12 @@ impl Vm {
           .is_some_and(|v| v != "0" && !v.eq_ignore_ascii_case("false")),
         opcode_counts: [0; OP_COUNT],
         run_started_at: None,
+        functions: HashMap::new(),
+        chunk_ids: HashMap::new(),
+        chunk_refs: HashMap::new(),
+        next_function_id: 0,
+        jit: crate::vm::jit::JitRuntime::default(),
+        jit_stats: crate::vm::jit::JitStats::default(),
       },
       roots: RootState {
         temporary: Vec::new(),
@@ -207,11 +216,20 @@ impl Vm {
       caches: CacheState {
         property_get: HashMap::new(),
         property_get_epoch: 0,
+        quickened: HashMap::new(),
+        active_quickened_chunk: 0,
+        active_quickened_sites: Arc::from([]),
       },
       profiling: ProfilingState {
         enabled: self.profiling.enabled,
         opcode_counts: [0; OP_COUNT],
         run_started_at: None,
+        functions: HashMap::new(),
+        chunk_ids: HashMap::new(),
+        chunk_refs: HashMap::new(),
+        next_function_id: 0,
+        jit: crate::vm::jit::JitRuntime::default(),
+        jit_stats: crate::vm::jit::JitStats::default(),
       },
       roots: RootState {
         temporary: Vec::new(),
