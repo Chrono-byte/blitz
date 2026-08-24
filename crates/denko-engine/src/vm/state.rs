@@ -256,6 +256,8 @@ pub(super) enum QuickenedKind {
   NumericIncrement,
   NumericAddLocal,
   NumericLoop,
+  NumericPropertyLoop,
+  DenseArrayPushLoop,
 }
 
 pub(super) struct QuickenedPlan {
@@ -284,6 +286,11 @@ pub(super) struct ProfilingState {
   pub(super) chunk_ids: HashMap<usize, crate::vm::jit::FunctionId>,
   pub(super) chunk_refs: HashMap<usize, Arc<Chunk>>,
   pub(super) next_function_id: u64,
+  pub(super) active_function_chunk: usize,
+  pub(super) active_function_id: Option<crate::vm::jit::FunctionId>,
+  /// Avoid feedback-map traffic after a chunk has requested compilation.
+  pub(super) last_hot_chunk: usize,
+  pub(super) hot_chunks: std::collections::HashSet<usize>,
   #[allow(
     dead_code,
     reason = "native code lifecycle is introduced before emission"

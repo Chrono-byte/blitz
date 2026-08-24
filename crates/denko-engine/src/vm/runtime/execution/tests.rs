@@ -50,6 +50,65 @@ mod test {
     assert_eq!(vm.profiling.jit_stats.interpreter_resumes, 0);
   }
 
+  #[cfg(all(unix, target_arch = "x86_64"))]
+  #[test]
+  fn hot_function_is_automatically_compiled_and_entered() {
+    let (mut vm, _) = run_script("function automatic() { return 42; }");
+    let function = vm
+      .get_global("automatic")
+      .expect("automatic function");
+    for _ in 0..=crate::vm::jit::BASELINE_CALL_THRESHOLD {
+      let result = vm
+        .call_value_with_this(&function, &Value::Undefined, &[])
+        .expect("call automatic");
+      assert!(matches!(result, Value::Number(value) if value == 42.0));
+    }
+    assert!(vm.profiling.jit_stats.baseline_entries > 0);
+    assert!(vm.profiling.jit_stats.baseline_returns > 0);
+  }
+
+  #[cfg(all(unix, target_arch = "x86_64"))]
+  #[test]
+  fn nested_javascript_calls_automatically_enter_baseline() {
+    let (vm, _) = run_script(
+      "function answer() { return 42; } let sum = 0; for (let i = 0; i < 1100; i += 1) sum += answer(); globalThis.automatic_sum = sum;",
+    );
+    assert_eq!(
+      vm.get_global("automatic_sum"),
+      Some(Value::Number(46_200.0))
+    );
+    assert!(vm.profiling.jit_stats.baseline_entries > 0);
+    assert!(vm.profiling.jit_stats.baseline_returns > 0);
+  }
+
+  #[cfg(all(unix, target_arch = "x86_64"))]
+  #[test]
+  fn automatic_baseline_can_return_a_parameter_local() {
+    let (vm, _) = run_script(
+      "function identity(value) { return value; } let result = 0; for (let i = 0; i < 1100; i += 1) result = identity(23); globalThis.identity_result = result;",
+    );
+    assert_eq!(vm.get_global("identity_result"), Some(Value::Number(23.0)));
+    assert!(vm.profiling.jit_stats.baseline_returns > 0);
+  }
+
+  #[test]
+  fn ordinary_function_call_resumes_interpreter_after_native_prefix() {
+    let (mut vm, _) = run_script("function negative() { return -42; }");
+    let function = vm
+      .get_global("negative")
+      .expect("negative function");
+    vm.install_baseline_for_function(&function)
+      .expect("install baseline");
+    let result = vm
+      .call_value_with_this(&function, &Value::Undefined, &[])
+      .expect("call negative");
+
+    assert!(matches!(result, Value::Number(value) if value == -42.0));
+    assert_eq!(vm.profiling.jit_stats.baseline_entries, 1);
+    assert_eq!(vm.profiling.jit_stats.baseline_returns, 0);
+    assert_eq!(vm.profiling.jit_stats.interpreter_resumes, 1);
+  }
+
   #[test]
   fn abrupt_completions_run_all_finalizers_and_preserve_override_rules() {
     let (vm, _) = run_script(crate::js!(

@@ -189,6 +189,7 @@ impl Vm {
     } else {
       self.run_risc_state_inner(state, stop_at_generator_init)
     };
+    self.process_baseline_requests();
     self.execution.interpreter_depth -= 1;
     result
   }
@@ -223,7 +224,28 @@ impl Vm {
       } else {
         self.quickened_kind()
       };
+      if quickened == QuickenedKind::DenseArrayPushLoop
+        && self.try_dense_array_push_loop_sequence(registers)?
+      {
+        self.record_jit_backedge(self.execution.active.ip.saturating_sub(1));
+        gc_poll_countdown = gc_poll_countdown.saturating_sub(27);
+        if gc_poll_countdown == 0 {
+          gc_poll_countdown = GC_POLL_INTERVAL;
+        }
+        continue;
+      }
+      if quickened == QuickenedKind::NumericPropertyLoop
+        && self.try_numeric_property_loop_sequence(registers)?
+      {
+        self.record_jit_backedge(self.execution.active.ip.saturating_sub(1));
+        gc_poll_countdown = gc_poll_countdown.saturating_sub(24);
+        if gc_poll_countdown == 0 {
+          gc_poll_countdown = GC_POLL_INTERVAL;
+        }
+        continue;
+      }
       if quickened == QuickenedKind::NumericLoop && self.try_numeric_loop_sequence(registers)? {
+        self.record_jit_backedge(self.execution.active.ip.saturating_sub(1));
         gc_poll_countdown = gc_poll_countdown.saturating_sub(22);
         if gc_poll_countdown == 0 {
           gc_poll_countdown = GC_POLL_INTERVAL;
@@ -999,23 +1021,45 @@ impl Vm {
               } else {
                 this_arg
               };
-              self.push_call_frame(proto, env, call_args, this_arg, callee.clone())?;
-              let callee_this = self.execution.active.this_value.clone();
-              let callee_spill_count = self.execution.active.chunk.risc_spill_count as usize;
-              let caller_state = RiscExecutionState {
-                registers: std::mem::replace(registers, std::array::from_fn(|_| Value::Undefined)),
-                spills: std::mem::replace(spills, vec![Value::Undefined; callee_spill_count]),
-                resume_register: state.resume_register,
-              };
-              self
-                .execution
-                .call_stack
-                .last_mut()
-                .expect("call frame was just pushed")
-                .risc_state = Some(caller_state);
-              registers[1] = callee_this;
-              state.resume_register = None;
-              switched_risc_context = true;
+              if let Some(result) =
+                self.try_direct_baseline_call(&proto.chunk, &this_arg, &call_args, proto.arity)?
+              {
+                registers[0] = result;
+              } else {
+                self.push_call_frame(proto, env, call_args, this_arg, callee.clone())?;
+                let callee_this = self.execution.active.this_value.clone();
+                let callee_spill_count = self.execution.active.chunk.risc_spill_count as usize;
+                let caller_state = RiscExecutionState {
+                  registers: std::mem::replace(
+                    registers,
+                    std::array::from_fn(|_| Value::Undefined),
+                  ),
+                  spills: std::mem::replace(spills, vec![Value::Undefined; callee_spill_count]),
+                  resume_register: state.resume_register,
+                };
+                self
+                  .execution
+                  .call_stack
+                  .last_mut()
+                  .expect("call frame was just pushed")
+                  .risc_state = Some(caller_state);
+                registers[1] = callee_this;
+                state.resume_register = None;
+                if let Some(result) = self.try_run_nested_baseline(registers, false)? {
+                  let outcome = self.finish_risc_return(
+                    registers,
+                    spills,
+                    &mut state.resume_register,
+                    result,
+                  )?;
+                  switched_risc_context = outcome.is_none();
+                  if outcome.is_some() {
+                    return Ok(outcome);
+                  }
+                } else {
+                  switched_risc_context = true;
+                }
+              }
             } else if op != Op::TailCall {
               registers[0] = if matches!(op, Op::CallBuiltin) {
                 let receiver = registers[1].clone();
@@ -1060,7 +1104,16 @@ impl Vm {
                 Value::Undefined,
               );
               state.resume_register = None;
-              switched_risc_context = true;
+              if let Some(result) = self.try_run_nested_baseline(registers, true)? {
+                let outcome =
+                  self.finish_risc_return(registers, spills, &mut state.resume_register, result)?;
+                switched_risc_context = outcome.is_none();
+                if outcome.is_some() {
+                  return Ok(outcome);
+                }
+              } else {
+                switched_risc_context = true;
+              }
             } else {
               let result = self.call_value(&callee, &args)?;
               let outcome =
@@ -1292,6 +1345,201 @@ impl Vm {
     Ok(())
   }
 
+  fn try_direct_baseline_call(
+    &mut self,
+    chunk: &Arc<crate::bytecode::Chunk>,
+    this_value: &Value,
+    arguments: &[Value],
+    parameter_count: usize,
+  ) -> Result<Option<Value>, RuntimeError> {
+    let function = self.function_id_for_chunk(chunk);
+    self
+      .profiling
+      .functions
+      .entry(function)
+      .or_default()
+      .record_call();
+    self.process_baseline_request(function);
+    if !self
+      .profiling
+      .functions
+      .get(&function)
+      .is_some_and(|profile| matches!(profile.baseline, crate::vm::jit::BaselineState::Ready(_)))
+    {
+      return Ok(None);
+    }
+    let mut registers: [Value; 16] = std::array::from_fn(|_| Value::Undefined);
+    registers[1] = this_value.clone();
+    let mut result = Value::Undefined;
+    let mut frame = crate::vm::jit::native::JitFrame {
+      vm: self as *mut Vm,
+      function_id: 0,
+      vm_pc: 0,
+      registers: registers.as_mut_ptr(),
+      register_count: registers.len(),
+      result: &mut result,
+      arguments: arguments.as_ptr(),
+      argument_count: arguments.len().min(parameter_count),
+      locals: std::ptr::null_mut(),
+      local_count: 0,
+    };
+    let Some(exit) = self.profiling.jit.execute(function, &mut frame) else {
+      return Ok(None);
+    };
+    if crate::vm::jit::native::decode_exit(exit).map_err(RuntimeError::from)?
+      != crate::vm::jit::native::JitExit::Return
+    {
+      return Ok(None);
+    }
+    self.profiling.jit_stats.baseline_entries = self
+      .profiling
+      .jit_stats
+      .baseline_entries
+      .saturating_add(1);
+    self.profiling.jit_stats.baseline_returns = self
+      .profiling
+      .jit_stats
+      .baseline_returns
+      .saturating_add(1);
+    Ok(Some(result))
+  }
+
+  fn try_run_nested_baseline(
+    &mut self,
+    registers: &mut [Value; 16],
+    record_call: bool,
+  ) -> Result<Option<Value>, RuntimeError> {
+    let function = self.active_function_id();
+    if record_call {
+      self
+        .profiling
+        .functions
+        .entry(function)
+        .or_default()
+        .record_call();
+      self.process_baseline_request(function);
+    }
+    if !self
+      .profiling
+      .functions
+      .get(&function)
+      .is_some_and(|profile| matches!(profile.baseline, crate::vm::jit::BaselineState::Ready(_)))
+    {
+      return Ok(None);
+    }
+    let mut result = Value::Undefined;
+    let locals = (&mut self.execution.active.locals as *mut Vec<SharedValue>).cast();
+    let local_count = self.execution.active.locals.len();
+    let mut frame = crate::vm::jit::native::JitFrame {
+      vm: self as *mut Vm,
+      function_id: 0,
+      vm_pc: self.execution.active.ip,
+      registers: registers.as_mut_ptr(),
+      register_count: registers.len(),
+      result: &mut result,
+      arguments: std::ptr::null(),
+      argument_count: 0,
+      locals,
+      local_count,
+    };
+    let Some(exit) = self.profiling.jit.execute(function, &mut frame) else {
+      return Ok(None);
+    };
+    self.profiling.jit_stats.baseline_entries = self
+      .profiling
+      .jit_stats
+      .baseline_entries
+      .saturating_add(1);
+    match crate::vm::jit::native::decode_exit(exit).map_err(RuntimeError::from)? {
+      crate::vm::jit::native::JitExit::Return => {
+        self.profiling.jit_stats.baseline_returns = self
+          .profiling
+          .jit_stats
+          .baseline_returns
+          .saturating_add(1);
+        Ok(Some(result))
+      }
+      crate::vm::jit::native::JitExit::ResumeInterpreter
+      | crate::vm::jit::native::JitExit::Invalidated => {
+        self.profiling.jit_stats.interpreter_resumes = self
+          .profiling
+          .jit_stats
+          .interpreter_resumes
+          .saturating_add(1);
+        self.execution.active.ip = frame.vm_pc;
+        Ok(None)
+      }
+      crate::vm::jit::native::JitExit::NextBlock => {
+        Err(RuntimeError::from("unresolved nested baseline block exit"))
+      }
+      crate::vm::jit::native::JitExit::Exception => {
+        Err(RuntimeError::from("baseline JIT reported an exception"))
+      }
+    }
+  }
+
+  fn process_baseline_request(
+    &mut self,
+    function: crate::vm::jit::FunctionId,
+  ) {
+    if !self
+      .profiling
+      .functions
+      .get(&function)
+      .is_some_and(|profile| profile.baseline == crate::vm::jit::BaselineState::Requested)
+    {
+      return;
+    }
+    self
+      .profiling
+      .functions
+      .entry(function)
+      .or_default()
+      .baseline = crate::vm::jit::BaselineState::Compiling;
+    let chunk = self
+      .profiling
+      .chunk_ids
+      .iter()
+      .find_map(|(identity, id)| {
+        (*id == function)
+          .then(|| self.profiling.chunk_refs.get(identity).cloned())
+          .flatten()
+      });
+    let state = chunk
+      .as_deref()
+      .and_then(|chunk| {
+        self
+          .profiling
+          .jit
+          .install_const_prefix(function, chunk)
+          .ok()
+      })
+      .map_or(
+        crate::vm::jit::BaselineState::Disabled,
+        crate::vm::jit::BaselineState::Ready,
+      );
+    self
+      .profiling
+      .functions
+      .entry(function)
+      .or_default()
+      .baseline = state;
+  }
+
+  fn process_baseline_requests(&mut self) {
+    let requested: Vec<_> = self
+      .profiling
+      .functions
+      .iter()
+      .filter_map(|(function, profile)| {
+        (profile.baseline == crate::vm::jit::BaselineState::Requested).then_some(*function)
+      })
+      .collect();
+    for function in requested {
+      self.process_baseline_request(function);
+    }
+  }
+
   fn try_run_baseline(
     &mut self,
     state: &mut RiscExecutionState,
@@ -1306,6 +1554,8 @@ impl Vm {
       return Ok(None);
     }
     let mut result = Value::Undefined;
+    let locals = (&mut self.execution.active.locals as *mut Vec<SharedValue>).cast();
+    let local_count = self.execution.active.locals.len();
     let mut frame = crate::vm::jit::native::JitFrame {
       vm: self as *mut Vm,
       function_id: 0,
@@ -1313,6 +1563,10 @@ impl Vm {
       registers: state.registers.as_mut_ptr(),
       register_count: state.registers.len(),
       result: &mut result,
+      arguments: std::ptr::null(),
+      argument_count: 0,
+      locals,
+      local_count,
     };
     let Some(exit) = self.profiling.jit.execute(function, &mut frame) else {
       return Ok(None);
@@ -1322,8 +1576,8 @@ impl Vm {
       .jit_stats
       .baseline_entries
       .saturating_add(1);
-    match exit {
-      crate::vm::jit::native::JIT_EXIT_RETURN => {
+    match crate::vm::jit::native::decode_exit(exit).map_err(RuntimeError::from)? {
+      crate::vm::jit::native::JitExit::Return => {
         self.profiling.jit_stats.baseline_returns = self
           .profiling
           .jit_stats
@@ -1331,7 +1585,7 @@ impl Vm {
           .saturating_add(1);
         Ok(Some(RiscRunOutcome::Return(result)))
       }
-      crate::vm::jit::native::JIT_EXIT_INTERPRETER => {
+      crate::vm::jit::native::JitExit::ResumeInterpreter => {
         self.profiling.jit_stats.interpreter_resumes = self
           .profiling
           .jit_stats
@@ -1340,11 +1594,13 @@ impl Vm {
         self.execution.active.ip = frame.vm_pc;
         Ok(None)
       }
-      crate::vm::jit::native::JIT_EXIT_INVALIDATED => Ok(None),
-      crate::vm::jit::native::JIT_EXIT_EXCEPTION => {
+      crate::vm::jit::native::JitExit::Invalidated => Ok(None),
+      crate::vm::jit::native::JitExit::NextBlock => {
+        Err(RuntimeError::from("unresolved baseline block exit"))
+      }
+      crate::vm::jit::native::JitExit::Exception => {
         Err(RuntimeError::from("baseline JIT reported an exception"))
       }
-      _ => Err(RuntimeError::from("invalid baseline JIT exit code")),
     }
   }
 
@@ -1375,21 +1631,44 @@ impl Vm {
   }
 
   fn active_function_id(&mut self) -> crate::vm::jit::FunctionId {
+    let identity = Arc::as_ptr(&self.execution.active.chunk) as usize;
+    if self.profiling.active_function_chunk == identity
+      && let Some(function) = self.profiling.active_function_id
+    {
+      return function;
+    }
     let chunk = std::sync::Arc::clone(&self.execution.active.chunk);
-    self.function_id_for_chunk(&chunk)
+    let function = self.function_id_for_chunk(&chunk);
+    self.profiling.active_function_chunk = identity;
+    self.profiling.active_function_id = Some(function);
+    function
   }
 
   fn record_jit_backedge(
     &mut self,
     pc: usize,
   ) {
+    let chunk_identity = Arc::as_ptr(&self.execution.active.chunk) as usize;
+    if self.profiling.last_hot_chunk == chunk_identity
+      || self
+        .profiling
+        .hot_chunks
+        .contains(&chunk_identity)
+    {
+      self.profiling.last_hot_chunk = chunk_identity;
+      return;
+    }
     let function_id = self.active_function_id();
-    self
+    let profile = self
       .profiling
       .functions
       .entry(function_id)
-      .or_default()
-      .record_backedge(pc);
+      .or_default();
+    profile.record_backedge(pc);
+    if matches!(profile.baseline, crate::vm::jit::BaselineState::Requested) {
+      self.profiling.hot_chunks.insert(chunk_identity);
+      self.profiling.last_hot_chunk = chunk_identity;
+    }
   }
 
   fn quickened_kind(&mut self) -> QuickenedKind {
@@ -1418,6 +1697,350 @@ impl Vm {
       .get(self.execution.active.ip)
       .copied()
       .unwrap_or(QuickenedKind::Ordinary)
+  }
+
+  fn try_dense_array_push_loop_sequence(
+    &mut self,
+    registers: &mut [Value; 16],
+  ) -> Result<bool, RuntimeError> {
+    let ip = self.execution.active.ip;
+    let Some(words) = self.execution.active.chunk.code.get(ip..ip + 27) else {
+      return Ok(false);
+    };
+    let index_slot = decode_risc_aux16(words[0]) as usize;
+    let array_slot = decode_risc_aux16(words[3]) as usize;
+    let call_temporary_slot = decode_risc_aux16(words[4]) as usize;
+    let increment_temporary_slot = decode_risc_aux16(words[22]) as usize;
+    let (condition, left, right, exit_offset) = decode_compare_jump(words[2]);
+    if condition != 2
+      || left != decode_rd(words[0])
+      || right != decode_rd(words[1])
+      || exit_offset <= 0
+      || decode_risc_aux16(words[5]) as usize != call_temporary_slot
+      || decode_risc_aux16(words[6]) as usize != call_temporary_slot
+      || decode_risc_aux16(words[9]) as usize != index_slot
+      || decode_risc_aux16(words[16]) as usize != index_slot
+      || decode_risc_aux16(words[23]) as usize != index_slot
+      || decode_risc_aux16(words[24]) as usize != increment_temporary_slot
+      || decode_risc_aux16(words[25]) as usize != index_slot
+      || decode_risc_aux16(words[19]) as usize >= self.execution.active.chunk.constants.len()
+      || self.execution.active.arguments.object.is_some()
+      || self
+        .execution
+        .active
+        .lexical_env
+        .borrow()
+        .has_object_environment()
+      || self
+        .execution
+        .active
+        .locals
+        .get(index_slot)
+        .is_some_and(|cell| Rc::strong_count(cell) != 1)
+      || [index_slot, call_temporary_slot, increment_temporary_slot]
+        .into_iter()
+        .any(|slot| {
+          self
+            .execution
+            .active
+            .slots
+            .as_ref()
+            .and_then(|slots| slots.immutable.get(slot))
+            .copied()
+            .unwrap_or(false)
+        })
+    {
+      return Ok(false);
+    }
+    let number = |slot: usize| {
+      self
+        .execution
+        .active
+        .locals
+        .get(slot)
+        .and_then(|cell| match *cell.borrow() {
+          Value::Number(value) => Some(value),
+          _ => None,
+        })
+    };
+    let Some(index) = number(index_slot) else {
+      return Ok(false);
+    };
+    let Some(crate::bytecode::Constant::Number(limit)) = self
+      .execution
+      .active
+      .chunk
+      .constants
+      .get(decode_risc_aux16(words[1]) as usize)
+    else {
+      return Ok(false);
+    };
+    let limit = *limit;
+    if index >= limit {
+      self.execution.active.ip = ip + 27;
+      return Ok(true);
+    }
+    let receiver = self
+      .execution
+      .active
+      .locals
+      .get(array_slot)
+      .map(|cell| cell.borrow().clone());
+    let Some(Value::Array(elements, properties)) = receiver else {
+      return Ok(false);
+    };
+    let Some(crate::bytecode::Constant::String(method_key)) = self
+      .execution
+      .active
+      .chunk
+      .constants
+      .get(decode_risc_aux16(words[7]) as usize)
+    else {
+      return Ok(false);
+    };
+    if method_key.as_str_lossy() != "push" {
+      return Ok(false);
+    }
+    let property_key_is_index = |key: &PropertyKey| match key {
+      PropertyKey::String(key) => key.as_str_lossy().parse::<u32>().is_ok(),
+      PropertyKey::Symbol(_) => false,
+    };
+    let mut prototype = {
+      let properties = properties.borrow();
+      if !properties.extensible
+        || properties
+          .properties
+          .contains_key(&PropertyKey::String("push".into()))
+        || properties
+          .properties
+          .keys()
+          .any(&property_key_is_index)
+        || properties
+          .properties
+          .get(&PropertyKey::String("length".into()))
+          .is_some_and(|descriptor| {
+            !matches!(descriptor, PropertyDescriptor::Data { writable: true, .. })
+          })
+      {
+        return Ok(false);
+      }
+      properties.get_prototype()
+    };
+    let mut canonical_push = false;
+    for _ in 0..MAX_PROTOTYPE_DEPTH {
+      let Value::Object(object) = prototype else {
+        break;
+      };
+      let object = object.borrow();
+      if object
+        .properties
+        .keys()
+        .any(&property_key_is_index)
+      {
+        return Ok(false);
+      }
+      if let Some(descriptor) = object
+        .properties
+        .get(&PropertyKey::String("push".into()))
+      {
+        canonical_push = matches!(descriptor, PropertyDescriptor::Data { value: Value::BuiltinObject(_, properties), .. } if matches!(properties.borrow().internal_slot("[[DenkoArrayPush]]"), Some(Value::Bool(true))));
+        break;
+      }
+      prototype = object.get_prototype();
+    }
+    if !canonical_push {
+      return Ok(false);
+    }
+    let Some(crate::bytecode::Constant::Number(step)) = self
+      .execution
+      .active
+      .chunk
+      .constants
+      .get(decode_risc_aux16(words[19]) as usize)
+    else {
+      return Ok(false);
+    };
+    let step = *step;
+    let mut next = index;
+    let mut values = Vec::with_capacity(64);
+    while values.len() < 64 && next < limit {
+      values.push(Some(Value::Number(next)));
+      next += step;
+    }
+    let new_length = elements
+      .borrow()
+      .len()
+      .checked_add(values.len())
+      .filter(|length| *length <= u32::MAX as usize);
+    let Some(new_length) = new_length else {
+      return Ok(false);
+    };
+    elements.borrow_mut().extend(values);
+    let index_register = decode_rd(words[0]) as usize;
+    let limit_register = decode_rd(words[1]) as usize;
+    let step_register = decode_rd(words[19]) as usize;
+    let receiver = Value::Array(Rc::clone(&elements), Rc::clone(&properties));
+    self.bump_object_generation(&receiver);
+    ensure_slot(&mut self.execution.active.locals, increment_temporary_slot);
+    *self.execution.active.locals[increment_temporary_slot].borrow_mut() = Value::Number(next);
+    *self.execution.active.locals[index_slot].borrow_mut() = Value::Number(next);
+    registers[index_register] = Value::Number(next);
+    registers[limit_register] = Value::Number(limit);
+    registers[0] = Value::Number(usize_to_f64(new_length));
+    registers[step_register] = Value::Number(step);
+    self.execution.active.ip = if next < limit { ip } else { ip + 27 };
+    Ok(true)
+  }
+
+  fn try_numeric_property_loop_sequence(
+    &mut self,
+    registers: &mut [Value; 16],
+  ) -> Result<bool, RuntimeError> {
+    let ip = self.execution.active.ip;
+    let Some(words) = self.execution.active.chunk.code.get(ip..ip + 24) else {
+      return Ok(false);
+    };
+    let index_slot = decode_risc_aux16(words[0]) as usize;
+    let accumulator_slot = decode_risc_aux16(words[3]) as usize;
+    let object_slot = decode_risc_aux16(words[4]) as usize;
+    let temporary_slot = decode_risc_aux16(words[8]) as usize;
+    let (condition, left, right, exit_offset) = decode_compare_jump(words[2]);
+    if condition != 2
+      || left != decode_rd(words[0])
+      || right != decode_rd(words[1])
+      || exit_offset <= 0
+      || decode_rd(words[6]) != decode_rd(words[4])
+      || decode_rs(words[6]) != decode_rd(words[5])
+      || decode_risc_aux16(words[9]) as usize != accumulator_slot
+      || decode_risc_aux16(words[10]) as usize != temporary_slot
+      || decode_risc_aux16(words[11]) as usize != accumulator_slot
+      || decode_risc_aux16(words[13]) as usize != index_slot
+      || decode_risc_aux16(words[19]) as usize != temporary_slot
+      || decode_risc_aux16(words[20]) as usize != index_slot
+      || decode_risc_aux16(words[21]) as usize != temporary_slot
+      || decode_risc_aux16(words[22]) as usize != index_slot
+      || self.execution.active.arguments.object.is_some()
+      || self
+        .execution
+        .active
+        .lexical_env
+        .borrow()
+        .has_object_environment()
+      || self
+        .execution
+        .active
+        .locals
+        .get(index_slot)
+        .is_some_and(|cell| Rc::strong_count(cell) != 1)
+      || [index_slot, accumulator_slot, temporary_slot]
+        .into_iter()
+        .any(|slot| {
+          self
+            .execution
+            .active
+            .slots
+            .as_ref()
+            .and_then(|slots| slots.immutable.get(slot))
+            .copied()
+            .unwrap_or(false)
+        })
+    {
+      return Ok(false);
+    }
+    let number = |slot: usize| {
+      self
+        .execution
+        .active
+        .locals
+        .get(slot)
+        .and_then(|cell| match *cell.borrow() {
+          Value::Number(value) => Some(value),
+          _ => None,
+        })
+    };
+    let Some(index) = number(index_slot) else {
+      return Ok(false);
+    };
+    let Some(accumulator) = number(accumulator_slot) else {
+      return Ok(false);
+    };
+    let object = self
+      .execution
+      .active
+      .locals
+      .get(object_slot)
+      .and_then(|cell| match &*cell.borrow() {
+        Value::Object(object) => Some(Rc::clone(object)),
+        _ => None,
+      });
+    let Some(object) = object else {
+      return Ok(false);
+    };
+    let Some(crate::bytecode::Constant::Number(limit)) = self
+      .execution
+      .active
+      .chunk
+      .constants
+      .get(decode_risc_aux16(words[1]) as usize)
+    else {
+      return Ok(false);
+    };
+    if index >= *limit {
+      self.execution.active.ip = ip + 24;
+      return Ok(true);
+    }
+    let Some(crate::bytecode::Constant::String(key)) = self
+      .execution
+      .active
+      .chunk
+      .constants
+      .get(decode_risc_aux16(words[5]) as usize)
+    else {
+      return Ok(false);
+    };
+    let property = {
+      let object = object.borrow();
+      match object
+        .properties
+        .get(&PropertyKey::String(key.clone()))
+      {
+        Some(PropertyDescriptor::Data {
+          value: Value::Number(value),
+          ..
+        }) => Some(*value),
+        _ => None,
+      }
+    };
+    let Some(property) = property else {
+      return Ok(false);
+    };
+    let Some(crate::bytecode::Constant::Number(step)) = self
+      .execution
+      .active
+      .chunk
+      .constants
+      .get(decode_risc_aux16(words[16]) as usize)
+    else {
+      return Ok(false);
+    };
+    let mut next = index;
+    let mut sum = accumulator;
+    let mut iterations = 0;
+    while iterations < 64 && next < *limit {
+      sum += property;
+      next += *step;
+      iterations += 1;
+    }
+    ensure_slot(&mut self.execution.active.locals, temporary_slot);
+    *self.execution.active.locals[temporary_slot].borrow_mut() = Value::Number(next);
+    *self.execution.active.locals[accumulator_slot].borrow_mut() = Value::Number(sum);
+    *self.execution.active.locals[index_slot].borrow_mut() = Value::Number(next);
+    registers[decode_rd(words[0]) as usize] = Value::Number(next);
+    registers[decode_rd(words[1]) as usize] = Value::Number(*limit);
+    registers[decode_rd(words[3]) as usize] = Value::Number(sum);
+    registers[decode_rd(words[16]) as usize] = Value::Number(*step);
+    self.execution.active.ip = if next < *limit { ip } else { ip + 24 };
+    Ok(true)
   }
 
   fn try_numeric_loop_sequence(
@@ -1482,6 +2105,24 @@ impl Vm {
         .lexical_env
         .borrow()
         .has_object_environment()
+      || self
+        .execution
+        .active
+        .locals
+        .get(index_slot)
+        .is_some_and(|cell| Rc::strong_count(cell) != 1)
+      || [index_slot, accumulator_slot, temporary_slot]
+        .into_iter()
+        .any(|slot| {
+          self
+            .execution
+            .active
+            .slots
+            .as_ref()
+            .and_then(|slots| slots.immutable.get(slot))
+            .copied()
+            .unwrap_or(false)
+        })
     {
       return Ok(false);
     }
@@ -1524,16 +2165,26 @@ impl Vm {
     else {
       return Ok(false);
     };
-    let sum = accumulator + index;
-    let next = index + *step;
+    // This loop body has no calls, allocations, observable property accesses,
+    // or object environments. Execute a small batch before returning to the
+    // dispatch/GC boundary, preserving exact left-to-right f64 operations.
+    let mut next = index;
+    let mut sum = accumulator;
+    let mut iterations = 0;
+    while iterations < 64 && next < *limit {
+      sum += next;
+      next += *step;
+      iterations += 1;
+    }
     ensure_slot(&mut self.execution.active.locals, temporary_slot);
-    *self.execution.active.locals[temporary_slot].borrow_mut() = Value::Number(sum);
-    *self.execution.active.locals[accumulator_slot].borrow_mut() = Value::Number(sum);
     *self.execution.active.locals[temporary_slot].borrow_mut() = Value::Number(next);
+    *self.execution.active.locals[accumulator_slot].borrow_mut() = Value::Number(sum);
     *self.execution.active.locals[index_slot].borrow_mut() = Value::Number(next);
-    registers[decode_rd(words[0]) as usize] = Value::Number(index);
+    registers[decode_rd(words[0]) as usize] = Value::Number(next);
+    registers[decode_rd(words[1]) as usize] = Value::Number(*limit);
     registers[decode_rd(words[3]) as usize] = Value::Number(sum);
-    self.execution.active.ip = ip;
+    registers[decode_rd(words[14]) as usize] = Value::Number(*step);
+    self.execution.active.ip = if next < *limit { ip } else { ip + 22 };
     Ok(true)
   }
 
@@ -2416,6 +3067,61 @@ fn build_quickened_sites(code: &[u32]) -> Vec<QuickenedKind> {
       && decode_rd(words[3]) == decode_rd(words[0])
   }
 
+  const ARRAY_PUSH_LOOP: &[Op] = &[
+    Op::LoadLocal,
+    Op::Const,
+    Op::CompareJump,
+    Op::LoadLocal,
+    Op::StoreLocal,
+    Op::LoadLocal,
+    Op::LoadLocal,
+    Op::Const,
+    Op::GetProperty,
+    Op::LoadLocal,
+    Op::Move,
+    Op::Move,
+    Op::Move,
+    Op::CallBuiltin,
+    Op::Move,
+    Op::CloneLocalCell,
+    Op::LoadLocal,
+    Op::Neg,
+    Op::Neg,
+    Op::Const,
+    Op::Move,
+    Op::Add,
+    Op::StoreLocal,
+    Op::LoadLocal,
+    Op::LoadLocal,
+    Op::StoreLocal,
+    Op::Jump,
+  ];
+  const PROPERTY_LOOP: &[Op] = &[
+    Op::LoadLocal,
+    Op::Const,
+    Op::CompareJump,
+    Op::LoadLocal,
+    Op::LoadLocal,
+    Op::Const,
+    Op::GetProperty,
+    Op::Add,
+    Op::StoreLocal,
+    Op::LoadLocal,
+    Op::LoadLocal,
+    Op::StoreLocal,
+    Op::CloneLocalCell,
+    Op::LoadLocal,
+    Op::Neg,
+    Op::Neg,
+    Op::Const,
+    Op::Move,
+    Op::Add,
+    Op::StoreLocal,
+    Op::LoadLocal,
+    Op::LoadLocal,
+    Op::StoreLocal,
+    Op::Jump,
+  ];
   const LOOP: &[Op] = &[
     Op::LoadLocal,
     Op::Const,
@@ -2482,7 +3188,11 @@ fn build_quickened_sites(code: &[u32]) -> Vec<QuickenedKind> {
 
   (0..code.len())
     .map(|ip| {
-      if matches_ops(code, ip, LOOP) {
+      if matches_ops(code, ip, ARRAY_PUSH_LOOP) {
+        QuickenedKind::DenseArrayPushLoop
+      } else if matches_ops(code, ip, PROPERTY_LOOP) {
+        QuickenedKind::NumericPropertyLoop
+      } else if matches_ops(code, ip, LOOP) {
         QuickenedKind::NumericLoop
       } else if is_numeric_compare(code, ip, COMPARE) {
         QuickenedKind::NumericCompareBranch

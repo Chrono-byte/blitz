@@ -16,6 +16,12 @@ pub(crate) struct JitFrame {
   pub(crate) registers: *mut Value,
   pub(crate) register_count: usize,
   pub(crate) result: *mut Value,
+  /// Prepared call arguments. Direct entry uses these before VM local cells exist.
+  pub(crate) arguments: *const Value,
+  pub(crate) argument_count: usize,
+  /// Opaque pointer to the VM-owned `Vec<SharedValue>` for helper-only access.
+  pub(crate) locals: *mut std::ffi::c_void,
+  pub(crate) local_count: usize,
 }
 
 pub(crate) type JitExitCode = u32;
@@ -23,11 +29,37 @@ pub(crate) const JIT_EXIT_RETURN: JitExitCode = 0;
 pub(crate) const JIT_EXIT_INTERPRETER: JitExitCode = 1;
 pub(crate) const JIT_EXIT_EXCEPTION: JitExitCode = 2;
 pub(crate) const JIT_EXIT_INVALIDATED: JitExitCode = 3;
+pub(crate) const JIT_EXIT_NEXT_BLOCK: JitExitCode = 4;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum JitExit {
+  Return,
+  ResumeInterpreter,
+  Exception,
+  Invalidated,
+  NextBlock,
+}
+
+pub(crate) fn decode_exit(code: JitExitCode) -> Result<JitExit, String> {
+  match code {
+    JIT_EXIT_RETURN => Ok(JitExit::Return),
+    JIT_EXIT_INTERPRETER => Ok(JitExit::ResumeInterpreter),
+    JIT_EXIT_EXCEPTION => Ok(JitExit::Exception),
+    JIT_EXIT_INVALIDATED => Ok(JitExit::Invalidated),
+    JIT_EXIT_NEXT_BLOCK => Ok(JitExit::NextBlock),
+    _ => Err(format!("invalid baseline JIT exit code {code}")),
+  }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RuntimeHelperId {
   SetNumberResult,
-  ResumeNumber,
+  MaterializeNumberRegister,
+  SetResumePc,
+  SetNextBlock,
+  SetResultFromRegister,
+  SelectConditionalBlock,
+  SetResultFromLocal,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -47,21 +79,101 @@ pub(crate) unsafe extern "C" fn denko_jit_set_number_result(
 }
 
 #[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn denko_jit_resume_number(
+pub(crate) unsafe extern "C" fn denko_jit_materialize_number_register(
   frame: *mut JitFrame,
   register: u32,
-  vm_pc: u32,
   value: f64,
-) -> JitExitCode {
+) {
   // SAFETY: generated code passes a valid frame and a checked register index.
+  unsafe {
+    if register as usize >= (*frame).register_count {
+      return;
+    }
+    *(*frame).registers.add(register as usize) = Value::Number(value);
+  }
+}
+
+#[unsafe(no_mangle)]
+pub(crate) unsafe extern "C" fn denko_jit_set_resume_pc(
+  frame: *mut JitFrame,
+  vm_pc: u32,
+) -> JitExitCode {
+  // SAFETY: generated code passes a valid frame for the duration of the call.
+  unsafe { (*frame).vm_pc = vm_pc as usize };
+  JIT_EXIT_INTERPRETER
+}
+
+#[unsafe(no_mangle)]
+pub(crate) unsafe extern "C" fn denko_jit_set_result_from_local(
+  frame: *mut JitFrame,
+  slot: u32,
+) -> JitExitCode {
+  unsafe {
+    if !(*frame).locals.is_null() && (slot as usize) < (*frame).local_count {
+      let locals = &*((*frame)
+        .locals
+        .cast::<Vec<crate::value::SharedValue>>());
+      *(*frame).result = locals[slot as usize].borrow().clone();
+      return JIT_EXIT_RETURN;
+    }
+    if (*frame).arguments.is_null() || slot as usize >= (*frame).argument_count {
+      return JIT_EXIT_EXCEPTION;
+    }
+    *(*frame).result = (*(*frame).arguments.add(slot as usize)).clone();
+  }
+  JIT_EXIT_RETURN
+}
+
+#[unsafe(no_mangle)]
+pub(crate) unsafe extern "C" fn denko_jit_select_conditional_block(
+  frame: *mut JitFrame,
+  register: u32,
+  condition: u32,
+  taken_pc: u32,
+  fallthrough_pc: u32,
+) -> JitExitCode {
   unsafe {
     if register as usize >= (*frame).register_count {
       return JIT_EXIT_EXCEPTION;
     }
-    *(*frame).registers.add(register as usize) = Value::Number(value);
-    (*frame).vm_pc = vm_pc as usize;
+    let value = &*(*frame).registers.add(register as usize);
+    let take = match condition {
+      0 => !value.is_truthy(),
+      1 => value.is_truthy(),
+      2 => matches!(value, Value::Null | Value::Undefined),
+      _ => return JIT_EXIT_EXCEPTION,
+    };
+    (*frame).vm_pc = if take { taken_pc } else { fallthrough_pc } as usize;
   }
-  JIT_EXIT_INTERPRETER
+  JIT_EXIT_NEXT_BLOCK
+}
+
+#[unsafe(no_mangle)]
+pub(crate) unsafe extern "C" fn denko_jit_set_result_from_register(
+  frame: *mut JitFrame,
+  register: u32,
+) -> JitExitCode {
+  unsafe {
+    if register as usize >= (*frame).register_count {
+      return JIT_EXIT_EXCEPTION;
+    }
+    *(*frame).result = (*(*frame).registers.add(register as usize)).clone();
+  }
+  JIT_EXIT_RETURN
+}
+
+#[unsafe(no_mangle)]
+pub(crate) unsafe extern "C" fn denko_jit_set_next_block(
+  frame: *mut JitFrame,
+  vm_pc: u32,
+) -> JitExitCode {
+  unsafe { (*frame).vm_pc = vm_pc as usize };
+  JIT_EXIT_NEXT_BLOCK
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct PatchSite {
+  offset: u32,
 }
 
 #[derive(Debug)]
@@ -71,6 +183,65 @@ pub(crate) struct NativeCode {
 }
 
 impl NativeCode {
+  pub(crate) fn entry_address(&self) -> *const u8 {
+    self.ptr.as_ptr()
+  }
+
+  #[cfg(all(unix, target_arch = "x86_64"))]
+  pub(crate) fn patchable_jump() -> Result<(Self, PatchSite), String> {
+    // movabs rax, target; jmp rax
+    let mut bytes = vec![0x48, 0xB8];
+    let site = PatchSite {
+      offset: bytes.len() as u32,
+    };
+    bytes.extend_from_slice(&[0; 8]);
+    bytes.extend_from_slice(&[0xFF, 0xE0]);
+    Ok((Self::from_bytes(&bytes, &[])?, site))
+  }
+
+  #[cfg(all(unix, target_arch = "x86_64"))]
+  pub(crate) fn patch_jump(
+    &mut self,
+    site: PatchSite,
+    target: *const u8,
+  ) -> Result<(), String> {
+    let start = site.offset as usize;
+    if start
+      .checked_add(8)
+      .is_none_or(|end| end > self.len)
+    {
+      return Err("native jump patch is out of bounds".to_string());
+    }
+    if unsafe {
+      libc::mprotect(
+        self.ptr.as_ptr().cast(),
+        self.len,
+        libc::PROT_READ | libc::PROT_WRITE,
+      )
+    } != 0
+    {
+      return Err(std::io::Error::last_os_error().to_string());
+    }
+    unsafe {
+      std::ptr::copy_nonoverlapping(
+        (target as usize as u64).to_le_bytes().as_ptr(),
+        self.ptr.as_ptr().add(start),
+        8,
+      );
+    }
+    if unsafe {
+      libc::mprotect(
+        self.ptr.as_ptr().cast(),
+        self.len,
+        libc::PROT_READ | libc::PROT_EXEC,
+      )
+    } != 0
+    {
+      return Err(std::io::Error::last_os_error().to_string());
+    }
+    Ok(())
+  }
+
   #[cfg(all(unix, target_arch = "x86_64"))]
   pub(crate) fn return_number(value: f64) -> Result<Self, String> {
     // SysV entry has rsp % 16 == 8. Subtracting eight aligns the helper call.
@@ -106,26 +277,133 @@ impl NativeCode {
   }
 
   #[cfg(all(unix, target_arch = "x86_64"))]
-  pub(crate) fn resume_number(
-    register: u32,
+  pub(crate) fn resume_numbers(
+    values: &[(u32, f64)],
     vm_pc: u32,
-    value: f64,
   ) -> Result<Self, String> {
-    let mut bytes = vec![0x48, 0x83, 0xEC, 0x08, 0xBE];
-    bytes.extend_from_slice(&register.to_le_bytes());
-    bytes.push(0xBA);
+    Self::materialize_numbers(values, vm_pc, RuntimeHelperId::SetResumePc)
+  }
+
+  #[cfg(all(unix, target_arch = "x86_64"))]
+  pub(crate) fn next_block_numbers(
+    values: &[(u32, f64)],
+    vm_pc: u32,
+  ) -> Result<Self, String> {
+    Self::materialize_numbers(values, vm_pc, RuntimeHelperId::SetNextBlock)
+  }
+
+  #[cfg(all(unix, target_arch = "x86_64"))]
+  fn materialize_numbers(
+    values: &[(u32, f64)],
+    vm_pc: u32,
+    exit_helper: RuntimeHelperId,
+  ) -> Result<Self, String> {
+    // Preserve the frame pointer in callee-saved r12. `push r12` also aligns
+    // the SysV stack before every helper call.
+    let mut bytes = vec![0x41, 0x54, 0x49, 0x89, 0xFC];
+    let mut relocations = Vec::with_capacity(values.len() + 1);
+    for (register, value) in values {
+      bytes.extend_from_slice(&[0x4C, 0x89, 0xE7, 0xBE]);
+      bytes.extend_from_slice(&register.to_le_bytes());
+      bytes.extend_from_slice(&[0x48, 0xB8]);
+      bytes.extend_from_slice(&value.to_bits().to_le_bytes());
+      bytes.extend_from_slice(&[0x66, 0x48, 0x0F, 0x6E, 0xC0, 0x48, 0xB8]);
+      let offset = bytes.len() as u32;
+      bytes.extend_from_slice(&[0; 8]);
+      bytes.extend_from_slice(&[0xFF, 0xD0]);
+      relocations.push(Relocation {
+        offset,
+        helper: RuntimeHelperId::MaterializeNumberRegister,
+      });
+    }
+    bytes.extend_from_slice(&[0x4C, 0x89, 0xE7, 0xBE]);
     bytes.extend_from_slice(&vm_pc.to_le_bytes());
     bytes.extend_from_slice(&[0x48, 0xB8]);
-    bytes.extend_from_slice(&value.to_bits().to_le_bytes());
-    bytes.extend_from_slice(&[0x66, 0x48, 0x0F, 0x6E, 0xC0, 0x48, 0xB8]);
-    let relocation_offset = bytes.len() as u32;
+    let offset = bytes.len() as u32;
+    bytes.extend_from_slice(&[0; 8]);
+    bytes.extend_from_slice(&[0xFF, 0xD0, 0x41, 0x5C, 0xC3]);
+    relocations.push(Relocation {
+      offset,
+      helper: exit_helper,
+    });
+    Self::from_bytes(&bytes, &relocations)
+  }
+
+  #[cfg(all(unix, target_arch = "x86_64"))]
+  pub(crate) fn return_local(slot: u32) -> Result<Self, String> {
+    let mut bytes = vec![0x48, 0x83, 0xEC, 0x08, 0xBE];
+    bytes.extend_from_slice(&slot.to_le_bytes());
+    bytes.extend_from_slice(&[0x48, 0xB8]);
+    let offset = bytes.len() as u32;
     bytes.extend_from_slice(&[0; 8]);
     bytes.extend_from_slice(&[0xFF, 0xD0, 0x48, 0x83, 0xC4, 0x08, 0xC3]);
     Self::from_bytes(
       &bytes,
       &[Relocation {
-        offset: relocation_offset,
-        helper: RuntimeHelperId::ResumeNumber,
+        offset,
+        helper: RuntimeHelperId::SetResultFromLocal,
+      }],
+    )
+  }
+
+  #[cfg(all(unix, target_arch = "x86_64"))]
+  pub(crate) fn conditional_next_block(
+    register: u32,
+    condition: u32,
+    taken_pc: u32,
+    fallthrough_pc: u32,
+  ) -> Result<Self, String> {
+    let mut bytes = vec![0x48, 0x83, 0xEC, 0x08, 0xBE];
+    bytes.extend_from_slice(&register.to_le_bytes());
+    bytes.push(0xBA);
+    bytes.extend_from_slice(&condition.to_le_bytes());
+    bytes.push(0xB9);
+    bytes.extend_from_slice(&taken_pc.to_le_bytes());
+    bytes.extend_from_slice(&[0x41, 0xB8]);
+    bytes.extend_from_slice(&fallthrough_pc.to_le_bytes());
+    bytes.extend_from_slice(&[0x48, 0xB8]);
+    let offset = bytes.len() as u32;
+    bytes.extend_from_slice(&[0; 8]);
+    bytes.extend_from_slice(&[0xFF, 0xD0, 0x48, 0x83, 0xC4, 0x08, 0xC3]);
+    Self::from_bytes(
+      &bytes,
+      &[Relocation {
+        offset,
+        helper: RuntimeHelperId::SelectConditionalBlock,
+      }],
+    )
+  }
+
+  #[cfg(all(unix, target_arch = "x86_64"))]
+  pub(crate) fn return_register(register: u32) -> Result<Self, String> {
+    let mut bytes = vec![0x48, 0x83, 0xEC, 0x08, 0xBE];
+    bytes.extend_from_slice(&register.to_le_bytes());
+    bytes.extend_from_slice(&[0x48, 0xB8]);
+    let offset = bytes.len() as u32;
+    bytes.extend_from_slice(&[0; 8]);
+    bytes.extend_from_slice(&[0xFF, 0xD0, 0x48, 0x83, 0xC4, 0x08, 0xC3]);
+    Self::from_bytes(
+      &bytes,
+      &[Relocation {
+        offset,
+        helper: RuntimeHelperId::SetResultFromRegister,
+      }],
+    )
+  }
+
+  #[cfg(all(unix, target_arch = "x86_64"))]
+  pub(crate) fn next_block(vm_pc: u32) -> Result<Self, String> {
+    let mut bytes = vec![0x48, 0x83, 0xEC, 0x08, 0xBE];
+    bytes.extend_from_slice(&vm_pc.to_le_bytes());
+    bytes.extend_from_slice(&[0x48, 0xB8]);
+    let offset = bytes.len() as u32;
+    bytes.extend_from_slice(&[0; 8]);
+    bytes.extend_from_slice(&[0xFF, 0xD0, 0x48, 0x83, 0xC4, 0x08, 0xC3]);
+    Self::from_bytes(
+      &bytes,
+      &[Relocation {
+        offset,
+        helper: RuntimeHelperId::SetNextBlock,
       }],
     )
   }
@@ -139,7 +417,20 @@ impl NativeCode {
     for relocation in relocations {
       let address = match relocation.helper {
         RuntimeHelperId::SetNumberResult => denko_jit_set_number_result as *const () as usize,
-        RuntimeHelperId::ResumeNumber => denko_jit_resume_number as *const () as usize,
+        RuntimeHelperId::MaterializeNumberRegister => {
+          denko_jit_materialize_number_register as *const () as usize
+        }
+        RuntimeHelperId::SetResumePc => denko_jit_set_resume_pc as *const () as usize,
+        RuntimeHelperId::SetNextBlock => denko_jit_set_next_block as *const () as usize,
+        RuntimeHelperId::SetResultFromRegister => {
+          denko_jit_set_result_from_register as *const () as usize
+        }
+        RuntimeHelperId::SelectConditionalBlock => {
+          denko_jit_select_conditional_block as *const () as usize
+        }
+        RuntimeHelperId::SetResultFromLocal => {
+          denko_jit_set_result_from_local as *const () as usize
+        }
       } as u64;
       let start = relocation.offset as usize;
       bytes
@@ -217,11 +508,66 @@ mod tests {
   use crate::value::Value;
 
   #[test]
+  fn patches_a_direct_jump_between_native_blocks() {
+    let target = NativeCode::return_u64(42).expect("target block");
+    let (mut source, site) = NativeCode::patchable_jump().expect("source block");
+    source
+      .patch_jump(site, target.entry_address())
+      .expect("link blocks");
+    // SAFETY: source is linked to a live target with the same function ABI.
+    assert_eq!(unsafe { source.call_u64() }, 42);
+  }
+
+  #[test]
   fn emits_and_executes_return_constant() {
     let code = NativeCode::return_u64(42).expect("native allocation");
     // SAFETY: the code object owns executable memory containing a valid
     // x86-64 function until it is dropped after this call.
     assert_eq!(unsafe { code.call_u64() }, 42);
+  }
+
+  #[test]
+  fn returns_a_vm_owned_local_through_the_opaque_frame_boundary() {
+    let code = NativeCode::return_local(0).expect("native allocation");
+    let mut locals = vec![std::rc::Rc::new(std::cell::RefCell::new(Value::Number(
+      17.0,
+    )))];
+    let mut result = Value::Undefined;
+    let mut frame = JitFrame {
+      vm: std::ptr::null_mut(),
+      function_id: 0,
+      vm_pc: 0,
+      registers: std::ptr::null_mut(),
+      register_count: 0,
+      result: &mut result,
+      arguments: std::ptr::null(),
+      argument_count: 0,
+      locals: (&mut locals as *mut Vec<crate::value::SharedValue>).cast(),
+      local_count: 1,
+    };
+    assert_eq!(unsafe { code.call_frame(&mut frame) }, JIT_EXIT_RETURN);
+    assert!(matches!(result, Value::Number(value) if value == 17.0));
+  }
+
+  #[test]
+  fn returns_a_prepared_argument_before_local_cells_exist() {
+    let code = NativeCode::return_local(0).expect("native allocation");
+    let arguments = [Value::Number(23.0)];
+    let mut result = Value::Undefined;
+    let mut frame = JitFrame {
+      vm: std::ptr::null_mut(),
+      function_id: 0,
+      vm_pc: 0,
+      registers: std::ptr::null_mut(),
+      register_count: 0,
+      result: &mut result,
+      arguments: arguments.as_ptr(),
+      argument_count: arguments.len(),
+      locals: std::ptr::null_mut(),
+      local_count: 0,
+    };
+    assert_eq!(unsafe { code.call_frame(&mut frame) }, JIT_EXIT_RETURN);
+    assert!(matches!(result, Value::Number(value) if value == 23.0));
   }
 
   #[test]
@@ -235,6 +581,10 @@ mod tests {
       registers: std::ptr::null_mut(),
       register_count: 0,
       result: &mut result,
+      arguments: std::ptr::null(),
+      argument_count: 0,
+      locals: std::ptr::null_mut(),
+      local_count: 0,
     };
     // SAFETY: the frame points to live Rust-owned result storage and the code
     // was emitted by return_number for this exact ABI.
