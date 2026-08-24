@@ -27,7 +27,7 @@
 //! // vm.run(chunk)?;
 //! ```
 
-use crate::bytecode::{Chunk, OP_COUNT};
+use crate::bytecode::{Chunk, FunctionProto, OP_COUNT};
 use crate::environment::EnvironmentRecord;
 use crate::gc;
 use crate::module::ModuleLoader;
@@ -256,6 +256,7 @@ pub(super) enum QuickenedKind {
   NumericIncrement,
   NumericAddLocal,
   NumericLoop,
+  NumericCallLoop,
   NumericPropertyLoop,
   DenseArrayPushLoop,
 }
@@ -263,6 +264,13 @@ pub(super) enum QuickenedKind {
 pub(super) struct QuickenedPlan {
   pub(super) _chunk: Arc<Chunk>,
   pub(super) sites: Arc<[QuickenedKind]>,
+  pub(super) direct_calls: Rc<RefCell<Vec<Option<DirectCallSite>>>>,
+}
+
+#[derive(Clone)]
+pub(super) struct DirectCallSite {
+  pub(super) expected_proto: Rc<FunctionProto>,
+  pub(super) target: crate::vm::jit::DirectCallTarget,
 }
 
 pub(super) struct CacheState {
@@ -273,6 +281,7 @@ pub(super) struct CacheState {
   pub(super) quickened: HashMap<usize, QuickenedPlan>,
   pub(super) active_quickened_chunk: usize,
   pub(super) active_quickened_sites: Arc<[QuickenedKind]>,
+  pub(super) active_direct_calls: Rc<RefCell<Vec<Option<DirectCallSite>>>>,
 }
 
 pub(super) struct ProfilingState {

@@ -24,6 +24,25 @@ pub(crate) struct JitFrame {
   pub(crate) local_count: usize,
 }
 
+/// Frame for leaf calls that cannot resume in the interpreter.
+#[repr(C)]
+pub(crate) struct DirectCallFrame {
+  pub(crate) result: *mut Value,
+  pub(crate) arguments: *const Value,
+  pub(crate) argument_count: usize,
+}
+
+/// Unboxed state for an allocation-free numeric call-loop batch.
+#[repr(C)]
+pub(crate) struct NumericCallLoopFrame {
+  pub(crate) index: f64,
+  pub(crate) limit: f64,
+  pub(crate) accumulator: f64,
+  pub(crate) step: f64,
+  pub(crate) leaf_value: f64,
+  pub(crate) iterations: u32,
+}
+
 pub(crate) type JitExitCode = u32;
 pub(crate) const JIT_EXIT_RETURN: JitExitCode = 0;
 pub(crate) const JIT_EXIT_INTERPRETER: JitExitCode = 1;
@@ -60,6 +79,8 @@ pub(crate) enum RuntimeHelperId {
   SetResultFromRegister,
   SelectConditionalBlock,
   SetResultFromLocal,
+  SetDirectNumberResult,
+  SetDirectArgumentResult,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -76,6 +97,30 @@ pub(crate) unsafe extern "C" fn denko_jit_set_number_result(
   // SAFETY: generated code receives a frame whose result points to VM-owned
   // Value storage for the duration of the call.
   unsafe { *(*frame).result = Value::Number(value) };
+}
+
+#[unsafe(no_mangle)]
+pub(crate) unsafe extern "C" fn denko_jit_set_direct_number_result(
+  frame: *mut DirectCallFrame,
+  value: f64,
+) -> JitExitCode {
+  unsafe { *(*frame).result = Value::Number(value) };
+  JIT_EXIT_RETURN
+}
+
+#[unsafe(no_mangle)]
+pub(crate) unsafe extern "C" fn denko_jit_set_direct_argument_result(
+  frame: *mut DirectCallFrame,
+  slot: u32,
+) -> JitExitCode {
+  unsafe {
+    *(*frame).result = if (*frame).arguments.is_null() || slot as usize >= (*frame).argument_count {
+      Value::Undefined
+    } else {
+      (*(*frame).arguments.add(slot as usize)).clone()
+    };
+  }
+  JIT_EXIT_RETURN
 }
 
 #[unsafe(no_mangle)]
@@ -263,6 +308,85 @@ impl NativeCode {
   }
 
   #[cfg(all(unix, target_arch = "x86_64"))]
+  pub(crate) fn direct_return_number(value: f64) -> Result<Self, String> {
+    let mut bytes = vec![0x48, 0x83, 0xEC, 0x08, 0x48, 0xB8];
+    bytes.extend_from_slice(&value.to_bits().to_le_bytes());
+    bytes.extend_from_slice(&[0x66, 0x48, 0x0F, 0x6E, 0xC0, 0x48, 0xB8]);
+    let offset = bytes.len() as u32;
+    bytes.extend_from_slice(&[0; 8]);
+    bytes.extend_from_slice(&[0xFF, 0xD0, 0x48, 0x83, 0xC4, 0x08, 0xC3]);
+    Self::from_bytes(
+      &bytes,
+      &[Relocation {
+        offset,
+        helper: RuntimeHelperId::SetDirectNumberResult,
+      }],
+    )
+  }
+
+  #[cfg(all(unix, target_arch = "x86_64"))]
+  pub(crate) fn direct_return_argument(slot: u32) -> Result<Self, String> {
+    let mut bytes = vec![0x48, 0x83, 0xEC, 0x08, 0xBE];
+    bytes.extend_from_slice(&slot.to_le_bytes());
+    bytes.extend_from_slice(&[0x48, 0xB8]);
+    let offset = bytes.len() as u32;
+    bytes.extend_from_slice(&[0; 8]);
+    bytes.extend_from_slice(&[0xFF, 0xD0, 0x48, 0x83, 0xC4, 0x08, 0xC3]);
+    Self::from_bytes(
+      &bytes,
+      &[Relocation {
+        offset,
+        helper: RuntimeHelperId::SetDirectArgumentResult,
+      }],
+    )
+  }
+
+  #[cfg(all(unix, target_arch = "x86_64"))]
+  pub(crate) fn numeric_call_loop() -> Result<Self, String> {
+    let mut bytes = vec![
+      0xF2, 0x0F, 0x10, 0x07, // movsd xmm0, [rdi]       index
+      0xF2, 0x0F, 0x10, 0x4F, 0x08, // movsd xmm1, [rdi+8]   limit
+      0xF2, 0x0F, 0x10, 0x57, 0x10, // movsd xmm2, [rdi+16]  accumulator
+      0xF2, 0x0F, 0x10, 0x5F, 0x18, // movsd xmm3, [rdi+24]  step
+      0xF2, 0x0F, 0x10, 0x67, 0x20, // movsd xmm4, [rdi+32]  leaf value
+      0x31, 0xC0, // xor eax, eax             iterations
+    ];
+    let loop_start = bytes.len();
+    bytes.extend_from_slice(&[0x66, 0x0F, 0x2E, 0xC1]); // ucomisd xmm0, xmm1
+    bytes.push(0x7A); // jp exit, unordered means index < limit is false
+    let unordered_exit = bytes.len();
+    bytes.push(0);
+    bytes.push(0x73); // jae exit
+    let completed_exit = bytes.len();
+    bytes.push(0);
+    bytes.extend_from_slice(&[
+      0xF2, 0x0F, 0x58, 0xD4, // addsd xmm2, xmm4
+      0xF2, 0x0F, 0x58, 0xC3, // addsd xmm0, xmm3
+      0xFF, 0xC0, // inc eax
+      0x83, 0xF8, 0x40, // cmp eax, 64
+      0x72, // jb loop
+    ]);
+    let backedge = bytes.len();
+    bytes.push(0);
+    let exit = bytes.len();
+    bytes.extend_from_slice(&[
+      0xF2, 0x0F, 0x11, 0x07, // movsd [rdi], xmm0
+      0xF2, 0x0F, 0x11, 0x57, 0x10, // movsd [rdi+16], xmm2
+      0x89, 0x47, 0x28, // mov [rdi+40], eax
+      0xC3,
+    ]);
+    let relative = |from: usize, to: usize| -> Result<u8, String> {
+      i8::try_from(to as isize - (from + 1) as isize)
+        .map(|offset| offset as u8)
+        .map_err(|_| "numeric loop branch is out of range".to_string())
+    };
+    bytes[unordered_exit] = relative(unordered_exit, exit)?;
+    bytes[completed_exit] = relative(completed_exit, exit)?;
+    bytes[backedge] = relative(backedge, loop_start)?;
+    Self::from_bytes(&bytes, &[])
+  }
+
+  #[cfg(all(unix, target_arch = "x86_64"))]
   pub(crate) fn return_u64(value: u64) -> Result<Self, String> {
     // mov rax, imm64; ret
     let mut bytes = [0u8; 11];
@@ -431,6 +555,12 @@ impl NativeCode {
         RuntimeHelperId::SetResultFromLocal => {
           denko_jit_set_result_from_local as *const () as usize
         }
+        RuntimeHelperId::SetDirectNumberResult => {
+          denko_jit_set_direct_number_result as *const () as usize
+        }
+        RuntimeHelperId::SetDirectArgumentResult => {
+          denko_jit_set_direct_argument_result as *const () as usize
+        }
       } as u64;
       let start = relocation.offset as usize;
       bytes
@@ -485,6 +615,26 @@ impl NativeCode {
   }
 
   #[cfg(all(unix, target_arch = "x86_64"))]
+  pub(crate) unsafe fn call_direct_frame(
+    &self,
+    frame: *mut DirectCallFrame,
+  ) -> JitExitCode {
+    let entry: unsafe extern "C" fn(*mut DirectCallFrame) -> JitExitCode =
+      unsafe { std::mem::transmute(self.ptr.as_ptr()) };
+    unsafe { entry(frame) }
+  }
+
+  #[cfg(all(unix, target_arch = "x86_64"))]
+  pub(crate) unsafe fn call_numeric_loop_frame(
+    &self,
+    frame: *mut NumericCallLoopFrame,
+  ) {
+    let entry: unsafe extern "C" fn(*mut NumericCallLoopFrame) =
+      unsafe { std::mem::transmute(self.ptr.as_ptr()) };
+    unsafe { entry(frame) };
+  }
+
+  #[cfg(all(unix, target_arch = "x86_64"))]
   pub(crate) unsafe fn call_u64(&self) -> u64 {
     // SAFETY: callers must only invoke code produced by return_u64.
     let entry: unsafe extern "C" fn() -> u64 = unsafe { std::mem::transmute(self.ptr.as_ptr()) };
@@ -504,7 +654,7 @@ impl Drop for NativeCode {
 
 #[cfg(all(test, unix, target_arch = "x86_64"))]
 mod tests {
-  use super::{JIT_EXIT_RETURN, JitFrame, NativeCode};
+  use super::{JIT_EXIT_RETURN, JitFrame, NativeCode, NumericCallLoopFrame};
   use crate::value::Value;
 
   #[test]
@@ -590,5 +740,27 @@ mod tests {
     // was emitted by return_number for this exact ABI.
     assert_eq!(unsafe { code.call_frame(&mut frame) }, JIT_EXIT_RETURN);
     assert!(matches!(result, Value::Number(value) if value == 42.0));
+  }
+
+  #[test]
+  fn executes_a_bounded_numeric_call_loop_batch() {
+    let code = NativeCode::numeric_call_loop().expect("native allocation");
+    let mut frame = NumericCallLoopFrame {
+      index: 0.0,
+      limit: 100.0,
+      accumulator: 0.0,
+      step: 1.0,
+      leaf_value: 42.0,
+      iterations: 0,
+    };
+    unsafe { code.call_numeric_loop_frame(&mut frame) };
+    assert_eq!(frame.index, 64.0);
+    assert_eq!(frame.accumulator, 2_688.0);
+    assert_eq!(frame.iterations, 64);
+
+    unsafe { code.call_numeric_loop_frame(&mut frame) };
+    assert_eq!(frame.index, 100.0);
+    assert_eq!(frame.accumulator, 4_200.0);
+    assert_eq!(frame.iterations, 36);
   }
 }

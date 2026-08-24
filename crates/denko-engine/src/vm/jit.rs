@@ -10,7 +10,9 @@ pub(crate) mod native;
 
 use crate::bytecode::{Chunk, Constant, Op};
 use native::NativeCode;
+use std::cell::Cell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 #[derive(Clone, Copy, Debug)]
 enum BaselineOp {
@@ -23,6 +25,46 @@ struct BaselineCompiler<'a> {
 }
 
 impl<'a> BaselineCompiler<'a> {
+  fn compile_direct_leaf(
+    &self,
+    parameter_count: usize,
+  ) -> Result<(NativeCode, DirectLeaf), String> {
+    let Some([load, return_word]) = self.chunk.code.get(..2) else {
+      return Err("direct leaf requires a load and return".to_string());
+    };
+    let load_register = (load >> 8) & 0xf;
+    if (*return_word & 0xff) as u8 != Op::Return as u8
+      || ((*return_word >> 8) & 0xf) != load_register
+    {
+      return Err("direct leaf must return its loaded register".to_string());
+    }
+    if (*load & 0xff) as u8 == Op::Const as u8 {
+      let Constant::Number(value) = self
+        .chunk
+        .constants
+        .get(((load >> 16) & 0xffff) as usize)
+        .ok_or_else(|| "constant index out of bounds".to_string())?
+      else {
+        return Err("direct leaf constants currently support numbers only".to_string());
+      };
+      return Ok((
+        NativeCode::direct_return_number(*value)?,
+        DirectLeaf::Number(*value),
+      ));
+    }
+    if (*load & 0xff) as u8 == Op::LoadLocal as u8 {
+      let slot = ((load >> 16) & 0xffff) as usize;
+      if slot >= parameter_count {
+        return Err("direct leaf local is not a parameter".to_string());
+      }
+      return Ok((
+        NativeCode::direct_return_argument(slot as u32)?,
+        DirectLeaf::Parameter(slot as u16),
+      ));
+    }
+    Err("unsupported direct leaf load".to_string())
+  }
+
   fn compile_const_return(self) -> Result<NativeCode, String> {
     let Some([const_word, return_word]) = self.chunk.code.get(..2) else {
       return Err("baseline expects Const; Return prefix".to_string());
@@ -260,6 +302,8 @@ pub(crate) struct JitStats {
   pub(crate) baseline_entries: u64,
   pub(crate) baseline_returns: u64,
   pub(crate) interpreter_resumes: u64,
+  pub(crate) native_loop_entries: u64,
+  pub(crate) native_loop_iterations: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -391,12 +435,57 @@ pub(crate) struct JitCode {
   pub(crate) pc_map: PcMap,
   pub(crate) preferred_entry: VmPc,
   native_blocks: HashMap<VmPc, NativeBlock>,
+  direct_call: Option<DirectCallTarget>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct DirectCallTarget {
+  code: Rc<NativeCode>,
+  valid: Rc<Cell<bool>>,
+  leaf: DirectLeaf,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum DirectLeaf {
+  Number(f64),
+  Parameter(u16),
+}
+
+impl DirectCallTarget {
+  pub(crate) fn is_valid(&self) -> bool {
+    self.valid.get()
+  }
+
+  pub(crate) fn leaf(&self) -> DirectLeaf {
+    self.leaf
+  }
+
+  pub(crate) fn call(
+    &self,
+    arguments: &[Value],
+  ) -> Result<Value, String> {
+    if !self.is_valid() {
+      return Err("direct call target was invalidated".to_string());
+    }
+    let mut result = Value::Undefined;
+    let mut frame = native::DirectCallFrame {
+      result: &mut result,
+      arguments: arguments.as_ptr(),
+      argument_count: arguments.len(),
+    };
+    let exit = unsafe { self.code.call_direct_frame(&mut frame) };
+    if native::decode_exit(exit)? != native::JitExit::Return {
+      return Err("direct leaf returned a non-return exit".to_string());
+    }
+    Ok(result)
+  }
 }
 
 #[derive(Default)]
 pub(crate) struct JitRuntime {
   pub(crate) code: HashMap<FunctionId, Vec<JitCode>>,
   next_version: u64,
+  numeric_call_loop: Option<Rc<NativeCode>>,
 }
 
 impl JitRuntime {
@@ -422,6 +511,7 @@ impl JitRuntime {
         pc_map: PcMap::default(),
         preferred_entry: 0,
         native_blocks: HashMap::new(),
+        direct_call: None,
       });
     version
   }
@@ -430,9 +520,18 @@ impl JitRuntime {
     &mut self,
     function: FunctionId,
     chunk: &Chunk,
+    parameter_count: usize,
   ) -> Result<CodeVersionId, String> {
     let blocks = discover_blocks(chunk)?;
     let compiler = BaselineCompiler { chunk };
+    let direct_call = compiler
+      .compile_direct_leaf(parameter_count)
+      .ok()
+      .map(|(code, leaf)| DirectCallTarget {
+        code: Rc::new(code),
+        valid: Rc::new(Cell::new(true)),
+        leaf,
+      });
     let mut native_blocks = HashMap::new();
     for block in &blocks {
       if let Ok(code) = compiler.compile_block(block) {
@@ -472,8 +571,36 @@ impl JitRuntime {
         },
         preferred_entry: 0,
         native_blocks,
+        direct_call,
       });
     Ok(version)
+  }
+
+  pub(crate) fn direct_call_target(
+    &self,
+    function: FunctionId,
+  ) -> Option<DirectCallTarget> {
+    self
+      .code
+      .get(&function)?
+      .iter()
+      .find(|code| code.state == JitCodeState::Valid)
+      .and_then(|code| code.direct_call.clone())
+  }
+
+  pub(crate) fn run_numeric_call_loop(
+    &mut self,
+    frame: &mut native::NumericCallLoopFrame,
+  ) -> Result<(), String> {
+    if self.numeric_call_loop.is_none() {
+      self.numeric_call_loop = Some(Rc::new(NativeCode::numeric_call_loop()?));
+    }
+    let code = self
+      .numeric_call_loop
+      .as_ref()
+      .expect("numeric call-loop code was initialized");
+    unsafe { code.call_numeric_loop_frame(frame) };
+    Ok(())
   }
 
   pub(crate) fn execute(
@@ -548,6 +675,9 @@ impl JitRuntime {
         .find(|code| code.version == version)
     {
       version.state = JitCodeState::Invalidated;
+      if let Some(target) = &version.direct_call {
+        target.valid.set(false);
+      }
     }
   }
 }
@@ -633,7 +763,7 @@ mod tests {
     let function = FunctionId::new(1);
     let mut runtime = JitRuntime::default();
     runtime
-      .install_const_prefix(function, &chunk)
+      .install_const_prefix(function, &chunk, 0)
       .expect("install blocks");
     for (condition, expected) in [(Value::Bool(false), 7.0), (Value::Bool(true), 42.0)] {
       let mut registers: [Value; 16] = std::array::from_fn(|_| Value::Undefined);
@@ -669,7 +799,7 @@ mod tests {
     let function = FunctionId::new(1);
     let mut runtime = JitRuntime::default();
     runtime
-      .install_const_prefix(function, &chunk)
+      .install_const_prefix(function, &chunk, 0)
       .expect("install blocks");
     assert!(runtime.code[&function][0].native_blocks.len() >= 2);
     let mut registers: [Value; 16] = std::array::from_fn(|_| Value::Undefined);
@@ -726,6 +856,7 @@ mod tests {
             },
           ),
         ]),
+        direct_call: None,
       }],
     );
     runtime
@@ -782,6 +913,7 @@ mod tests {
             },
           ),
         ]),
+        direct_call: None,
       }],
     );
     let mut result = Value::Undefined;
@@ -961,6 +1093,7 @@ mod tests {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct FunctionProfile {
   pub(crate) calls: u64,
+  pub(crate) parameter_count: usize,
   pub(crate) loop_counts: HashMap<VmPc, u64>,
   pub(crate) feedback: FeedbackVector,
   pub(crate) baseline: BaselineState,

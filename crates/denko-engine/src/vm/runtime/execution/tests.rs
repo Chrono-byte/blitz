@@ -79,6 +79,16 @@ mod test {
     );
     assert!(vm.profiling.jit_stats.baseline_entries > 0);
     assert!(vm.profiling.jit_stats.baseline_returns > 0);
+    let cached = vm.caches.quickened.values().any(|plan| {
+      plan
+        .direct_calls
+        .borrow()
+        .iter()
+        .any(Option::is_some)
+    });
+    assert!(cached);
+    assert!(vm.profiling.jit_stats.native_loop_entries > 0);
+    assert!(vm.profiling.jit_stats.native_loop_iterations > 0);
   }
 
   #[cfg(all(unix, target_arch = "x86_64"))]
@@ -89,6 +99,54 @@ mod test {
     );
     assert_eq!(vm.get_global("identity_result"), Some(Value::Number(23.0)));
     assert!(vm.profiling.jit_stats.baseline_returns > 0);
+  }
+
+  #[cfg(all(unix, target_arch = "x86_64"))]
+  #[test]
+  fn numeric_identity_call_loop_migrates_to_native_code() {
+    let (vm, _) = run_script(
+      "function identity(value) { return value; } let total = 0; for (let i = 0; i < 1100; i += 1) total += identity(23); globalThis.native_identity_total = total;",
+    );
+    assert_eq!(
+      vm.get_global("native_identity_total"),
+      Some(Value::Number(25_300.0))
+    );
+    assert!(vm.profiling.jit_stats.native_loop_entries > 0);
+    assert!(vm.profiling.jit_stats.native_loop_iterations > 0);
+  }
+
+  #[cfg(all(unix, target_arch = "x86_64"))]
+  #[test]
+  fn native_call_loop_preserves_ordered_addition_across_batch_boundary() {
+    let (vm, _) = run_script(
+      "function tenth() { return 0.1; } let nativeTotal = 0; for (let i = 0; i < 2130; i += 2) nativeTotal += tenth(); let expected = 0; for (let i = 0; i < 2130; i += 2) expected += 0.1; globalThis.native_batch_matches = nativeTotal === expected;",
+    );
+    assert_eq!(
+      vm.get_global("native_batch_matches"),
+      Some(Value::Bool(true))
+    );
+    assert!(vm.profiling.jit_stats.native_loop_iterations >= 65);
+  }
+
+  #[cfg(all(unix, target_arch = "x86_64"))]
+  #[test]
+  fn cached_direct_parameter_return_preserves_missing_argument_semantics() {
+    let (vm, _) = run_script(
+      "function identity(value) { return value; } let result = 1; for (let i = 0; i < 1100; i += 1) result = identity(); globalThis.missing_result = result;",
+    );
+    assert_eq!(vm.get_global("missing_result"), Some(Value::Undefined));
+  }
+
+  #[cfg(all(unix, target_arch = "x86_64"))]
+  #[test]
+  fn cached_direct_call_rechecks_a_changed_target() {
+    let (vm, _) = run_script(
+      "function one() { return 1; } function two() { return 2; } let target = one; for (let i = 0; i < 1100; i += 1) target(); target = two; globalThis.changed_target_result = target();",
+    );
+    assert_eq!(
+      vm.get_global("changed_target_result"),
+      Some(Value::Number(2.0))
+    );
   }
 
   #[test]
