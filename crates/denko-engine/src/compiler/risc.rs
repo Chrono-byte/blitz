@@ -659,42 +659,45 @@ impl RiscBuilder {
         }
         Op::Call | Op::TailCall | Op::Construct => {
           let count = arg as usize;
-          let overflow = count.saturating_sub(6);
-          stage_window_at(
-            &mut lowered,
-            &plan,
-            instruction.inputs.as_slice(),
-            overflow,
-            line,
-          )?;
-          stage_window(
-            &mut lowered,
-            &plan,
-            &instruction.inputs.as_slice()[1 + count.min(6)..],
-            line,
-          )?;
-          let window_base = plan
-            .value_spill_count
-            .checked_add(
-              u16::try_from(overflow)
-                .map_err(|_| CompilerError::from("RISC call window exceeds u16"))?,
-            )
-            .ok_or_else(|| CompilerError::from("RISC call window exceeds u16"))?;
-          move_location_to_register(&mut lowered, ValueLocation::Spill(window_base), 0, line);
-          for index in 0..count.min(6) {
-            move_location_to_register(
-              &mut lowered,
-              ValueLocation::Spill(
-                window_base
-                  .checked_add(
-                    u16::try_from(1 + index)
-                      .map_err(|_| CompilerError::from("RISC call input exceeds u16"))?,
-                  )
-                  .ok_or_else(|| CompilerError::from("RISC call input exceeds u16"))?,
-              ),
-              2 + index as u8,
-              line,
-            );
+          let inputs = instruction.inputs.as_slice();
+          let direct = count <= 6 && all_register_homed(&plan, &inputs[..1 + count])?;
+          if direct {
+            for index in 0..count {
+              move_location_to_register(
+                &mut lowered,
+                plan.get(inputs[1 + index])?,
+                2 + index as u8,
+                line,
+              );
+            }
+            move_location_to_register(&mut lowered, plan.get(inputs[0])?, 0, line);
+          } else {
+            let overflow = count.saturating_sub(6);
+            stage_window_at(&mut lowered, &plan, inputs, overflow, line)?;
+            stage_window(&mut lowered, &plan, &inputs[1 + count.min(6)..], line)?;
+            let window_base = plan
+              .value_spill_count
+              .checked_add(
+                u16::try_from(overflow)
+                  .map_err(|_| CompilerError::from("RISC call window exceeds u16"))?,
+              )
+              .ok_or_else(|| CompilerError::from("RISC call window exceeds u16"))?;
+            move_location_to_register(&mut lowered, ValueLocation::Spill(window_base), 0, line);
+            for index in 0..count.min(6) {
+              move_location_to_register(
+                &mut lowered,
+                ValueLocation::Spill(
+                  window_base
+                    .checked_add(
+                      u16::try_from(1 + index)
+                        .map_err(|_| CompilerError::from("RISC call input exceeds u16"))?,
+                    )
+                    .ok_or_else(|| CompilerError::from("RISC call input exceeds u16"))?,
+                ),
+                2 + index as u8,
+                line,
+              );
+            }
           }
           emit(
             &mut lowered,
@@ -705,43 +708,47 @@ impl RiscBuilder {
         }
         Op::CallBuiltin => {
           let count = arg as usize;
-          let overflow = count.saturating_sub(6);
-          stage_window_at(
-            &mut lowered,
-            &plan,
-            instruction.inputs.as_slice(),
-            overflow,
-            line,
-          )?;
-          stage_window(
-            &mut lowered,
-            &plan,
-            &instruction.inputs.as_slice()[2 + count.min(6)..],
-            line,
-          )?;
-          let window_base = plan
-            .value_spill_count
-            .checked_add(
-              u16::try_from(overflow)
-                .map_err(|_| CompilerError::from("RISC method call window exceeds u16"))?,
-            )
-            .ok_or_else(|| CompilerError::from("RISC method call window exceeds u16"))?;
-          move_location_to_register(&mut lowered, ValueLocation::Spill(window_base), 1, line);
-          move_location_to_register(&mut lowered, ValueLocation::Spill(window_base + 1), 0, line);
-          for index in 0..count.min(6) {
-            move_location_to_register(
-              &mut lowered,
-              ValueLocation::Spill(
-                window_base
-                  .checked_add(
-                    u16::try_from(2 + index)
-                      .map_err(|_| CompilerError::from("RISC method call input exceeds u16"))?,
-                  )
-                  .ok_or_else(|| CompilerError::from("RISC method call input exceeds u16"))?,
-              ),
-              2 + index as u8,
-              line,
-            );
+          let inputs = instruction.inputs.as_slice();
+          let direct = count <= 6 && all_register_homed(&plan, &inputs[..2 + count])?;
+          if direct {
+            for index in 0..count {
+              move_location_to_register(
+                &mut lowered,
+                plan.get(inputs[2 + index])?,
+                2 + index as u8,
+                line,
+              );
+            }
+            move_location_to_register(&mut lowered, plan.get(inputs[0])?, 1, line);
+            move_location_to_register(&mut lowered, plan.get(inputs[1])?, 0, line);
+          } else {
+            let overflow = count.saturating_sub(6);
+            stage_window_at(&mut lowered, &plan, inputs, overflow, line)?;
+            stage_window(&mut lowered, &plan, &inputs[2 + count.min(6)..], line)?;
+            let window_base = plan
+              .value_spill_count
+              .checked_add(
+                u16::try_from(overflow)
+                  .map_err(|_| CompilerError::from("RISC method call window exceeds u16"))?,
+              )
+              .ok_or_else(|| CompilerError::from("RISC method call window exceeds u16"))?;
+            move_location_to_register(&mut lowered, ValueLocation::Spill(window_base), 1, line);
+            move_location_to_register(&mut lowered, ValueLocation::Spill(window_base + 1), 0, line);
+            for index in 0..count.min(6) {
+              move_location_to_register(
+                &mut lowered,
+                ValueLocation::Spill(
+                  window_base
+                    .checked_add(
+                      u16::try_from(2 + index)
+                        .map_err(|_| CompilerError::from("RISC method call input exceeds u16"))?,
+                    )
+                    .ok_or_else(|| CompilerError::from("RISC method call input exceeds u16"))?,
+                ),
+                2 + index as u8,
+                line,
+              );
+            }
           }
           emit(
             &mut lowered,
@@ -1180,6 +1187,17 @@ fn move_location_to_register(
       line,
     );
   }
+}
+
+fn all_register_homed(
+  plan: &LocationPlan,
+  inputs: &[ValueId],
+) -> Result<bool, CompilerError> {
+  inputs
+    .iter()
+    .try_fold(true, |all_registers, value| {
+      Ok(all_registers && matches!(plan.get(*value)?, ValueLocation::Register(_)))
+    })
 }
 
 fn stage_window(

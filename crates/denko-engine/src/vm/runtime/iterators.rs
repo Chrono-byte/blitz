@@ -14,6 +14,53 @@ const ASYNC_ITERATOR_SLOT: &str = "[[BlitzAsyncIterator]]";
 const ASYNC_ITERATOR_NEXT_SLOT: &str = "[[BlitzAsyncIteratorNext]]";
 const ASYNC_ITERATOR_SYNC_SLOT: &str = "[[BlitzAsyncIteratorSync]]";
 const ASYNC_ITERATOR_DONE_SLOT: &str = "[[BlitzAsyncIteratorDone]]";
+const SYNC_ITERATOR_RECORD_SLOT: &str = "[[BlitzSyncIteratorRecord]]";
+const SYNC_ITERATOR_SLOT: &str = "[[BlitzSyncIterator]]";
+const SYNC_ITERATOR_NEXT_SLOT: &str = "[[BlitzSyncIteratorNext]]";
+const SYNC_ITERATOR_DONE_SLOT: &str = "[[BlitzSyncIteratorDone]]";
+
+#[derive(Clone)]
+struct SyncIteratorRecord {
+  wrapper: Rc<RefCell<ObjectData>>,
+  iterator: Value,
+  next: Value,
+  done: bool,
+}
+
+fn sync_iterator_record(value: &Value) -> Option<SyncIteratorRecord> {
+  let Value::Object(wrapper) = value else {
+    return None;
+  };
+  let wrapper_ref = wrapper.borrow();
+  if !matches!(
+    wrapper_ref.internal_slot(SYNC_ITERATOR_RECORD_SLOT),
+    Some(Value::Bool(true))
+  ) {
+    return None;
+  }
+  Some(SyncIteratorRecord {
+    wrapper: Rc::clone(wrapper),
+    iterator: wrapper_ref
+      .internal_slot(SYNC_ITERATOR_SLOT)?
+      .clone(),
+    next: wrapper_ref
+      .internal_slot(SYNC_ITERATOR_NEXT_SLOT)?
+      .clone(),
+    done: matches!(
+      wrapper_ref.internal_slot(SYNC_ITERATOR_DONE_SLOT),
+      Some(Value::Bool(true))
+    ),
+  })
+}
+
+fn mark_sync_iterator_done(
+  wrapper: &Rc<RefCell<ObjectData>>,
+  done: bool,
+) {
+  wrapper
+    .borrow_mut()
+    .set_internal_slot(SYNC_ITERATOR_DONE_SLOT, Value::Bool(done));
+}
 
 #[derive(Clone)]
 struct AsyncIteratorRecord {
@@ -61,6 +108,25 @@ fn mark_async_iterator_done(wrapper: &Rc<RefCell<ObjectData>>) {
 }
 
 impl Vm {
+  pub(crate) fn get_sync_iterator(
+    &mut self,
+    iterable: Value,
+  ) -> Result<Value, RuntimeError> {
+    let method = crate::runtime_utils::get_method(
+      self,
+      &iterable,
+      &PropertyKey::Symbol(SymbolId::well_known_iterator()),
+    )?
+    .ok_or_else(|| self.throw_type_error("Value is not iterable"))?;
+    let (iterator, next) = crate::runtime_utils::get_iterator_record(self, &iterable, &method)?;
+    let mut wrapper = ObjectData::new();
+    wrapper.set_internal_slot(SYNC_ITERATOR_RECORD_SLOT, Value::Bool(true));
+    wrapper.set_internal_slot(SYNC_ITERATOR_SLOT, iterator);
+    wrapper.set_internal_slot(SYNC_ITERATOR_NEXT_SLOT, next);
+    wrapper.set_internal_slot(SYNC_ITERATOR_DONE_SLOT, Value::Bool(false));
+    Ok(Value::Object(Rc::new(RefCell::new(wrapper))))
+  }
+
   pub(super) fn get_async_iterator(
     &mut self,
     iterable: Value,
@@ -96,10 +162,23 @@ impl Vm {
     Ok(Value::Object(Rc::new(RefCell::new(wrapper))))
   }
 
-  pub(super) fn iterator_next(
+  pub(crate) fn iterator_next(
     &mut self,
     iterator: Value,
   ) -> Result<Value, RuntimeError> {
+    if let Some(record) = sync_iterator_record(&iterator) {
+      // An abrupt IteratorNext marks the record done for consumers such as
+      // for-of and destructuring, which must not call IteratorClose then.
+      mark_sync_iterator_done(&record.wrapper, true);
+      let result = self.call_value_with_this(&record.next, &record.iterator, &[])?;
+      if !result.is_object() {
+        return Err(self.throw_type_error("Iterator result must be an object"));
+      }
+      // IteratorNext does not inspect `done`; IteratorStep and its consumers
+      // perform that observable property access exactly once.
+      mark_sync_iterator_done(&record.wrapper, false);
+      return Ok(result);
+    }
     if let Some(record) = async_iterator_record(&iterator) {
       let result = self.call_value_with_this(&record.next, &record.iterator, &[])?;
       if record.sync {
@@ -313,6 +392,27 @@ impl Vm {
     &mut self,
     iterator: Value,
   ) -> Result<Value, RuntimeError> {
+    if let Some(record) = sync_iterator_record(&iterator) {
+      if record.done {
+        return Ok(iterator);
+      }
+      mark_sync_iterator_done(&record.wrapper, true);
+      let return_fn = self.get_property_host(
+        &record.iterator,
+        &PropertyKey::String("return".to_string().into()),
+      )?;
+      if matches!(return_fn, Value::Undefined | Value::Null) {
+        return Ok(iterator);
+      }
+      if !Self::is_callable_value(&return_fn) {
+        return Err(self.throw_type_error("Iterator return is not callable"));
+      }
+      let result = self.call_value_with_this(&return_fn, &record.iterator, &[])?;
+      if !result.is_object() {
+        return Err(self.throw_type_error("Iterator return result is not an object"));
+      }
+      return Ok(iterator);
+    }
     if let Some(record) = async_iterator_record(&iterator) {
       if record.done {
         return Ok(iterator);

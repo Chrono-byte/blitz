@@ -297,7 +297,7 @@ pub(crate) fn install_bigint_and_number_builtins(
     PropertyDescriptor::builtin_prototype(Value::Object(Rc::clone(&bigint_proto_map))),
   );
   let bigint_ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
-    if vm.current_new_target().is_some() {
+    if vm.pending_constructor_new_target().is_some() {
       return Err(vm.throw_type_error("BigInt is not a constructor"));
     }
     let offset = static_builtin_arg_offset(vm, args, "BigInt");
@@ -394,7 +394,7 @@ pub(crate) fn install_bigint_and_number_builtins(
   );
   let number_proto_for_ctor = Rc::clone(&number_proto_map);
   let number_ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
-    if vm.current_new_target().is_some() {
+    if vm.pending_constructor_new_target().is_some() {
       let value = args.get(1).cloned().unwrap_or(Value::Number(0.0));
       let n = vm.to_number_value(&value)?;
       let mut obj = ObjectData::new();

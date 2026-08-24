@@ -21,7 +21,129 @@ enum PreparedPropertyKey {
   Local(usize),
 }
 
+enum PreparedAssignmentTarget {
+  Identifier(String),
+  StaticMember { object_slot: usize, property: Value },
+  ComputedMember { object_slot: usize, key_slot: usize },
+}
+
 impl super::Compiler {
+  fn prepare_assignment_target(
+    &mut self,
+    target: &oast::AssignmentTarget<'_>,
+  ) -> Result<Option<PreparedAssignmentTarget>, crate::errors::CompilerError> {
+    match target {
+      oast::AssignmentTarget::AssignmentTargetIdentifier(id) => Ok(Some(
+        PreparedAssignmentTarget::Identifier(id.name.to_string()),
+      )),
+      oast::AssignmentTarget::StaticMemberExpression(member) => {
+        self.compile_expr_oast(&member.object)?;
+        let object_slot = self.alloc_temp_local("destructuring_target_object");
+        self.emit(Op::StoreLocal, LINE);
+        self.emit_byte(self.slot_to_u8(object_slot)?, LINE);
+        Ok(Some(PreparedAssignmentTarget::StaticMember {
+          object_slot,
+          property: Value::String(member.property.name.to_string().into()),
+        }))
+      }
+      oast::AssignmentTarget::ComputedMemberExpression(member) => {
+        self.compile_expr_oast(&member.object)?;
+        let object_slot = self.alloc_temp_local("destructuring_target_object");
+        self.emit(Op::StoreLocal, LINE);
+        self.emit_byte(self.slot_to_u8(object_slot)?, LINE);
+        self.compile_expr_oast(&member.expression)?;
+        let key_slot = self.alloc_temp_local("destructuring_target_key");
+        self.emit(Op::StoreLocal, LINE);
+        self.emit_byte(self.slot_to_u8(key_slot)?, LINE);
+        Ok(Some(PreparedAssignmentTarget::ComputedMember {
+          object_slot,
+          key_slot,
+        }))
+      }
+      _ => Ok(None),
+    }
+  }
+
+  fn prepare_assignment_target_maybe_default(
+    &mut self,
+    target: &oast::AssignmentTargetMaybeDefault<'_>,
+  ) -> Result<Option<PreparedAssignmentTarget>, crate::errors::CompilerError> {
+    match target {
+      oast::AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(default) => {
+        self.prepare_assignment_target(&default.binding)
+      }
+      oast::AssignmentTargetMaybeDefault::AssignmentTargetIdentifier(id) => Ok(Some(
+        PreparedAssignmentTarget::Identifier(id.name.to_string()),
+      )),
+      oast::AssignmentTargetMaybeDefault::StaticMemberExpression(member) => {
+        self.compile_expr_oast(&member.object)?;
+        let object_slot = self.alloc_temp_local("destructuring_target_object");
+        self.emit(Op::StoreLocal, LINE);
+        self.emit_byte(self.slot_to_u8(object_slot)?, LINE);
+        Ok(Some(PreparedAssignmentTarget::StaticMember {
+          object_slot,
+          property: Value::String(member.property.name.to_string().into()),
+        }))
+      }
+      oast::AssignmentTargetMaybeDefault::ComputedMemberExpression(member) => {
+        self.compile_expr_oast(&member.object)?;
+        let object_slot = self.alloc_temp_local("destructuring_target_object");
+        self.emit(Op::StoreLocal, LINE);
+        self.emit_byte(self.slot_to_u8(object_slot)?, LINE);
+        self.compile_expr_oast(&member.expression)?;
+        let key_slot = self.alloc_temp_local("destructuring_target_key");
+        self.emit(Op::StoreLocal, LINE);
+        self.emit_byte(self.slot_to_u8(key_slot)?, LINE);
+        Ok(Some(PreparedAssignmentTarget::ComputedMember {
+          object_slot,
+          key_slot,
+        }))
+      }
+      _ => Ok(None),
+    }
+  }
+
+  fn store_prepared_assignment_target(
+    &mut self,
+    target: &PreparedAssignmentTarget,
+  ) -> Result<(), crate::errors::CompilerError> {
+    match target {
+      PreparedAssignmentTarget::Identifier(name) => self.store_assignment_identifier(name),
+      PreparedAssignmentTarget::StaticMember {
+        object_slot,
+        property,
+      } => {
+        let value_slot = self.alloc_temp_local("assign_member_value");
+        self.emit(Op::StoreLocal, LINE);
+        self.emit_byte(self.slot_to_u8(value_slot)?, LINE);
+        self.emit(Op::LoadLocal, LINE);
+        self.emit_byte(self.slot_to_u8(*object_slot)?, LINE);
+        self.emit_constant(property.clone(), LINE);
+        self.emit(Op::LoadLocal, LINE);
+        self.emit_byte(self.slot_to_u8(value_slot)?, LINE);
+        self.emit(Op::SetProperty, LINE);
+        self.emit(Op::Discard, LINE);
+        Ok(())
+      }
+      PreparedAssignmentTarget::ComputedMember {
+        object_slot,
+        key_slot,
+      } => {
+        let value_slot = self.alloc_temp_local("assign_member_value");
+        self.emit(Op::StoreLocal, LINE);
+        self.emit_byte(self.slot_to_u8(value_slot)?, LINE);
+        self.emit(Op::LoadLocal, LINE);
+        self.emit_byte(self.slot_to_u8(*object_slot)?, LINE);
+        self.emit(Op::LoadLocal, LINE);
+        self.emit_byte(self.slot_to_u8(*key_slot)?, LINE);
+        self.emit(Op::LoadLocal, LINE);
+        self.emit_byte(self.slot_to_u8(value_slot)?, LINE);
+        self.emit(Op::SetProperty, LINE);
+        self.emit(Op::Discard, LINE);
+        Ok(())
+      }
+    }
+  }
   fn binding_identifier_name(pattern: &oast::BindingPattern<'_>) -> Option<String> {
     match pattern {
       oast::BindingPattern::BindingIdentifier(id) => Some(id.name.to_string()),
@@ -65,8 +187,9 @@ impl super::Compiler {
   fn compile_destructuring_property_key(
     &mut self,
     key: &oast::PropertyKey<'_>,
+    computed: bool,
   ) -> Result<PreparedPropertyKey, crate::errors::CompilerError> {
-    if let Some(value) = Self::binding_property_key_to_value(key) {
+    if !computed && let Some(value) = Self::binding_property_key_to_value(key) {
       self.emit_constant(value.clone(), LINE);
       return Ok(PreparedPropertyKey::Constant(value));
     }
@@ -326,6 +449,17 @@ impl super::Compiler {
     if self.with_depth > 0 {
       self.emit_set_global_name(name);
     } else if let Some(slot) = self.resolve_local(name) {
+      let value_slot = self.alloc_reusable_temp_local("assignment_identifier_value");
+      self.emit(Op::StoreLocal, LINE);
+      self.emit_byte(self.slot_to_u8(value_slot)?, LINE);
+      // PutValue cannot initialize a lexical binding. Read the existing cell
+      // first so assignment during its TDZ throws instead of silently acting
+      // like declaration initialization.
+      self.emit(Op::LoadLocal, LINE);
+      self.emit_byte(self.slot_to_u8(slot)?, LINE);
+      self.emit(Op::Discard, LINE);
+      self.emit(Op::LoadLocal, LINE);
+      self.emit_byte(self.slot_to_u8(value_slot)?, LINE);
       self.emit(Op::StoreLocal, LINE);
       self.emit_byte(self.slot_to_u8(slot)?, LINE);
       if self.local_mirrors_global(slot) {
@@ -386,39 +520,80 @@ impl super::Compiler {
   fn begin_array_destructuring_iterator(
     &mut self,
     label: &str,
-  ) -> Result<(usize, usize, usize), crate::errors::CompilerError> {
+  ) -> Result<(usize, usize, usize, usize, usize), crate::errors::CompilerError> {
     self.emit_get_builtin_name("requireObjectCoercible");
     self.emit(Op::Exchange, LINE);
     self.emit(Op::Call, LINE);
     self.emit_byte(1, LINE);
 
     let iterator_slot = self.alloc_temp_local(label);
-    self.emit(Op::Copy, LINE);
-    self.emit_get_global_name("Symbol");
-    self.emit_constant(Value::String("iterator".to_string().into()), LINE);
-    self.emit(Op::GetProperty, LINE);
-    self.emit(Op::GetProperty, LINE);
-    self.emit(Op::CallBuiltin, LINE);
-    self.emit_byte(0, LINE);
+    self.emit_get_builtin_name("getIterator");
+    self.emit(Op::Exchange, LINE);
+    self.emit(Op::Call, LINE);
+    self.emit_byte(1, LINE);
     self.emit(Op::StoreLocal, LINE);
     self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
+
+    let iterator_active_slot = self.alloc_temp_local("array_destructuring_iterator_active");
+    self.emit(Op::True, LINE);
+    self.emit(Op::StoreLocal, LINE);
+    self.emit_byte(self.slot_to_u8(iterator_active_slot)?, LINE);
 
     // IteratorDestructuringAssignmentEvaluation closes the iterator when any
     // subsequent step completes abruptly. Keep the original completion while
     // running IteratorClose; an abrupt close must not replace it.
     let thrown_slot = self.alloc_temp_local("array_destructuring_thrown");
+    let push_handler_ip = self.current_ip();
     self.emit(Op::PushHandler, LINE);
     let handler_jump = self.current_ip();
     self.emit_byte(0, LINE);
     self.emit_byte(0, LINE);
     self.handler_depth += 1;
-    Ok((iterator_slot, thrown_slot, handler_jump))
+    Ok((
+      iterator_slot,
+      iterator_active_slot,
+      thrown_slot,
+      push_handler_ip,
+      handler_jump,
+    ))
+  }
+
+  fn set_array_destructuring_iterator_active(
+    &mut self,
+    active_slot: usize,
+    active: bool,
+  ) -> Result<(), crate::errors::CompilerError> {
+    self.emit(if active { Op::True } else { Op::False }, LINE);
+    self.emit(Op::StoreLocal, LINE);
+    self.emit_byte(self.slot_to_u8(active_slot)?, LINE);
+    Ok(())
+  }
+
+  fn close_array_destructuring_iterator_if_active(
+    &mut self,
+    iterator_slot: usize,
+    active_slot: usize,
+  ) -> Result<(), crate::errors::CompilerError> {
+    self.emit(Op::LoadLocal, LINE);
+    self.emit_byte(self.slot_to_u8(active_slot)?, LINE);
+    self.emit(Op::JumpIfFalse, LINE);
+    let skip_close = self.current_ip();
+    self.emit_byte(0, LINE);
+    self.emit_byte(0, LINE);
+    self.emit(Op::LoadLocal, LINE);
+    self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
+    self.emit(Op::IteratorClose, LINE);
+    self.emit(Op::Discard, LINE);
+    self.patch_jump(skip_close);
+    Ok(())
   }
 
   fn finish_array_destructuring_iterator(
     &mut self,
     iterator_slot: usize,
+    iterator_active_slot: usize,
     thrown_slot: usize,
+    push_handler_ip: usize,
     handler_jump: usize,
     close_on_normal: bool,
   ) -> Result<(), crate::errors::CompilerError> {
@@ -427,10 +602,7 @@ impl super::Compiler {
     // A rest element exhausts the iterator through iteratorToArray; the
     // existing rest path deliberately has no separate normal close.
     if close_on_normal {
-      self.emit(Op::LoadLocal, LINE);
-      self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
-      self.emit(Op::IteratorClose, LINE);
-      self.emit(Op::Discard, LINE);
+      self.close_array_destructuring_iterator_if_active(iterator_slot, iterator_active_slot)?;
     }
     self.emit(Op::Jump, LINE);
     let end_jump = self.current_ip();
@@ -447,10 +619,7 @@ impl super::Compiler {
     let close_handler_jump = self.current_ip();
     self.emit_byte(0, LINE);
     self.emit_byte(0, LINE);
-    self.emit(Op::LoadLocal, LINE);
-    self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
-    self.emit(Op::IteratorClose, LINE);
-    self.emit(Op::Discard, LINE);
+    self.close_array_destructuring_iterator_if_active(iterator_slot, iterator_active_slot)?;
     self.emit(Op::PopHandler, LINE);
     self.emit(Op::Jump, LINE);
     let close_done_jump = self.current_ip();
@@ -463,13 +632,35 @@ impl super::Compiler {
     self.emit(Op::LoadLocal, LINE);
     self.emit_byte(self.slot_to_u8(thrown_slot)?, LINE);
     self.emit(Op::Throw, LINE);
+
+    // A generator can suspend while evaluating a default initializer. A
+    // later generator.return() is an abrupt return completion, not a thrown
+    // exception, so register a return-only cleanup for the same protected
+    // region. The VM enters this block through its existing finally metadata.
+    let return_slot = self.alloc_temp_local("array_destructuring_return");
+    let did_return_slot = self.alloc_temp_local("array_destructuring_did_return");
+    let return_cleanup_ip = self.current_ip();
+    self.close_array_destructuring_iterator_if_active(iterator_slot, iterator_active_slot)?;
+    self.emit(Op::LoadLocal, LINE);
+    self.emit_byte(self.slot_to_u8(return_slot)?, LINE);
+    self.emit(Op::Return, LINE);
+    self
+      .chunk
+      .finally_handlers
+      .push(crate::bytecode::FinallyHandler {
+        push_ip: push_handler_ip,
+        finalizer_ip: return_cleanup_ip,
+        return_slot,
+        did_return_slot,
+      });
     self.patch_jump(end_jump);
     Ok(())
   }
 
-  pub(super) fn compile_assignment_target_maybe_default_oast(
+  fn compile_assignment_target_maybe_default_prepared(
     &mut self,
     target: &oast::AssignmentTargetMaybeDefault<'_>,
+    prepared: Option<&PreparedAssignmentTarget>,
   ) -> Result<(), crate::errors::CompilerError> {
     match target {
       oast::AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(a) => {
@@ -502,17 +693,33 @@ impl super::Compiler {
         self.patch_jump(skip_default);
         self.emit(Op::LoadLocal, LINE);
         self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
-        self.compile_assignment_target_oast(&a.binding)?;
+        if let Some(prepared) = prepared {
+          self.store_prepared_assignment_target(prepared)?;
+        } else {
+          self.compile_assignment_target_oast(&a.binding)?;
+        }
         Ok(())
       }
       oast::AssignmentTargetMaybeDefault::AssignmentTargetIdentifier(id) => {
-        self.compile_assignment_identifier_reference(id)
+        if let Some(prepared) = prepared {
+          self.store_prepared_assignment_target(prepared)
+        } else {
+          self.compile_assignment_identifier_reference(id)
+        }
       }
       oast::AssignmentTargetMaybeDefault::StaticMemberExpression(m) => {
-        self.compile_static_member_assignment_target(m)
+        if let Some(prepared) = prepared {
+          self.store_prepared_assignment_target(prepared)
+        } else {
+          self.compile_static_member_assignment_target(m)
+        }
       }
       oast::AssignmentTargetMaybeDefault::ComputedMemberExpression(m) => {
-        self.compile_computed_member_assignment_target(m)
+        if let Some(prepared) = prepared {
+          self.store_prepared_assignment_target(prepared)
+        } else {
+          self.compile_computed_member_assignment_target(m)
+        }
       }
       oast::AssignmentTargetMaybeDefault::ArrayAssignmentTarget(a) => {
         self.compile_array_assignment_target(a)
@@ -530,13 +737,20 @@ impl super::Compiler {
     &mut self,
     a: &oast::ArrayAssignmentTarget<'_>,
   ) -> Result<(), crate::errors::CompilerError> {
-    let (iterator_slot, thrown_slot, handler_jump) =
+    let (iterator_slot, iterator_active_slot, thrown_slot, push_handler_ip, handler_jump) =
       self.begin_array_destructuring_iterator("array_assign_iterator")?;
 
     for el in &a.elements {
+      let prepared = el
+        .as_ref()
+        .map(|target| self.prepare_assignment_target_maybe_default(target))
+        .transpose()?
+        .flatten();
+      self.set_array_destructuring_iterator_active(iterator_active_slot, false)?;
       self.emit(Op::LoadLocal, LINE);
       self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
       self.emit(Op::IteratorNext, LINE);
+      self.set_array_destructuring_iterator_active(iterator_active_slot, true)?;
       if let Some(el) = el {
         self.emit(Op::Copy, LINE);
         self.emit_constant(Value::String("done".to_string().into()), LINE);
@@ -547,32 +761,41 @@ impl super::Compiler {
         self.emit_byte(0, LINE);
         self.emit_constant(Value::String("value".to_string().into()), LINE);
         self.emit(Op::GetProperty, LINE);
-        self.compile_assignment_target_maybe_default_oast(el)?;
+        self.compile_assignment_target_maybe_default_prepared(el, prepared.as_ref())?;
         self.emit(Op::Jump, LINE);
         let after_jump = self.current_ip();
         self.emit_byte(0, LINE);
         self.emit_byte(0, LINE);
         self.patch_jump(done_jump);
         self.emit(Op::Discard, LINE);
+        self.set_array_destructuring_iterator_active(iterator_active_slot, false)?;
         self.emit(Op::Undefined, LINE);
-        self.compile_assignment_target_maybe_default_oast(el)?;
+        self.compile_assignment_target_maybe_default_prepared(el, prepared.as_ref())?;
         self.patch_jump(after_jump);
       } else {
         self.emit(Op::Discard, LINE);
       }
     }
     if let Some(rest) = &a.rest {
+      let prepared = self.prepare_assignment_target(&rest.target)?;
+      self.set_array_destructuring_iterator_active(iterator_active_slot, false)?;
       self.emit(Op::LoadLocal, LINE);
       self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
       self.emit_get_builtin_name("iteratorToArray");
       self.emit(Op::Exchange, LINE);
       self.emit(Op::Call, LINE);
       self.emit_byte(1, LINE);
-      self.compile_assignment_target_oast(&rest.target)?;
+      if let Some(prepared) = &prepared {
+        self.store_prepared_assignment_target(prepared)?;
+      } else {
+        self.compile_assignment_target_oast(&rest.target)?;
+      }
     }
     self.finish_array_destructuring_iterator(
       iterator_slot,
+      iterator_active_slot,
       thrown_slot,
+      push_handler_ip,
       handler_jump,
       a.rest.is_none(),
     )?;
@@ -583,6 +806,10 @@ impl super::Compiler {
     &mut self,
     o: &oast::ObjectAssignmentTarget<'_>,
   ) -> Result<(), crate::errors::CompilerError> {
+    self.emit_get_builtin_name("requireObjectCoercible");
+    self.emit(Op::Exchange, LINE);
+    self.emit(Op::Call, LINE);
+    self.emit_byte(1, LINE);
     let mut excluded = Vec::with_capacity(o.properties.len());
     for prop in &o.properties {
       match prop {
@@ -625,9 +852,10 @@ impl super::Compiler {
         }
         oast::AssignmentTargetProperty::AssignmentTargetPropertyProperty(p) => {
           self.emit(Op::Copy, LINE);
-          let key = self.compile_destructuring_property_key(&p.name)?;
+          let key = self.compile_destructuring_property_key(&p.name, p.computed)?;
+          let prepared = self.prepare_assignment_target_maybe_default(&p.binding)?;
           self.emit(Op::GetProperty, LINE);
-          self.compile_assignment_target_maybe_default_oast(&p.binding)?;
+          self.compile_assignment_target_maybe_default_prepared(&p.binding, prepared.as_ref())?;
           excluded.push(key);
         }
       }
@@ -705,13 +933,15 @@ impl super::Compiler {
         self.compile_binding_pattern_assignment_oast(&a.left, kind)?;
       }
       oast::BindingPattern::ArrayPattern(a) => {
-        let (iterator_slot, thrown_slot, handler_jump) =
+        let (iterator_slot, iterator_active_slot, thrown_slot, push_handler_ip, handler_jump) =
           self.begin_array_destructuring_iterator("array_binding_iterator")?;
 
         for el in &a.elements {
+          self.set_array_destructuring_iterator_active(iterator_active_slot, false)?;
           self.emit(Op::LoadLocal, LINE);
           self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
           self.emit(Op::IteratorNext, LINE);
+          self.set_array_destructuring_iterator_active(iterator_active_slot, true)?;
 
           if let Some(el) = el {
             self.emit(Op::Copy, LINE);
@@ -730,6 +960,7 @@ impl super::Compiler {
             self.emit_byte(0, LINE);
             self.patch_jump(done_jump);
             self.emit(Op::Discard, LINE);
+            self.set_array_destructuring_iterator_active(iterator_active_slot, false)?;
             self.emit(Op::Undefined, LINE);
             self.compile_binding_pattern_assignment_oast(el, kind)?;
             self.patch_jump(after_jump);
@@ -739,6 +970,7 @@ impl super::Compiler {
         }
 
         if let Some(rest) = &a.rest {
+          self.set_array_destructuring_iterator_active(iterator_active_slot, false)?;
           self.emit(Op::LoadLocal, LINE);
           self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
           self.emit_get_builtin_name("iteratorToArray");
@@ -749,7 +981,9 @@ impl super::Compiler {
         }
         self.finish_array_destructuring_iterator(
           iterator_slot,
+          iterator_active_slot,
           thrown_slot,
+          push_handler_ip,
           handler_jump,
           a.rest.is_none(),
         )?;
@@ -762,7 +996,7 @@ impl super::Compiler {
         let mut excluded = Vec::with_capacity(o.properties.len());
         for prop in &o.properties {
           self.emit(Op::Copy, LINE);
-          let key = self.compile_destructuring_property_key(&prop.key)?;
+          let key = self.compile_destructuring_property_key(&prop.key, prop.computed)?;
           self.emit(Op::GetProperty, LINE);
           self.compile_binding_pattern_assignment_oast(&prop.value, kind)?;
           excluded.push(key);

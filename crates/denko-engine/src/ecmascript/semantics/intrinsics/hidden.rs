@@ -49,7 +49,9 @@ pub(crate) fn install_hidden_builtins(intrinsics: &mut Intrinsics) {
             .map_err(|e| syntax_error(vm, format!("eval compile: {}", e)))
         })
       })?;
-      if let Some(name) = vm.direct_eval_lexical_conflict_name(&chunk) {
+      if !chunk.root_strict
+        && let Some(name) = vm.direct_eval_lexical_conflict_name(&chunk)
+      {
         return Err(syntax_error(
           vm,
           format!("redeclaration of lexical binding `{}`", name),
@@ -131,14 +133,18 @@ pub(crate) fn install_hidden_builtins(intrinsics: &mut Intrinsics) {
     })),
   );
   intrinsics.hidden_builtins.insert(
+    "getIterator".to_string(),
+    Value::Builtin(Rc::new(|vm, args| {
+      vm.get_sync_iterator(args.first().cloned().unwrap_or(Value::Undefined))
+    })),
+  );
+  intrinsics.hidden_builtins.insert(
     "iteratorToArray".to_string(),
     Value::Builtin(Rc::new(|vm, args| {
       let iterator = args.first().cloned().unwrap_or(Value::Undefined);
       let mut out = Vec::new();
       loop {
-        let next =
-          vm.get_property_host(&iterator, &PropertyKey::String("next".to_string().into()))?;
-        let step = vm.call_value_with_this(&next, &iterator, &[])?;
+        let step = vm.iterator_next(iterator.clone())?;
         let done = vm.get_property_host(&step, &PropertyKey::String("done".to_string().into()))?;
         if vm.to_boolean(&done) {
           break;
@@ -159,7 +165,15 @@ pub(crate) fn install_hidden_builtins(intrinsics: &mut Intrinsics) {
       let value = args[0].clone();
       let name = match &args[1] {
         Value::String(s) => s.clone(),
+        Value::Symbol(_, description) => description.as_ref().map_or_else(
+          || "".into(),
+          |description| format!("[{description}]").into(),
+        ),
         _ => return Ok(value),
+      };
+      let name = match args.get(2) {
+        Some(Value::String(prefix)) => format!("{prefix} {name}").into(),
+        _ => name,
       };
       match &value {
         Value::Closure { props, .. } => {
@@ -181,7 +195,7 @@ pub(crate) fn install_hidden_builtins(intrinsics: &mut Intrinsics) {
           if !has_name
             || current
               .as_ref()
-              .is_some_and(|s| s == "<anonymous>" || s == "<arrow>")
+              .is_some_and(|s| s == "<anonymous>" || s == "<arrow>" || s == "<method>")
           {
             props.borrow_mut().properties.insert(
               PropertyKey::String("name".to_string().into()),
@@ -213,7 +227,7 @@ pub(crate) fn install_hidden_builtins(intrinsics: &mut Intrinsics) {
           if !has_name
             || current
               .as_ref()
-              .is_some_and(|s| s == "<anonymous>" || s == "<arrow>")
+              .is_some_and(|s| s == "<anonymous>" || s == "<arrow>" || s == "<method>")
           {
             props.borrow_mut().properties.insert(
               PropertyKey::String("name".to_string().into()),

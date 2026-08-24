@@ -891,13 +891,10 @@ impl Compiler {
         if f.r#await {
           self.emit(Op::GetAsyncIterator, LINE);
         } else {
-          self.emit(Op::Copy, LINE);
-          self.emit_get_global_name("Symbol");
-          self.emit_constant(Value::String("iterator".to_string().into()), LINE);
-          self.emit(Op::GetProperty, LINE);
-          self.emit(Op::GetProperty, LINE);
-          self.emit(Op::CallBuiltin, LINE);
-          self.emit_byte(0, LINE);
+          self.emit_get_builtin_name("getIterator");
+          self.emit(Op::Exchange, LINE);
+          self.emit(Op::Call, LINE);
+          self.emit_byte(1, LINE);
         }
 
         let iterator_slot = self.add_local_in_scope(
@@ -933,6 +930,10 @@ impl Compiler {
         }
 
         let thrown_slot = self.alloc_temp_local("forof_thrown");
+        let iterator_close_active_slot = self.alloc_temp_local("forof_close_active");
+        self.emit(Op::False, LINE);
+        self.emit(Op::StoreLocal, LINE);
+        self.emit_byte(self.slot_to_u8(iterator_close_active_slot)?, LINE);
         self.emit(Op::PushHandler, LINE);
         let handler_jump = self.current_ip();
         self.emit_byte(0, LINE);
@@ -940,6 +941,9 @@ impl Compiler {
 
         let loop_start = self.current_ip();
 
+        self.emit(Op::False, LINE);
+        self.emit(Op::StoreLocal, LINE);
+        self.emit_byte(self.slot_to_u8(iterator_close_active_slot)?, LINE);
         self.emit(Op::LoadLocal, LINE);
         self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
         self.emit(Op::IteratorNext, LINE);
@@ -952,6 +956,11 @@ impl Compiler {
         self.emit_byte(0, LINE);
         self.emit_constant(Value::String("value".to_string().into()), LINE);
         self.emit(Op::GetProperty, LINE);
+        // IteratorStep and IteratorValue abrupt completions return directly;
+        // only failures after a value was produced perform IteratorClose.
+        self.emit(Op::True, LINE);
+        self.emit(Op::StoreLocal, LINE);
+        self.emit_byte(self.slot_to_u8(iterator_close_active_slot)?, LINE);
 
         match &f.left {
           oast::ForStatementLeft::VariableDeclaration(v) => {
@@ -1072,9 +1081,16 @@ impl Compiler {
         self.emit_byte(0, LINE);
         self.emit_byte(0, LINE);
         self.emit(Op::LoadLocal, LINE);
+        self.emit_byte(self.slot_to_u8(iterator_close_active_slot)?, LINE);
+        self.emit(Op::JumpIfFalse, LINE);
+        let skip_abrupt_close = self.current_ip();
+        self.emit_byte(0, LINE);
+        self.emit_byte(0, LINE);
+        self.emit(Op::LoadLocal, LINE);
         self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
         self.emit(Op::IteratorClose, LINE);
         self.emit(Op::Discard, LINE);
+        self.patch_jump(skip_abrupt_close);
         self.emit(Op::PopHandler, LINE);
         self.emit(Op::Jump, LINE);
         let close_done_jump = self.current_ip();
@@ -2077,19 +2093,24 @@ impl Compiler {
     };
 
     let self_name = md.value.id.as_ref().map(|id| id.name.as_str());
+    let function_name = match (md.kind, method_name.as_deref()) {
+      (oast::MethodDefinitionKind::Get, Some(name)) => format!("get {name}"),
+      (oast::MethodDefinitionKind::Set, Some(name)) => format!("set {name}"),
+      (_, Some(name)) => name.to_string(),
+      _ => "<method>".to_string(),
+    };
     let outer_strict = self.strict_context;
     self.strict_context = true;
-    let compiled = self.compile_function(
-      method_name.as_deref().unwrap_or("<method>"),
-      self_name,
-      &md.value,
-      None,
-      true,
-    );
+    let compiled = self.compile_function(&function_name, self_name, &md.value, None, true);
     self.strict_context = outer_strict;
     let (mut proto, _env_len) = compiled?;
     proto.is_strict = true;
     let fidx = self.chunk.add_function(proto);
+    let computed_key_slot = if md.computed {
+      Some(self.alloc_temp_local("class_computed_method_key"))
+    } else {
+      None
+    };
 
     self.emit(Op::LoadLocal, LINE);
     self.emit_byte(self.slot_to_u8(target_slot)?, LINE);
@@ -2110,6 +2131,12 @@ impl Compiler {
         .as_expression()
         .expect("computed class member key must be an expression");
       self.compile_expr_oast(key_expr)?;
+      self.emit(Op::Copy, LINE);
+      self.emit(Op::StoreLocal, LINE);
+      self.emit_byte(
+        self.slot_to_u8(computed_key_slot.expect("computed method has key slot"))?,
+        LINE,
+      );
     }
 
     let first_descriptor_key = match md.kind {
@@ -2125,6 +2152,32 @@ impl Compiler {
     self.emit_constant(Value::String(first_descriptor_key.to_string().into()), LINE);
     self.emit(Op::MakeClosure, LINE);
     self.emit_byte(self.function_index_to_u8(fidx)?, LINE);
+    if let Some(key_slot) = computed_key_slot {
+      let closure_slot = self.alloc_temp_local("class_computed_method_closure");
+      self.emit(Op::StoreLocal, LINE);
+      self.emit_byte(self.slot_to_u8(closure_slot)?, LINE);
+      self.emit_get_builtin_name("setFunctionNameIfAnonymous");
+      self.emit(Op::LoadLocal, LINE);
+      self.emit_byte(self.slot_to_u8(closure_slot)?, LINE);
+      self.emit(Op::LoadLocal, LINE);
+      self.emit_byte(self.slot_to_u8(key_slot)?, LINE);
+      match md.kind {
+        oast::MethodDefinitionKind::Get => {
+          self.emit_constant(Value::String("get".into()), LINE);
+          self.emit(Op::Call, LINE);
+          self.emit_byte(3, LINE);
+        }
+        oast::MethodDefinitionKind::Set => {
+          self.emit_constant(Value::String("set".into()), LINE);
+          self.emit(Op::Call, LINE);
+          self.emit_byte(3, LINE);
+        }
+        _ => {
+          self.emit(Op::Call, LINE);
+          self.emit_byte(2, LINE);
+        }
+      }
+    }
     self.emit_set_method_home_object(target_slot)?;
 
     let prop_count = match md.kind {

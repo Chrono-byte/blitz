@@ -220,6 +220,9 @@ pub(crate) fn create_promise_intrinsics(
       if !Vm::is_callable_value(executor) {
         return Err(vm.throw_type_error("Promise executor is not callable"));
       }
+      let new_target = vm
+        .pending_constructor_new_target()
+        .unwrap_or_else(|| vm.this_value());
 
       let promise = crate::gc::track_promise(Rc::new(RefCell::new(PromiseState::Pending {
         on_fulfilled: Vec::new(),
@@ -292,9 +295,6 @@ pub(crate) fn create_promise_intrinsics(
         reject_pending_promise(vm, &promise, reason);
       }
 
-      let new_target = vm
-        .current_new_target()
-        .unwrap_or_else(|| vm.this_value());
       let prototype = vm.get_property_host(
         &new_target,
         &PropertyKey::String("prototype".to_string().into()),

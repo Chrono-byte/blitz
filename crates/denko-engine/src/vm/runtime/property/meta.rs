@@ -153,6 +153,13 @@ impl Vm {
       if same_value(obj, &candidate) {
         return Ok(false);
       }
+      // OrdinarySetPrototypeOf only walks ordinary objects when checking for a
+      // cycle. An exotic object is responsible for enforcing its own
+      // [[SetPrototypeOf]] invariants and must not have [[GetPrototypeOf]]
+      // invoked as a side effect of changing another object's prototype.
+      if matches!(candidate, Value::Proxy(_)) {
+        break;
+      }
       candidate = self.get_prototype_of_value(&candidate)?;
     }
     Ok(set_object_prototype(obj, proto.clone()))
@@ -392,6 +399,26 @@ impl Vm {
   ) -> Result<Vec<PropertyKey>, RuntimeError> {
     let mut enumerable = Vec::new();
     for key in self.own_property_keys_value(obj)? {
+      if self
+        .get_own_property_value(obj, &key)?
+        .is_some_and(|desc| descriptor_enumerable(&desc))
+      {
+        enumerable.push(key);
+      }
+    }
+    Ok(enumerable)
+  }
+
+  /// Return enumerable own string keys through `[[OwnPropertyKeys]]`.
+  pub(crate) fn own_enumerable_string_keys_value(
+    &mut self,
+    obj: &Value,
+  ) -> Result<Vec<PropertyKey>, RuntimeError> {
+    let mut enumerable = Vec::new();
+    for key in self.own_property_keys_value(obj)? {
+      if !matches!(key, PropertyKey::String(_)) {
+        continue;
+      }
       if self
         .get_own_property_value(obj, &key)?
         .is_some_and(|desc| descriptor_enumerable(&desc))

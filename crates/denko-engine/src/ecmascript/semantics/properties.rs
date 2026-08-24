@@ -73,7 +73,7 @@ pub(crate) fn own_property_descriptor(
       }
       None
     }
-    Value::Closure { props, .. } | Value::BuiltinObject(_, props) => {
+    Value::Closure { props, .. } | Value::BuiltinObject(_, props) | Value::Promise(_, props) => {
       props.borrow().properties.get(key).cloned()
     }
     _ => None,

@@ -83,18 +83,15 @@ impl Vm {
       | Value::Array(..)
       | Value::Closure { .. }
       | Value::BuiltinObject(_, _)
+      | Value::Proxy(_)
       | Value::Promise(..) => proto.clone(),
       _ => return Ok(false),
     };
 
-    let mut current = match value {
-      Value::Object(d) => d.borrow().get_prototype(),
-      Value::Array(_, props) => props.borrow().get_prototype(),
-      Value::Closure { props, .. } => props.borrow().get_prototype(),
-      Value::BuiltinObject(_, props) => props.borrow().get_prototype(),
-      Value::Promise(_, properties) => properties.borrow().get_prototype(),
-      _ => return Ok(false),
-    };
+    if !value.is_object() {
+      return Ok(false);
+    }
+    let mut current = self.get_prototype_of_value(value)?;
 
     let mut seen: HashSet<usize> = HashSet::new();
     while !matches!(current, Value::Null) {
@@ -107,13 +104,7 @@ impl Vm {
       if !seen.insert(identity) {
         return Ok(false);
       }
-      current = match &current {
-        Value::Object(d) => d.borrow().get_prototype(),
-        Value::Array(_, props) => props.borrow().get_prototype(),
-        Value::Closure { props, .. } => props.borrow().get_prototype(),
-        Value::BuiltinObject(_, props) => props.borrow().get_prototype(),
-        _ => Value::Null,
-      };
+      current = self.get_prototype_of_value(&current)?;
     }
     Ok(false)
   }
@@ -129,11 +120,7 @@ impl Vm {
     object: &Value,
   ) -> Result<bool, RuntimeError> {
     let key = self.to_property_key(property)?;
-    Ok(
-      self
-        .lookup_property_descriptor(object, &key, 0)?
-        .is_some(),
-    )
+    self.has_property_host(object, &key)
   }
 
   /// typeof helper returning the type string for a value.

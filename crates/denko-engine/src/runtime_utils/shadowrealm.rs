@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: MPL-2.0
 use super::*;
+use std::rc::Weak;
+
+type ShadowRealmRegistryEntry = (Weak<RefCell<ObjectData>>, Rc<ShadowRealmRecord>);
 
 thread_local! {
     /// Thread-local registry of ShadowRealm records, keyed by object pointer.
-    static SHADOW_REALM_REGISTRY: RefCell<HashMap<usize, Rc<ShadowRealmRecord>>> =
+    static SHADOW_REALM_REGISTRY: RefCell<HashMap<usize, ShadowRealmRegistryEntry>> =
         RefCell::new(HashMap::new());
 }
 
@@ -43,7 +46,9 @@ pub(crate) fn register_shadow_realm(
 ) {
   let key = Rc::as_ptr(obj) as usize;
   SHADOW_REALM_REGISTRY.with(|registry| {
-    registry.borrow_mut().insert(key, record);
+    let mut registry = registry.borrow_mut();
+    registry.retain(|_, (wrapper, _)| wrapper.upgrade().is_some());
+    registry.insert(key, (Rc::downgrade(obj), record));
   });
 }
 
@@ -51,7 +56,24 @@ pub(crate) fn register_shadow_realm(
 fn get_shadow_realm_record(value: &Value) -> Option<Rc<ShadowRealmRecord>> {
   if let Value::Object(obj) = value {
     let key = Rc::as_ptr(obj) as usize;
-    SHADOW_REALM_REGISTRY.with(|registry| registry.borrow().get(&key).cloned())
+    SHADOW_REALM_REGISTRY.with(|registry| {
+      let mut registry = registry.borrow_mut();
+      let entry = registry.get(&key).cloned();
+      match entry {
+        Some((wrapper, record))
+          if wrapper
+            .upgrade()
+            .is_some_and(|wrapper| Rc::ptr_eq(&wrapper, obj)) =>
+        {
+          Some(record)
+        }
+        Some(_) => {
+          registry.remove(&key);
+          None
+        }
+        None => None,
+      }
+    })
   } else {
     None
   }
@@ -83,4 +105,26 @@ pub(crate) fn resolve_shadowrealm_base_dir(vm: &Vm) -> PathBuf {
     return parent.to_path_buf();
   }
   env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn registry_releases_records_for_dead_wrappers() {
+    SHADOW_REALM_REGISTRY.with(|registry| registry.borrow_mut().clear());
+    let wrapper = Rc::new(RefCell::new(ObjectData::new()));
+    let record = Rc::new(ShadowRealmRecord::new(PathBuf::new()));
+    register_shadow_realm(&wrapper, Rc::clone(&record));
+    assert_eq!(Rc::strong_count(&record), 2);
+
+    drop(wrapper);
+    let replacement_wrapper = Rc::new(RefCell::new(ObjectData::new()));
+    let replacement_record = Rc::new(ShadowRealmRecord::new(PathBuf::new()));
+    register_shadow_realm(&replacement_wrapper, replacement_record);
+
+    assert_eq!(Rc::strong_count(&record), 1);
+    SHADOW_REALM_REGISTRY.with(|registry| registry.borrow_mut().clear());
+  }
 }

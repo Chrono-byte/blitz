@@ -73,7 +73,7 @@ pub(crate) fn create_function_intrinsics(
 
   let function_ctor_globals = Rc::clone(globals);
   let function_ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
-    let off = if vm.current_new_target().is_some() {
+    let off = if vm.pending_constructor_new_target().is_some() {
       1
     } else {
       0
@@ -188,7 +188,18 @@ pub(crate) fn create_function_intrinsics(
             }),
             &function_prototype,
           );
-          let target_length = vm.get_property_host(&target, &PKey::String("length".into()))?;
+          let target_length =
+            match crate::ecmascript::semantics::properties::own_property_descriptor(
+              &target,
+              &PKey::String("length".into()),
+            ) {
+              Some(PropertyDescriptor::Data { value, .. }) => value,
+              Some(PropertyDescriptor::Accessor {
+                get: Some(getter), ..
+              }) => vm.call_value_with_this(&getter, &target, &[])?,
+              Some(PropertyDescriptor::Accessor { get: None, .. }) => Value::Undefined,
+              None => Value::Undefined,
+            };
           let bound_length = match target_length {
             Value::Number(length) if length.is_finite() && length > 0.0 => {
               (length.floor() - bound_args.len() as f64).max(0.0)

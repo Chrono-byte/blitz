@@ -494,16 +494,53 @@ fn regexp_builtin_split(
   subject: js_string::JsString,
   limit: u32,
 ) -> Result<Value, RuntimeError> {
+  if !this.is_object() {
+    return Err(vm.throw_type_error("RegExp.prototype[Symbol.split] requires an object"));
+  }
+
+  let default_constructor = vm
+    .get_global("RegExp")
+    .ok_or_else(|| vm.throw_type_error("RegExp constructor is unavailable"))?;
+  let constructor = vm.get_property_host(this, &PropertyKey::String("constructor".into()))?;
+  let constructor = match constructor {
+    Value::Undefined => default_constructor,
+    constructor if constructor.is_object() => {
+      let species = vm.get_property_host(
+        &constructor,
+        &PropertyKey::Symbol(SymbolId::well_known_species()),
+      )?;
+      match species {
+        Value::Undefined | Value::Null => default_constructor,
+        species => species,
+      }
+    }
+    _ => return Err(vm.throw_type_error("RegExp constructor property is not an object")),
+  };
+  if !constructor.is_constructable() {
+    return Err(vm.throw_type_error("RegExp species is not a constructor"));
+  }
+
+  let flags = vm.get_property_host(this, &PropertyKey::String("flags".into()))?;
+  let flags = vm.to_string(&flags)?;
+  let unicode_matching = flags.as_str_lossy().contains('u');
+  let new_flags = if flags.as_str_lossy().contains('y') {
+    flags
+  } else {
+    let mut builder = js_string::JsStringBuilder::with_capacity(flags.len() + 1);
+    builder.push_string(&flags);
+    builder.push_str("y");
+    builder.finish()
+  };
+  let splitter = vm.construct_value(&constructor, &[this.clone(), Value::String(new_flags)])?;
+
   if limit == 0 {
     return Ok(array_from_values(Vec::new()));
   }
-  let matcher = regexp_matcher(vm, this)?;
-  let unicode = matcher.flags().unicode();
   let size = subject.len();
   let mut output = Vec::new();
 
   if size == 0 {
-    return if regexp_find(vm, &matcher, &subject, 0)?.is_some() {
+    return if !matches!(regexp_exec(vm, &splitter, &subject)?, Value::Null) {
       Ok(array_from_values(output))
     } else {
       Ok(array_from_values(vec![Value::String(subject)]))
@@ -514,17 +551,20 @@ fn regexp_builtin_split(
   let mut previous_end = 0;
   let mut position = 0;
   while position < size {
-    let Some(matched) = regexp_find(vm, &matcher, &subject, position)? else {
-      break;
-    };
-    let range = matched.range();
-    if range.start != position {
-      position = subject.advance_string_index(position, unicode);
+    drop(vm.set_property_host(
+      &splitter,
+      &Value::String("lastIndex".into()),
+      Value::Number(usize_to_f64(position)),
+    )?);
+    let matched = regexp_exec(vm, &splitter, &subject)?;
+    if matches!(matched, Value::Null) {
+      position = subject.advance_string_index(position, unicode_matching);
       continue;
     }
-    let end = range.end.min(size);
+    let end = vm.get_property_host(&splitter, &PropertyKey::String("lastIndex".into()))?;
+    let end = to_length(vm, &end)?.min(size);
     if end == previous_end {
-      position = subject.advance_string_index(position, unicode);
+      position = subject.advance_string_index(position, unicode_matching);
       continue;
     }
 
@@ -536,18 +576,13 @@ fn regexp_builtin_split(
     if output.len() == limit {
       return Ok(array_from_values(output));
     }
-    for capture in matched.captures().iter().skip(1) {
-      output.push(
-        capture
-          .as_ref()
-          .map_or(Value::Undefined, |capture| {
-            Value::String(
-              subject
-                .slice(capture.range())
-                .expect("split capture is within the input"),
-            )
-          }),
-      );
+    let capture_count = vm.get_property_host(&matched, &PropertyKey::String("length".into()))?;
+    let capture_count = to_length(vm, &capture_count)?;
+    for capture_index in 1..capture_count {
+      output.push(vm.get_property_host(
+        &matched,
+        &PropertyKey::String(capture_index.to_string().into()),
+      )?);
       if output.len() == limit {
         return Ok(array_from_values(output));
       }
@@ -857,7 +892,7 @@ pub(crate) fn create_regexp_intrinsics(
 
   let prototype_for_constructor = Rc::clone(&prototype);
   let constructor_function: BuiltinFn = Rc::new(move |vm, args| {
-    let constructing = vm.current_new_target().is_some();
+    let constructing = vm.pending_constructor_new_target().is_some();
     let offset = if constructing {
       1
     } else {

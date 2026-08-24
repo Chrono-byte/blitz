@@ -114,7 +114,7 @@ fn string_constructor_to_string(
   value: &Value,
 ) -> Result<JsString, crate::errors::RuntimeError> {
   match value {
-    Value::Symbol(_, desc) if vm.current_new_target().is_some() => {
+    Value::Symbol(_, desc) if vm.pending_constructor_new_target().is_some() => {
       Err(vm.throw_type_error("Cannot convert a Symbol value to a string"))
     }
     Value::Symbol(_, desc) => Ok(match desc {
@@ -187,7 +187,7 @@ pub(crate) fn install_string_boolean_symbol_builtins(
     ObjectData::with_prototype(Value::Object(Rc::clone(object_proto_map))),
   ));
   let symbol_ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
-    if vm.current_new_target().is_some() {
+    if vm.pending_constructor_new_target().is_some() {
       return Err(vm.throw_type_error("Symbol is not a constructor"));
     }
     let value_idx = 0;
@@ -500,7 +500,7 @@ pub(crate) fn install_string_boolean_symbol_builtins(
 
   let string_proto_for_ctor = Rc::clone(&string_proto_map);
   let string_ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
-    let constructing = vm.current_new_target().is_some();
+    let constructing = vm.pending_constructor_new_target().is_some();
     let value_idx = if constructing || args.len() > 1 { 1 } else { 0 };
     let receiver = args.first().cloned().unwrap_or(Value::Undefined);
     let s = match args.get(value_idx) {
@@ -1815,7 +1815,7 @@ pub(crate) fn install_string_boolean_symbol_builtins(
   );
 
   let boolean_ctor_fn: BuiltinFn = Rc::new(|vm, args| {
-    let value_idx = if vm.current_new_target().is_some() || args.len() > 1 {
+    let value_idx = if vm.pending_constructor_new_target().is_some() || args.len() > 1 {
       1
     } else {
       0
@@ -1826,7 +1826,7 @@ pub(crate) fn install_string_boolean_symbol_builtins(
       .cloned()
       .unwrap_or(Value::Undefined);
     let prim = Value::Bool(vm.to_boolean(&value));
-    if vm.current_new_target().is_some()
+    if vm.pending_constructor_new_target().is_some()
       && let Value::Object(obj) = &receiver
     {
       obj

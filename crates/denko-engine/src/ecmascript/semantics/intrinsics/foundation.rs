@@ -48,6 +48,60 @@ pub(crate) fn create_foundation() -> FoundationIntrinsics {
         configurable: true,
       },
     );
+  for (name, slot) in [
+    ("next", "[[GeneratorNext]]"),
+    ("return", "[[GeneratorReturn]]"),
+    ("throw", "[[GeneratorThrow]]"),
+  ] {
+    let method = builtin_object(
+      Rc::new(move |vm, args| {
+        let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+        let Value::Object(object) = &receiver else {
+          return Err(vm.throw_type_error(&format!(
+            "Generator.prototype.{name} called on incompatible receiver"
+          )));
+        };
+        let implementation = object
+          .borrow()
+          .internal_slot(slot)
+          .cloned()
+          .ok_or_else(|| {
+            vm.throw_type_error(&format!(
+              "Generator.prototype.{name} called on incompatible receiver"
+            ))
+          })?;
+        let user_args = if vm.builtin_this_arg_prepended() {
+          args.get(1..).unwrap_or_default()
+        } else {
+          args
+        };
+        vm.call_value_with_this(&implementation, &receiver, user_args)
+      }),
+      &function_prototype,
+    );
+    set_builtin_name(&method, name);
+    set_builtin_length(&method, 1.0);
+    generator_prototype
+      .borrow_mut()
+      .properties
+      .insert(
+        PropertyKey::String(name.into()),
+        PropertyDescriptor::builtin_data(method),
+      );
+  }
+  let iterator = builtin_object(
+    Rc::new(|_vm, args| Ok(args.first().cloned().unwrap_or(Value::Undefined))),
+    &function_prototype,
+  );
+  set_builtin_name(&iterator, "[Symbol.iterator]");
+  set_builtin_length(&iterator, 0.0);
+  generator_prototype
+    .borrow_mut()
+    .properties
+    .insert(
+      PropertyKey::Symbol(crate::value::SymbolId::well_known_iterator()),
+      PropertyDescriptor::builtin_data(iterator),
+    );
   generator_function_prototype
     .borrow_mut()
     .properties
@@ -66,6 +120,18 @@ pub(crate) fn create_foundation() -> FoundationIntrinsics {
     .insert(
       PropertyKey::String("prototype".into()),
       PropertyDescriptor::builtin_prototype(Value::Object(Rc::clone(&generator_prototype))),
+    );
+  generator_prototype
+    .borrow_mut()
+    .properties
+    .insert(
+      PropertyKey::String("constructor".into()),
+      PropertyDescriptor::Data {
+        value: Value::Object(Rc::clone(&generator_function_prototype)),
+        writable: false,
+        enumerable: false,
+        configurable: true,
+      },
     );
 
   let throw_type_error = builtin_object(

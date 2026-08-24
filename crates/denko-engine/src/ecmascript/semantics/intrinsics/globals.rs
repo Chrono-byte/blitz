@@ -224,19 +224,17 @@ pub(crate) fn install_global_bindings(
     PropertyDescriptor::builtin_data(Value::Object(Rc::clone(values.json_obj))),
   );
 
-  let proxy_object_proto = Rc::clone(object_proto_map);
   let proxy_function_proto = Rc::clone(function_proto_map);
-  let proxy_proto_map = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
-    Rc::clone(&proxy_object_proto),
-  ))));
   let proxy_ctor_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::with_prototype(
     Value::Object(Rc::clone(&proxy_function_proto)),
   )));
-  proxy_ctor_map.borrow_mut().properties.insert(
-    PKey::String("prototype".to_string().into()),
-    PropertyDescriptor::builtin_prototype(Value::Object(proxy_proto_map)),
-  );
+  proxy_ctor_map
+    .borrow_mut()
+    .set_internal_slot("[[Constructable]]", Value::Bool(true));
   let proxy_ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
+    if vm.pending_constructor_new_target().is_none() {
+      return Err(vm.throw_type_error("Proxy constructor requires 'new'"));
+    }
     let off = static_builtin_arg_offset(vm, args, "Proxy");
     let target = args.get(off).cloned().unwrap_or(Value::Undefined);
     let handler = args
@@ -253,6 +251,10 @@ pub(crate) fn install_global_bindings(
     Ok(Value::Proxy(proxy))
   });
   let proxy_ctor_val = Value::BuiltinObject(Rc::clone(&proxy_ctor_fn), Rc::clone(&proxy_ctor_map));
+  proxy_ctor_map.borrow_mut().properties.insert(
+    PKey::String("length".to_string().into()),
+    PropertyDescriptor::builtin_metadata(Value::Number(2.0)),
+  );
   proxy_ctor_map.borrow_mut().properties.insert(
     PKey::String("name".to_string().into()),
     PropertyDescriptor::builtin_metadata(Value::String("Proxy".to_string().into())),
@@ -286,7 +288,7 @@ pub(crate) fn install_global_bindings(
             }),
             &proxy_function_proto_for_revoke,
           );
-          set_builtin_name(&revoke_fn, "revoke");
+          set_builtin_name(&revoke_fn, "");
           set_builtin_length(&revoke_fn, 0.0);
           let result = Rc::new(RefCell::new(ObjectData::new()));
           result.borrow_mut().properties.insert(

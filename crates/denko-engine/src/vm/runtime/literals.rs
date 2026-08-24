@@ -260,18 +260,8 @@ impl Vm {
       );
     }
 
-    // Set the `name` property
-    props.borrow_mut().properties.insert(
-      PropertyKey::String("name".to_string().into()),
-      PropertyDescriptor::Data {
-        value: Value::String(closure_proto.name.clone().into()),
-        writable: false,
-        enumerable: false,
-        configurable: true,
-      },
-    );
-
-    // Set the `length` property
+    // Function instances expose `length` before `name`; own-key order is
+    // observable and class static definitions preserve that initial order.
     props.borrow_mut().properties.insert(
       PropertyKey::String("length".to_string().into()),
       PropertyDescriptor::Data {
@@ -282,9 +272,21 @@ impl Vm {
       },
     );
 
+    props.borrow_mut().properties.insert(
+      PropertyKey::String("name".to_string().into()),
+      PropertyDescriptor::Data {
+        value: Value::String(closure_proto.name.clone().into()),
+        writable: false,
+        enumerable: false,
+        configurable: true,
+      },
+    );
+
     if has_prototype_property {
       let proto_obj = if closure_proto.is_generator {
-        self.realm_state.realm.generator_prototype()
+        Value::Object(gc::track_object(Rc::new(RefCell::new(
+          ObjectData::with_prototype(self.realm_state.realm.generator_prototype()),
+        ))))
       } else {
         let object_proto = self
           .realm_state
@@ -299,7 +301,9 @@ impl Vm {
         Value::Object(proto_obj_map)
       };
 
-      if let Value::Object(proto_obj_map) = &proto_obj {
+      if !closure_proto.is_generator
+        && let Value::Object(proto_obj_map) = &proto_obj
+      {
         proto_obj_map.borrow_mut().properties.insert(
           PropertyKey::String("constructor".to_string().into()),
           PropertyDescriptor::Data {

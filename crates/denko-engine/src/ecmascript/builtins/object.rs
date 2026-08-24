@@ -434,17 +434,14 @@ pub(crate) fn install_object_intrinsics(
           Rc::new(move |vm, args| {
             let off = static_builtin_arg_offset(vm, args, "Object");
             let proto = args.get(off).cloned().unwrap_or(Value::Undefined);
-            let obj = match proto {
-              Value::Null => ObjectData::with_prototype(Value::Null),
-              Value::Object(_)
-              | Value::Array(..)
-              | Value::Closure { .. }
-              | Value::BuiltinObject(_, _) => ObjectData::with_prototype(proto),
-              _ => {
-                return Err(RuntimeError::from(
-                  "Object.create: prototype must be object or null",
-                ));
-              }
+            let obj = if matches!(proto, Value::Null) {
+              ObjectData::with_prototype(Value::Null)
+            } else if proto.is_object() {
+              ObjectData::with_prototype(proto)
+            } else {
+              return Err(RuntimeError::from(
+                "Object.create: prototype must be object or null",
+              ));
             };
             let created = Value::Object(Rc::new(RefCell::new(obj)));
             if let Some(props) = args.get(off + 1)
@@ -693,7 +690,7 @@ pub(crate) fn install_object_intrinsics(
             let target = args.get(off).cloned().unwrap_or(Value::Undefined);
             let target = vm.to_object_value(target)?;
             let keys = vm
-              .own_enumerable_keys_value(&target)?
+              .own_enumerable_string_keys_value(&target)?
               .into_iter()
               .filter_map(|key| match key {
                 PropertyKey::String(s) => Some(Value::String(s)),

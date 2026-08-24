@@ -34,10 +34,18 @@ impl Vm {
     &self,
     chunk: &crate::bytecode::Chunk,
   ) -> Option<String> {
-    for maybe_name in &chunk.root_slot_names {
+    for (index, maybe_name) in chunk.root_slot_names.iter().enumerate() {
       let Some(name) = maybe_name.as_deref() else {
         continue;
       };
+      if chunk
+        .root_lexical_tdz
+        .get(index)
+        .copied()
+        .unwrap_or(false)
+      {
+        continue;
+      }
       let mut env = Some(Rc::clone(&self.execution.active.lexical_env));
       while let Some(current) = env {
         let (conflict, outer) = {

@@ -80,7 +80,7 @@ fn create_named_error_constructor(
   let instance_name = name.to_owned();
   let constructor_function: BuiltinFn = Rc::new(move |vm, args| {
     let constructor = vm
-      .current_new_target()
+      .pending_constructor_new_target()
       .or_else(|| vm.get_global(&constructor_name))
       .unwrap_or(Value::Undefined);
     let prototype = vm
@@ -149,7 +149,7 @@ pub(crate) fn create_error_intrinsics(
 
   let error_constructor_function: BuiltinFn = Rc::new(move |vm, args| {
     let constructor = vm
-      .current_new_target()
+      .pending_constructor_new_target()
       .or_else(|| vm.get_global("Error"))
       .unwrap_or(Value::Undefined);
     let prototype = vm
@@ -315,7 +315,7 @@ pub(crate) fn create_error_intrinsics(
 
   let aggregate_error_constructor_function: BuiltinFn = Rc::new(move |vm, args| {
     let constructor = vm
-      .current_new_target()
+      .pending_constructor_new_target()
       .or_else(|| vm.get_global("AggregateError"))
       .unwrap_or(Value::Undefined);
     let prototype = vm

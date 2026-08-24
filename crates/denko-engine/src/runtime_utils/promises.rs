@@ -42,9 +42,6 @@ pub(crate) fn get_iterator_record(
     return Err(vm.throw_type_error("Iterator method did not return an object"));
   }
   let next = vm.get_property_host(&iterator, &PropertyKey::String("next".to_string().into()))?;
-  if !Vm::is_callable_value(&next) {
-    return Err(vm.throw_type_error("Iterator next is not callable"));
-  }
   Ok((iterator, next))
 }
 

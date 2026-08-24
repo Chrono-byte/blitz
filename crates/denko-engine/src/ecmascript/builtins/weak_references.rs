@@ -113,7 +113,7 @@ pub(crate) fn create_weak_reference_intrinsics(
       PropertyDescriptor::builtin_prototype(Value::Object(Rc::clone(&weak_ref_prototype))),
     );
   let weak_ref_constructor_function: BuiltinFn = Rc::new(|vm, args| {
-    if vm.current_new_target().is_none() {
+    if vm.pending_constructor_new_target().is_none() {
       return Err(vm.throw_type_error("Constructor WeakRef requires 'new'"));
     }
     let target = args.get(1).cloned().unwrap_or(Value::Undefined);
@@ -185,7 +185,7 @@ pub(crate) fn create_weak_reference_intrinsics(
       PropertyDescriptor::builtin_prototype(Value::Object(Rc::clone(&registry_prototype))),
     );
   let registry_constructor_function: BuiltinFn = Rc::new(|vm, args| {
-    if vm.current_new_target().is_none() {
+    if vm.pending_constructor_new_target().is_none() {
       return Err(vm.throw_type_error("Constructor FinalizationRegistry requires 'new'"));
     }
     let cleanup = args.get(1).cloned().unwrap_or(Value::Undefined);

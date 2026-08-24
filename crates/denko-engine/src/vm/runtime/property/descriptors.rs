@@ -136,6 +136,20 @@ impl Vm {
               "Proxy defineProperty trap cannot make a configurable target property non-configurable",
             ));
           }
+          if matches!(
+            target_desc,
+            PropertyDescriptor::Data {
+              configurable: false,
+              writable: true,
+              ..
+            }
+          ) && desc.has_writable
+            && desc.writable == Some(false)
+          {
+            return Err(self.throw_type_error(
+              "Proxy defineProperty trap cannot make a non-configurable writable property non-writable",
+            ));
+          }
         }
       }
       return Ok(true);

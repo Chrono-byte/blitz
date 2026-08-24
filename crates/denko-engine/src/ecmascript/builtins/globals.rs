@@ -192,7 +192,9 @@ pub(crate) fn install_global_function_builtins(g: &mut ObjectData) {
                     },
                 )
             })?;
-            if let Some(name) = vm.direct_eval_lexical_conflict_name(&chunk) {
+            if !chunk.root_strict
+                && let Some(name) = vm.direct_eval_lexical_conflict_name(&chunk)
+            {
                 return Err(syntax_error(
                     vm,
                     format!("redeclaration of lexical binding `{}`", name),

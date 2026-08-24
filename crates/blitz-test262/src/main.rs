@@ -612,7 +612,7 @@ struct RunnerOptions {
   #[arg(long = "summary-json", value_name = "PATH")]
   summary_json: Option<PathBuf>,
   /// Number of exact-file tests to hand to each subprocess batch.
-  #[arg(long = "batch-size", value_name = "N", default_value_t = 200)]
+  #[arg(long = "batch-size", value_name = "N", default_value_t = 1)]
   batch_size: usize,
   /// Maximum runtime for a subprocess batch before recursively isolating it.
   #[arg(

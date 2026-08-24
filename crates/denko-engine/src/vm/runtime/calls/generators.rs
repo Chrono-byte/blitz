@@ -3,7 +3,7 @@
 use crate::bytecode::FunctionProto;
 use crate::errors::RuntimeError;
 use crate::gc;
-use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, SharedValue, SymbolId, Value};
+use crate::value::{ObjectData, SharedValue, Value};
 use crate::vm::Vm;
 use crate::vm::state::{GeneratorRunner, RiscExecutionState, RiscRunOutcome};
 use std::cell::RefCell;
@@ -73,12 +73,20 @@ impl Vm {
     gen_obj
       .borrow_mut()
       .set_internal_slot("[[GeneratorState]]", Value::Bool(true));
+    let instance_prototype = self
+      .get_property_host(
+        callee,
+        &crate::value::PropertyKey::String("prototype".into()),
+      )
+      .ok()
+      .filter(Value::is_object)
+      .unwrap_or_else(|| self.realm_state.realm.generator_prototype());
     gen_obj
       .borrow_mut()
-      .set_prototype_value(self.realm_state.realm.generator_prototype());
-    gen_obj.borrow_mut().properties.insert(
-      PropertyKey::String("next".to_string().into()),
-      PropertyDescriptor::ordinary_data(Value::Builtin(Rc::new(move |vm, args| {
+      .set_prototype_value(instance_prototype);
+    gen_obj.borrow_mut().set_internal_slot(
+      "[[GeneratorNext]]",
+      Value::Builtin(Rc::new(move |vm, args| {
         let mut runner = next_runner
           .try_borrow_mut()
           .map_err(|_| RuntimeError::from("TypeError: generator is already executing"))?;
@@ -121,11 +129,11 @@ impl Vm {
             }
           }
         }
-      }))),
+      })),
     );
-    gen_obj.borrow_mut().properties.insert(
-      PropertyKey::String("throw".to_string().into()),
-      PropertyDescriptor::ordinary_data(Value::Builtin(Rc::new(move |vm, args| {
+    gen_obj.borrow_mut().set_internal_slot(
+      "[[GeneratorThrow]]",
+      Value::Builtin(Rc::new(move |vm, args| {
         let mut runner = throw_runner
           .try_borrow_mut()
           .map_err(|_| RuntimeError::from("TypeError: generator is already executing"))?;
@@ -175,11 +183,11 @@ impl Vm {
             }
           }
         }
-      }))),
+      })),
     );
-    gen_obj.borrow_mut().properties.insert(
-      PropertyKey::String("return".to_string().into()),
-      PropertyDescriptor::ordinary_data(Value::Builtin(Rc::new(move |vm, args| {
+    gen_obj.borrow_mut().set_internal_slot(
+      "[[GeneratorReturn]]",
+      Value::Builtin(Rc::new(move |vm, args| {
         let mut runner = return_runner
           .try_borrow_mut()
           .map_err(|_| RuntimeError::from("TypeError: generator is already executing"))?;
@@ -216,13 +224,7 @@ impl Vm {
             Err(vm.propagate_generator_error(&mut runner, error))
           }
         }
-      }))),
-    );
-    gen_obj.borrow_mut().properties.insert(
-      PropertyKey::Symbol(SymbolId::well_known_iterator()),
-      PropertyDescriptor::ordinary_data(Value::Builtin(Rc::new(|_vm, args| {
-        Ok(args.first().cloned().unwrap_or(Value::Undefined))
-      }))),
+      })),
     );
     Ok(Value::Object(gen_obj))
   }

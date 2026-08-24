@@ -562,6 +562,8 @@ pub struct ProxyData {
   pub target: Value,
   /// The handler object that defines the proxy behavior.
   pub handler: Option<Value>,
+  callable: bool,
+  constructable: bool,
 }
 
 impl ProxyData {
@@ -570,10 +572,14 @@ impl ProxyData {
     target: Value,
     handler: Value,
   ) -> Self {
+    let callable = target.is_callable();
+    let constructable = target.is_constructable();
     Self {
       identity: ObjectData::next_identity(),
       target,
       handler: Some(handler),
+      callable,
+      constructable,
     }
   }
 
@@ -585,6 +591,14 @@ impl ProxyData {
   /// Check if the proxy has been revoked.
   pub fn is_revoked(&self) -> bool {
     self.handler.is_none()
+  }
+
+  pub fn is_callable(&self) -> bool {
+    self.callable
+  }
+
+  pub fn is_constructable(&self) -> bool {
+    self.constructable
   }
 }
 
@@ -1152,7 +1166,7 @@ impl Value {
       Value::Closure { .. } | Value::Builtin(_) | Value::BuiltinObject(_, _) => true,
       Value::Proxy(proxy) => {
         let proxy = proxy.borrow();
-        !proxy.is_revoked() && proxy.target.is_callable()
+        proxy.is_callable()
       }
       _ => false,
     }
@@ -1173,9 +1187,7 @@ impl Value {
       Value::Array(..) => "object",
       Value::Proxy(proxy) => {
         let proxy = proxy.borrow();
-        if proxy.is_revoked() {
-          "object"
-        } else if proxy.target.is_callable() {
+        if proxy.is_callable() {
           "function"
         } else {
           "object"
@@ -1221,6 +1233,12 @@ impl Value {
       Value::Closure { proto, .. } => proto.has_prototype_property && proto.is_constructor,
       Value::BuiltinObject(_, props) => {
         let props_ref = props.borrow();
+        if matches!(
+          props_ref.internal_slot("[[Constructable]]"),
+          Some(Value::Bool(true))
+        ) {
+          return true;
+        }
         if props_ref
           .properties
           .contains_key(&PropertyKey::String("prototype".to_string().into()))
@@ -1234,7 +1252,7 @@ impl Value {
       }
       Value::Proxy(proxy) => {
         let proxy = proxy.borrow();
-        !proxy.is_revoked() && proxy.target.is_constructable()
+        proxy.is_constructable()
       }
       _ => false,
     }

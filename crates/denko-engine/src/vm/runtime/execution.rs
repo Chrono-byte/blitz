@@ -448,7 +448,7 @@ impl Vm {
           }
           Op::GetGlobal | Op::TypeofGlobal => {
             let name = self.string_constant(decode_risc_aux16(word) as usize)?;
-            let value = self.resolve_identifier_value(&name)?;
+            let value = self.resolve_identifier_value(name.as_str_lossy())?;
             registers[rd] = if matches!(op, Op::TypeofGlobal) {
               Value::String(
                 value
@@ -463,14 +463,14 @@ impl Vm {
           Op::SetGlobal => {
             let name = self.string_constant(decode_risc_aux16(word) as usize)?;
             let value = registers[rd].clone();
-            self.set_global_value(&name, value)?;
+            self.set_global_value(name.as_str_lossy(), value)?;
           }
           Op::GetBuiltin => {
             let name = self.string_constant(decode_risc_aux16(word) as usize)?;
             let value = self
               .realm_state
               .realm
-              .get_hidden_builtin(&name)
+              .get_hidden_builtin(name.as_str_lossy())
               .ok_or_else(|| RuntimeError::from(format!("GetBuiltin: '{name}' not found")))?;
             if !matches!(value, Value::Builtin(_) | Value::BuiltinObject(_, _)) {
               return Err(RuntimeError::from(format!(
@@ -774,6 +774,7 @@ impl Vm {
             let values = registers[rs].clone();
             let mut mask = registers[(decode_aux8(word) & 0xF) as usize].clone();
             let mut super_construct = false;
+            let mut ordinary_construct = false;
             let receiver = match &mask {
               Value::Array(mask_values, _) => {
                 let marker = mask_values.borrow().first().cloned().flatten();
@@ -785,6 +786,12 @@ impl Vm {
                     super_construct = matches!(
                       marker_values
                         .get(2)
+                        .and_then(|value| value.as_ref()),
+                      Some(Value::Bool(true))
+                    );
+                    ordinary_construct = matches!(
+                      marker_values
+                        .get(3)
                         .and_then(|value| value.as_ref()),
                       Some(Value::Bool(true))
                     );
@@ -811,6 +818,8 @@ impl Vm {
             let arguments = self.flatten_spread_values(values, mask)?;
             registers[rd] = if super_construct {
               self.construct_super_value(arguments)?
+            } else if ordinary_construct {
+              self.construct_value(&callee, &arguments)?
             } else if let Some(receiver) = receiver {
               self.call_with_this(&callee, &receiver, &arguments)?
             } else {
@@ -1144,6 +1153,9 @@ impl Vm {
     self.execution.active.chunk = chunk_rc;
     self.execution.active.ip = 0;
     self.execution.active.strict = self.execution.active.chunk.root_strict;
+    if !direct_eval {
+      self.execution.active.lexical_env = Rc::clone(&self.realm_state.global_env);
+    }
     self.roots.temporary.clear();
     self.execution.active.yield_star = None;
     if self
@@ -1177,6 +1189,10 @@ impl Vm {
 
     let result = self.run_risc_loop(true);
     let nested_thrown = self.exceptions.last_uncaught.take();
+
+    if !direct_eval {
+      self.persist_root_bindings();
+    }
 
     self.execution.active = saved_context;
     self.execution.root_chunk = saved_root_chunk;
@@ -1352,9 +1368,9 @@ impl Vm {
   fn string_constant(
     &self,
     idx: usize,
-  ) -> Result<String, RuntimeError> {
+  ) -> Result<js_string::JsString, RuntimeError> {
     match self.execution.active.chunk.constants.get(idx) {
-      Some(crate::bytecode::Constant::String(value)) => Ok(value.to_string_lossy()),
+      Some(crate::bytecode::Constant::String(value)) => Ok(value.clone()),
       Some(_) => Err(RuntimeError::from("Constant is not a string")),
       None => Err(RuntimeError::from("String constant index out of bounds")),
     }
@@ -1367,6 +1383,7 @@ impl Vm {
   ) -> Result<(usize, String), RuntimeError> {
     let descriptor = self.string_constant(index)?;
     let (module, name) = descriptor
+      .as_str_lossy()
       .split_once('\0')
       .ok_or_else(|| RuntimeError::from("Invalid module export descriptor"))?;
     let module = module

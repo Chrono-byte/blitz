@@ -19,8 +19,11 @@ failure-class changes remain visible while compatibility work is in progress.
 Run the checked-in full manifest with the same report format:
 
 ```powershell
-cargo run -p blitz-test262 --bin test262 -- --manifest docs/test262/es6-manifest.txt --summary-json target/test262/es6-summary.json --workers 4 --batch-size 20 --subprocess-timeout 35 --quiet
+cargo run -p blitz-test262 --bin test262 -- --manifest docs/test262/es6-manifest.txt --summary-json target/test262/es6-summary.json --workers 1 --batch-size 1 --subprocess-timeout 35 --quiet
 ```
+
+Keep full-manifest runs at one test per subprocess. Larger batches allow engine
+heap retention to accumulate within each child process.
 
 Manifest entries are stable forward-slash paths relative to `test262/test`.
 Comments and blank lines are ignored; missing or escaping paths are rejected.

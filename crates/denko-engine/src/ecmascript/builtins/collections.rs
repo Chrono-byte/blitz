@@ -538,7 +538,7 @@ pub(crate) fn install_map_set_constructors(
   ))));
   let map_data_for_ctor = map_data_key;
   let map_ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
-    if vm.current_new_target().is_none() {
+    if vm.pending_constructor_new_target().is_none() {
       return Err(vm.throw_type_error("Constructor Map requires 'new'"));
     }
     let receiver = args.first().cloned().unwrap_or(Value::Undefined);
@@ -958,7 +958,7 @@ pub(crate) fn install_map_set_constructors(
     Rc::clone(function_proto_map),
   ))));
   let weak_map_ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
-    if vm.current_new_target().is_none() {
+    if vm.pending_constructor_new_target().is_none() {
       return Err(vm.throw_type_error("Constructor WeakMap requires 'new'"));
     }
     let receiver = args.first().cloned().unwrap_or(Value::Undefined);
@@ -1229,7 +1229,7 @@ pub(crate) fn install_map_set_constructors(
     Rc::clone(function_proto_map),
   ))));
   let weak_set_ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
-    if vm.current_new_target().is_none() {
+    if vm.pending_constructor_new_target().is_none() {
       return Err(vm.throw_type_error("Constructor WeakSet requires 'new'"));
     }
     let receiver = args.first().cloned().unwrap_or(Value::Undefined);
@@ -1351,7 +1351,7 @@ pub(crate) fn install_map_set_constructors(
   ))));
   let set_data_for_ctor = set_data_key;
   let set_ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
-    if vm.current_new_target().is_none() {
+    if vm.pending_constructor_new_target().is_none() {
       return Err(vm.throw_type_error("Constructor Set requires 'new'"));
     }
     let receiver = args.first().cloned().unwrap_or(Value::Undefined);

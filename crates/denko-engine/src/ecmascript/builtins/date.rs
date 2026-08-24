@@ -465,7 +465,7 @@ pub(crate) fn create_date_intrinsics(
   ))));
   let prototype_for_constructor = Rc::clone(&prototype);
   let constructor_function: BuiltinFn = Rc::new(move |vm, args| {
-    let constructing = vm.current_new_target().is_some();
+    let constructing = vm.pending_constructor_new_target().is_some();
     if !constructing {
       return Ok(Value::String(readable_string(now()).into()));
     }
@@ -497,7 +497,7 @@ pub(crate) fn create_date_intrinsics(
       }
     };
     let instance_prototype = vm
-      .current_new_target()
+      .pending_constructor_new_target()
       .and_then(|new_target| {
         vm.get_property_host(&new_target, &PropertyKey::String("prototype".into()))
           .ok()

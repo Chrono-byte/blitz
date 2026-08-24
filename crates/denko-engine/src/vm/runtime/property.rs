@@ -258,7 +258,14 @@ impl Vm {
       }
     }
 
-    if let Some((desc, _holder)) = self.lookup_property_descriptor(target, key, 0)? {
+    let own_desc = self.get_own_property_value(target, key)?;
+    if own_desc.is_none() {
+      let parent = self.get_prototype(target);
+      if !matches!(parent, Value::Null) {
+        return self.set_property_value(&parent, key, value, receiver);
+      }
+    }
+    if let Some(desc) = own_desc {
       match desc {
         PropertyDescriptor::Accessor { set, .. } => {
           let Some(setter) = set.filter(|setter| !matches!(setter, Value::Undefined)) else {
@@ -351,6 +358,37 @@ impl Vm {
     }
     if matches!(obj, Value::Proxy(_)) {
       return self.get_proxy_property(obj, key, receiver);
+    }
+    if obj.is_object() {
+      if let Some(desc) = self.get_own_property_value(obj, key)? {
+        return match desc {
+          PropertyDescriptor::Data {
+            value: Value::Uninitialized,
+            ..
+          } => {
+            Err(self.throw_reference_error("Cannot access module binding before initialization"))
+          }
+          PropertyDescriptor::Data { value, .. } => Ok(value),
+          PropertyDescriptor::Accessor { get, .. } => {
+            if let Some(getter) = get.filter(|getter| !matches!(getter, Value::Undefined)) {
+              self.call_with_this(&getter, receiver, &[])
+            } else {
+              Ok(Value::Undefined)
+            }
+          }
+        };
+      }
+      let mut parent = self.get_prototype(obj);
+      // Host-created Array values predate realm initialization and may not
+      // carry an explicit [[Prototype]]. They still use the current realm's
+      // intrinsic Array prototype for ordinary property lookup.
+      if matches!(parent, Value::Null) && matches!(obj, Value::Array(..)) {
+        parent = self.realm_state.realm.array_prototype();
+      }
+      if matches!(parent, Value::Null) {
+        return Ok(Value::Undefined);
+      }
+      return self.get_property_with_receiver(&parent, key, receiver);
     }
     if let Some((desc, _holder)) = self.lookup_property_descriptor(obj, key, 0)? {
       return match desc {
@@ -448,9 +486,14 @@ impl Vm {
     receiver: &Value,
     key: &Value,
   ) -> Result<Value, RuntimeError> {
+    if matches!(receiver, Value::Uninitialized) {
+      return Err(
+        self.throw_reference_error("Must call super constructor before accessing 'this'"),
+      );
+    }
     let super_obj = self.super_base_object()?;
     if matches!(super_obj, Value::Null) {
-      return Ok(Value::Undefined);
+      return Err(self.throw_type_error("Cannot read properties of null"));
     }
     let k = self.to_property_key(key)?;
     self.get_property_with_receiver(&super_obj, &k, receiver)
@@ -462,9 +505,14 @@ impl Vm {
     key: &Value,
     value: Value,
   ) -> Result<Value, RuntimeError> {
+    if matches!(receiver, Value::Uninitialized) {
+      return Err(
+        self.throw_reference_error("Must call super constructor before accessing 'this'"),
+      );
+    }
     let super_obj = self.super_base_object()?;
     if matches!(super_obj, Value::Null) {
-      return Ok(Value::Undefined);
+      return Err(self.throw_type_error("Cannot set properties of null"));
     }
     let k = self.to_property_key(key)?;
     self.set_property_with_receiver(&super_obj, &k, value.clone(), receiver)?;
@@ -545,12 +593,26 @@ impl Vm {
     obj: &Value,
     key: &PropertyKey,
   ) -> Result<bool, RuntimeError> {
+    self.has_property_value(obj, key, 0)
+  }
+
+  fn has_property_value(
+    &mut self,
+    obj: &Value,
+    key: &PropertyKey,
+    depth: usize,
+  ) -> Result<bool, RuntimeError> {
+    if depth > MAX_PROTOTYPE_DEPTH {
+      return Err(RuntimeError::from(
+        "Prototype chain cycle detected or too deep",
+      ));
+    }
     if let Value::Proxy(proxy) = obj {
       let (target, handler) = proxy_target_and_handler(self, proxy, "has")?;
       let trap =
         self.get_property_value(&handler, &PropertyKey::String("has".to_string().into()))?;
       if matches!(trap, Value::Undefined | Value::Null) {
-        return self.has_property_host(&target, key);
+        return self.has_property_value(&target, key, depth + 1);
       }
       if !Self::is_callable_value(&trap) {
         return Err(self.throw_type_error("Proxy has trap is not callable"));
@@ -578,11 +640,14 @@ impl Vm {
       }
       return Ok(false);
     }
-    Ok(
-      self
-        .lookup_property_descriptor(obj, key, 0)?
-        .is_some(),
-    )
+    if self.get_own_property_value(obj, key)?.is_some() {
+      return Ok(true);
+    }
+    let prototype = self.get_prototype_of_value(obj)?;
+    if matches!(prototype, Value::Null) {
+      return Ok(false);
+    }
+    self.has_property_value(&prototype, key, depth + 1)
   }
 
   /// Host hook: delete an own property.
@@ -866,6 +931,9 @@ impl Vm {
           .and_then(|index| byte_view_index_value(obj, index))
           .unwrap_or(Value::Undefined),
       );
+    }
+    if obj.is_object() {
+      return self.get_property_with_receiver(obj, key, obj);
     }
     if let Some((desc, _holder)) = self.lookup_property_descriptor(obj, key, 0)? {
       return match desc {

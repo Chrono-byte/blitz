@@ -7,9 +7,7 @@ use crate::gc;
 use crate::runtime_utils::{strict_equal, to_length, usize_to_decimal_string, usize_to_f64};
 use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, SharedValue, Value};
 use crate::vm::Vm;
-use crate::vm::state::{
-  ArgumentsState, ExecutionContext, Frame, LOCALS_INITIAL_CAPACITY, SlotMetadata,
-};
+use crate::vm::state::{ArgumentsState, ExecutionContext, Frame, SlotMetadata};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -18,6 +16,90 @@ mod arguments;
 mod generators;
 
 impl Vm {
+  fn function_realm_globals(constructor: &Value) -> Option<Value> {
+    match constructor {
+      Value::Closure { props, .. } | Value::BuiltinObject(_, props) => props
+        .borrow()
+        .properties
+        .get(&PropertyKey::String("[[RealmGlobals]]".into()))
+        .and_then(|descriptor| match descriptor {
+          PropertyDescriptor::Data { value, .. } => Some(value.clone()),
+          PropertyDescriptor::Accessor { .. } => None,
+        }),
+      Value::Proxy(proxy) => Self::function_realm_globals(&proxy.borrow().target),
+      _ => None,
+    }
+  }
+
+  fn box_primitive_in_function_realm(
+    &mut self,
+    callee: &Value,
+    value: Value,
+  ) -> Result<Value, RuntimeError> {
+    let constructor_name = match value {
+      Value::Bool(_) => Some("Boolean"),
+      Value::Number(_) => Some("Number"),
+      Value::String(_) => Some("String"),
+      _ => None,
+    };
+    if let (Some(name), Some(Value::Object(globals))) =
+      (constructor_name, Self::function_realm_globals(callee))
+      && let Some(PropertyDescriptor::Data {
+        value: constructor, ..
+      }) = globals
+        .borrow()
+        .properties
+        .get(&PropertyKey::String(name.into()))
+        .cloned()
+    {
+      return self.construct_value_with_new_target(&constructor, &[value], constructor.clone());
+    }
+    self.to_object_value(value)
+  }
+
+  fn prototype_from_constructor(
+    &mut self,
+    constructor: &Value,
+    intrinsic: &str,
+  ) -> Result<Value, RuntimeError> {
+    let prototype =
+      self.get_property_value(constructor, &PropertyKey::String("prototype".into()))?;
+    if prototype.is_object() {
+      return Ok(prototype);
+    }
+
+    if let Value::Proxy(proxy) = constructor
+      && proxy.borrow().is_revoked()
+    {
+      return Err(self.throw_type_error("Cannot get realm of a revoked proxy"));
+    }
+
+    if let Some(Value::Object(globals)) = Self::function_realm_globals(constructor) {
+      let realm_constructor = globals
+        .borrow()
+        .properties
+        .get(&PropertyKey::String(intrinsic.into()))
+        .and_then(|descriptor| match descriptor {
+          PropertyDescriptor::Data { value, .. } => Some(value.clone()),
+          PropertyDescriptor::Accessor { .. } => None,
+        });
+      if let Some(realm_constructor) = realm_constructor {
+        let prototype =
+          self.get_property_value(&realm_constructor, &PropertyKey::String("prototype".into()))?;
+        if prototype.is_object() {
+          return Ok(prototype);
+        }
+      }
+    }
+
+    Ok(
+      self
+        .realm()
+        .get_intrinsic_prototype(intrinsic)
+        .unwrap_or(Value::Null),
+    )
+  }
+
   fn invoke_builtin(
     &mut self,
     function: &BuiltinFn,
@@ -180,22 +262,12 @@ impl Vm {
             .new_target
             .clone()
             .unwrap_or_else(|| callee.clone());
-          let proto = match self.get_property_value(
-            &proto_source,
-            &PropertyKey::String("prototype".to_string().into()),
-          ) {
+          let instance_proto = match self.prototype_from_constructor(&proto_source, "Object") {
             Ok(proto) => proto,
             Err(error) => {
               self.roots.temporary.truncate(temp_root_base);
               return Err(error);
             }
-          };
-          let instance_proto = match proto {
-            Value::Object(_)
-            | Value::Array(..)
-            | Value::Closure { .. }
-            | Value::BuiltinObject(_, _) => proto,
-            _ => Value::Null,
           };
           let instance_obj = gc::track_object(Rc::new(RefCell::new(ObjectData::with_prototype(
             instance_proto,
@@ -231,7 +303,7 @@ impl Vm {
           | Value::BuiltinObject(_, _)
           | Value::Proxy(_)
           | Value::Promise(..) => result,
-          _ if is_derived_constructor => {
+          Value::Undefined if is_derived_constructor => {
             let Some(this_obj) = initialized_this else {
               self.roots.temporary.truncate(temp_root_base);
               return Err(self.throw_reference_error(
@@ -239,6 +311,10 @@ impl Vm {
               ));
             };
             this_obj
+          }
+          _ if is_derived_constructor => {
+            self.roots.temporary.truncate(temp_root_base);
+            return Err(self.throw_type_error("Derived constructor returned a non-object value"));
           }
           _ => instance,
         };
@@ -432,6 +508,9 @@ impl Vm {
     };
     if !is_derived_constructor {
       return Err(self.throw_type_error("super() is only valid in derived class constructors"));
+    }
+    if !matches!(self.execution.active.this_value, Value::Uninitialized) {
+      return Err(self.throw_reference_error("Super constructor may only be called once"));
     }
 
     let super_constructor = self
@@ -714,9 +793,10 @@ impl Vm {
     self.execution.pending_closure_env = Some(Rc::clone(closure_env));
     if !proto.is_strict {
       if matches!(this_value, Value::Undefined | Value::Null) {
-        this_value = Value::Object(Rc::clone(&self.realm_state.globals));
+        this_value = Self::function_realm_globals(&callee)
+          .unwrap_or_else(|| Value::Object(Rc::clone(&self.realm_state.globals)));
       } else {
-        this_value = match self.to_object_value(this_value) {
+        this_value = match self.box_primitive_in_function_realm(&callee, this_value) {
           Ok(value) => value,
           Err(err) => {
             self.execution.pending_closure_env = None;
@@ -742,15 +822,22 @@ impl Vm {
       this_value
     };
 
-    self.execution.active.locals =
-      std::iter::repeat_with(|| Rc::new(RefCell::new(Value::Undefined)))
-        .take(proto.slot_types.len().max(proto.arity))
-        .collect();
+    let local_count = proto.slot_types.len().max(proto.arity);
+    let mut local_values = vec![Value::Undefined; local_count];
     for (idx, is_tdz) in proto.lexical_tdz.iter().copied().enumerate() {
-      if is_tdz && idx < self.execution.active.locals.len() {
-        *self.execution.active.locals[idx].borrow_mut() = Value::Uninitialized;
+      if is_tdz && idx < local_values.len() {
+        local_values[idx] = Value::Uninitialized;
       }
     }
+    for (idx, value) in call_args.iter().take(proto.arity).enumerate() {
+      if idx < local_values.len() {
+        local_values[idx] = value.clone();
+      }
+    }
+    self.execution.active.locals = local_values
+      .into_iter()
+      .map(|value| Rc::new(RefCell::new(value)))
+      .collect();
     let captured_lexical_env = match &callee {
       Value::Closure { props, .. } => props
         .borrow()
@@ -778,14 +865,6 @@ impl Vm {
       }
     }
     self.execution.active.lexical_env = fn_env;
-    for (i, value) in call_args
-      .iter()
-      .cloned()
-      .enumerate()
-      .take(proto.arity)
-    {
-      *self.execution.active.locals[i].borrow_mut() = value;
-    }
     if crate::trace::enabled() && proto.is_generator && !proto.has_simple_parameter_list {
       for (idx, slot) in self.execution.active.locals.iter().enumerate() {
         let name = proto
@@ -901,7 +980,9 @@ impl Vm {
       ExecutionContext {
         chunk: Arc::clone(&proto.chunk),
         ip: 0,
-        locals: Vec::with_capacity(LOCALS_INITIAL_CAPACITY),
+        // configure_call_frame replaces this vector immediately. Avoid
+        // allocating the default capacity before that replacement.
+        locals: Vec::new(),
         this_value: this_value.clone(),
         closure_env: None,
         slots: None,

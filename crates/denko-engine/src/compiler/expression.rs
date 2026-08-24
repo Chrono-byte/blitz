@@ -2277,8 +2277,53 @@ impl super::Compiler {
       }
       OExpr::NewExpression(n) => {
         self.compile_expr_oast(&n.callee)?;
-        let arg_count = self.compile_call_arguments(&n.arguments)?;
-        self.emit_call_with_arg_count(Op::Construct, arg_count)?;
+        if n
+          .arguments
+          .iter()
+          .any(|argument| matches!(argument, oast::Argument::SpreadElement(_)))
+        {
+          let arg_count = self.checked_arg_count(n.arguments.len())?;
+          let mut spread_flags = Vec::with_capacity(n.arguments.len());
+          for argument in &n.arguments {
+            match argument {
+              oast::Argument::SpreadElement(spread) => {
+                self.compile_expr_oast(&spread.argument)?;
+                spread_flags.push(true);
+              }
+              _ => match argument.as_expression() {
+                Some(expression) => {
+                  self.compile_expr_oast(expression)?;
+                  spread_flags.push(false);
+                }
+                None => {
+                  self.emit(Op::Undefined, LINE);
+                  spread_flags.push(false);
+                }
+              },
+            }
+          }
+          self.emit(Op::BuildArray, LINE);
+          self.emit_byte(arg_count, LINE);
+          for (index, is_spread) in spread_flags.into_iter().enumerate() {
+            if index == 0 {
+              self.emit(Op::Undefined, LINE);
+              self.emit(if is_spread { Op::True } else { Op::False }, LINE);
+              self.emit(Op::False, LINE);
+              self.emit(Op::True, LINE);
+              self.emit(Op::BuildArray, LINE);
+              self.emit_byte(4, LINE);
+            } else {
+              self.emit(if is_spread { Op::True } else { Op::False }, LINE);
+            }
+          }
+          self.emit(Op::BuildArray, LINE);
+          self.emit_byte(arg_count, LINE);
+          self.emit(Op::Spread, LINE);
+          self.emit_byte(arg_count, LINE);
+        } else {
+          let arg_count = self.compile_call_arguments(&n.arguments)?;
+          self.emit_call_with_arg_count(Op::Construct, arg_count)?;
+        }
       }
       OExpr::ImportExpression(i) => {
         self.emit_get_builtin_name("dynamicImport");

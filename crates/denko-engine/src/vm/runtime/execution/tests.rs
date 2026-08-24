@@ -1163,6 +1163,181 @@ mod test {
   }
 
   #[test]
+  fn assignment_destructuring_prepares_references_before_advancing_iterator() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        var log = [];
+        var target = {};
+        var key = {
+          toString: function() {
+            log.push("coerce-key");
+            return "value";
+          }
+        };
+        var iterable = {
+          [Symbol.iterator]: function() {
+            return {
+              next: function() {
+                log.push("next");
+                return { value: 7, done: false };
+              },
+              return: function() { return {}; }
+            };
+          }
+        };
+        [target[key]] = iterable;
+        globalThis.destructuring_reference_order =
+          log.join(",") === "next,coerce-key" && target.value === 7;
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("destructuring_reference_order"),
+      Some(Value::Bool(true))
+    );
+  }
+
+  #[test]
+  fn destructuring_computed_keys_and_iterator_observers_run_once_in_spec_order() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        var log = [];
+        var sourceKey = {
+          toString: function() { log.push("source-key"); return "p"; }
+        };
+        var targetKey = {
+          toString: function() { log.push("target-key-string"); return "q"; }
+        };
+        var source = {
+          get p() { log.push("source-value"); return 4; }
+        };
+        var target = {
+          set q(value) { log.push("target-value:" + value); }
+        };
+        ({ [sourceKey]: target[targetKey] } = source);
+        var propertyOrder = log.join(",");
+
+        var doneReads = 0;
+        var iterable = {
+          [Symbol.iterator]: function() {
+            return {
+              next: function() {
+                return {
+                  get done() { doneReads += 1; return true; }
+                };
+              }
+            };
+          }
+        };
+        [target.q] = iterable;
+        globalThis.destructuring_observer_result =
+          propertyOrder ===
+            "source-key,source-value,target-key-string,target-value:4" &&
+          doneReads === 1;
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("destructuring_observer_result"),
+      Some(Value::Bool(true))
+    );
+  }
+
+  #[test]
+  fn for_of_does_not_close_when_iterator_value_throws() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        var original = {};
+        var closeCount = 0;
+        var iterable = {
+          [Symbol.iterator]: function() {
+            return {
+              next: function() {
+                return {
+                  done: false,
+                  get value() { throw original; }
+                };
+              },
+              return: function() { closeCount += 1; return {}; }
+            };
+          }
+        };
+        var observed;
+        try { for (var value of iterable) {} }
+        catch (error) { observed = error; }
+        globalThis.for_of_iterator_value_result =
+          observed === original && closeCount === 0;
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("for_of_iterator_value_result"),
+      Some(Value::Bool(true))
+    );
+  }
+
+  #[test]
+  fn assignment_destructuring_does_not_close_after_abrupt_iterator_step() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        var original = {};
+        var closeCount = 0;
+        var iterable = {
+          [Symbol.iterator]: function() {
+            return {
+              next: function() { throw original; },
+              return: function() {
+                closeCount += 1;
+                return {};
+              }
+            };
+          }
+        };
+        var observed;
+        try { [value] = iterable; } catch (error) { observed = error; }
+        globalThis.destructuring_abrupt_step = observed === original && closeCount === 0;
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("destructuring_abrupt_step"),
+      Some(Value::Bool(true))
+    );
+  }
+
+  #[test]
+  fn generator_return_closes_suspended_destructuring_iterator() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        var closeCount = 0;
+        var iterator = {
+          next: function() { return { value: undefined, done: false }; },
+          return: function() {
+            closeCount += 1;
+            return {};
+          }
+        };
+        var iterable = {
+          [Symbol.iterator]: function() { return iterator; }
+        };
+        function* values() {
+          var [{} = yield] = iterable;
+        }
+        var generator = values();
+        generator.next();
+        var result = generator.return(42);
+        globalThis.generator_destructuring_close_result =
+          closeCount === 1 && result.value === 42 && result.done === true;
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("generator_destructuring_close_result"),
+      Some(Value::Bool(true))
+    );
+  }
+
+  #[test]
   fn labeled_loop_breaks_complete_through_risc_cleanup() {
     for source in [
       crate::js!(
@@ -1691,6 +1866,36 @@ mod test {
 
     assert_eq!(
       vm.get_global("directEvalThrowSame"),
+      Some(Value::Bool(true))
+    );
+  }
+
+  #[test]
+  fn eval_lexical_declarations_do_not_conflict_with_outer_bindings() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        "use strict";
+        let outside = 23;
+        eval("let outside = 42;");
+        eval("var outside = 42;");
+        (0, eval)("let outside = 42;");
+        globalThis.evalOuterBinding = outside;
+        try {
+          eval("typeof x; let x;");
+        } catch (error) {
+          globalThis.evalTdzErrorName = error.constructor.name;
+          globalThis.evalTdzErrorIdentity = error.constructor === ReferenceError;
+        }
+      "#
+    ));
+
+    assert_eq!(vm.get_global("evalOuterBinding"), Some(Value::Number(23.0)));
+    assert_eq!(
+      vm.get_global("evalTdzErrorName"),
+      Some(Value::String("ReferenceError".to_string().into()))
+    );
+    assert_eq!(
+      vm.get_global("evalTdzErrorIdentity"),
       Some(Value::Bool(true))
     );
   }
@@ -2734,6 +2939,75 @@ mod test {
   }
 
   #[test]
+  fn proxy_internal_methods_are_used_from_prototype_chains() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        var getReceiver;
+        var setReceiver;
+        var hasKey;
+        var target = {};
+        var proxy = new Proxy(target, {
+          get: function(_target, key, receiver) {
+            getReceiver = receiver;
+            return key === "read" ? 7 : undefined;
+          },
+          set: function(_target, key, value, receiver) {
+            setReceiver = receiver;
+            target[key] = value;
+            return true;
+          },
+          has: function(_target, key) {
+            hasKey = key;
+            return key === "present";
+          }
+        });
+        var object = Object.create(proxy);
+        var read = object.read;
+        object.written = 9;
+        var present = "present" in object;
+        globalThis.proxy_prototype_internal_methods_ok = read === 7
+          && getReceiver === object
+          && setReceiver === object
+          && target.written === 9
+          && present
+          && hasKey === "present";
+      "#
+    ));
+    assert_eq!(
+      vm.get_global("proxy_prototype_internal_methods_ok"),
+      Some(Value::Bool(true))
+    );
+  }
+
+  #[test]
+  fn proxy_define_property_rejects_freezing_writable_fixed_target_property() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        var proxy = new Proxy({}, {
+          defineProperty: function(target, key) {
+            Object.defineProperty(target, key, {
+              configurable: false,
+              writable: true
+            });
+            return true;
+          }
+        });
+        var rejected = false;
+        try {
+          Reflect.defineProperty(proxy, "value", { writable: false });
+        } catch (error) {
+          rejected = error instanceof TypeError;
+        }
+        globalThis.proxy_define_freeze_rejected = rejected;
+      "#
+    ));
+    assert_eq!(
+      vm.get_global("proxy_define_freeze_rejected"),
+      Some(Value::Bool(true))
+    );
+  }
+
+  #[test]
   fn proxy_has_and_delete_traps_enforce_invariants() {
     let (vm, _globals) = run_script(crate::js!(
       r#"
@@ -2891,6 +3165,108 @@ mod test {
     ));
 
     assert_eq!(vm.get_global("proxy_prototype_ok"), Some(Value::Bool(true)));
+  }
+
+  #[test]
+  fn object_create_accepts_a_proxy_prototype() {
+    let (vm, _globals) = run_script(crate::js!(
+      r#"
+        var target = {};
+        var handler = {
+          has: function(actualTarget, key) {
+            return actualTarget === target && key === "missing";
+          }
+        };
+        var prototype = new Proxy(target, handler);
+        var object = Object.create(prototype);
+        globalThis.proxy_object_create_ok = Object.getPrototypeOf(object) === prototype
+          && "missing" in object;
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("proxy_object_create_ok"),
+      Some(Value::Bool(true))
+    );
+  }
+
+  #[test]
+  fn proxy_constructor_has_es6_metadata_and_requires_new() {
+    let (vm, _globals) = run_script(crate::js!(
+      r#"
+        var callThrew = false;
+        try {
+          Proxy({}, {});
+        } catch (error) {
+          callThrew = error instanceof TypeError;
+        }
+        var lengthDescriptor = Object.getOwnPropertyDescriptor(Proxy, "length");
+        globalThis.proxy_constructor_ok = callThrew
+          && !Object.prototype.hasOwnProperty.call(Proxy, "prototype")
+          && lengthDescriptor.value === 2
+          && !lengthDescriptor.writable
+          && !lengthDescriptor.enumerable
+          && lengthDescriptor.configurable;
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("proxy_constructor_ok"),
+      Some(Value::Bool(true))
+    );
+  }
+
+  #[test]
+  fn revoked_proxy_keeps_callable_and_constructable_identity() {
+    let (vm, _globals) = run_script(crate::js!(
+      r#"
+        function Target() {}
+        var record = Proxy.revocable(Target, {});
+        var outer = new Proxy(record.proxy, {});
+        record.revoke();
+        var constructThrew = false;
+        try {
+          new outer();
+        } catch (error) {
+          constructThrew = error instanceof TypeError;
+        }
+        globalThis.revoked_proxy_identity_ok = typeof record.proxy === "function"
+          && typeof outer === "function"
+          && constructThrew;
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("revoked_proxy_identity_ok"),
+      Some(Value::Bool(true))
+    );
+  }
+
+  #[test]
+  fn new_expression_expands_spread_arguments_through_iterator_protocol() {
+    let (vm, _globals) = run_script(crate::js!(
+      r#"
+        function Capture() {
+          this.values = Array.from(arguments);
+        }
+        var iterable = {
+          [Symbol.iterator]: function() {
+            var index = 0;
+            return {
+              next: function() {
+                return index < 2
+                  ? { value: ++index, done: false }
+                  : { value: undefined, done: true };
+              }
+            };
+          }
+        };
+        var result = new Capture(0, ...iterable, 3);
+        globalThis.new_spread_ok = result.values.join(",") === "0,1,2,3";
+      "#
+    ));
+
+    assert_eq!(vm.get_global("new_spread_ok"), Some(Value::Bool(true)));
   }
 
   #[test]
@@ -5332,6 +5708,43 @@ mod test {
   }
 
   #[test]
+  fn sloppy_dynamic_function_uses_its_constructor_realm_global_this() {
+    let src = crate::js!(
+      r#"
+      const other = $262.createRealm().global;
+      const functionFromOtherRealm = new other.Function("return this;");
+      globalThis.implicitThisUsesOtherRealm = functionFromOtherRealm() === other;
+      globalThis.explicitUndefinedUsesOtherRealm =
+        functionFromOtherRealm.call(undefined) === other;
+      globalThis.nullUsesOtherRealm = functionFromOtherRealm.call(null) === other;
+      const boxedBoolean = functionFromOtherRealm.call(true);
+      globalThis.boxedThisUsesOtherRealm =
+        boxedBoolean.constructor === other.Boolean && boxedBoolean instanceof other.Boolean;
+      "#
+    );
+    let session = Parser::parse_source(src).expect("parse cross-realm function");
+    let chunk =
+      compiler::compile(session.program(), session.source()).expect("compile cross-realm function");
+    let globals = crate::test262_support::make_test262_globals();
+    let mut vm = Vm::new(globals);
+    vm.run(chunk).expect("run cross-realm function");
+
+    assert_eq!(
+      vm.get_global("implicitThisUsesOtherRealm"),
+      Some(Value::Bool(true))
+    );
+    assert_eq!(
+      vm.get_global("explicitUndefinedUsesOtherRealm"),
+      Some(Value::Bool(true))
+    );
+    assert_eq!(vm.get_global("nullUsesOtherRealm"), Some(Value::Bool(true)));
+    assert_eq!(
+      vm.get_global("boxedThisUsesOtherRealm"),
+      Some(Value::Bool(true))
+    );
+  }
+
+  #[test]
   fn risc_super_construct_initializes_derived_this() {
     let source = crate::js!(
       r#"
@@ -5349,6 +5762,34 @@ mod test {
       vm.get_global("derived_value"),
       Some(Value::Number(value)) if (value - 5.0).abs() < f64::EPSILON
     ));
+  }
+
+  #[test]
+  fn derived_constructor_rejects_second_super_call() {
+    let source = crate::js!(
+      r#"
+      let secondSuperError;
+      class Base {}
+      class Derived extends Base {
+        constructor() {
+          super();
+          try { super(); } catch (error) { secondSuperError = error; }
+        }
+      }
+      new Derived();
+      globalThis.secondSuperIsReferenceError = secondSuperError instanceof ReferenceError;
+      "#
+    );
+    let session = Parser::parse_source(source).expect("parse repeated super call");
+    let chunk =
+      compiler::compile(session.program(), session.source()).expect("compile repeated super call");
+    let globals = test_globals();
+    let mut vm = Vm::new(globals);
+    vm.run(chunk).expect("run repeated super call");
+    assert_eq!(
+      vm.get_global("secondSuperIsReferenceError"),
+      Some(Value::Bool(true))
+    );
   }
 
   #[test]
