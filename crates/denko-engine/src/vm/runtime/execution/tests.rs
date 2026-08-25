@@ -170,6 +170,37 @@ mod test {
 
   #[cfg(all(unix, target_arch = "x86_64"))]
   #[test]
+  fn numeric_add_call_loop_consumes_the_typed_target() {
+    let (vm, _) = run_script(
+      "function add(left, right) { return left + right; } let total = 0; for (let i = 0; i < 5000; i += 1) total = add(total, 1); globalThis.typed_add_loop_total = total;",
+    );
+    assert_eq!(
+      vm.get_global("typed_add_loop_total"),
+      Some(Value::Number(5000.0))
+    );
+    let (attempts, installs, native_calls, _) = vm.profiling.jit.optimizing_stats();
+    assert_eq!(attempts, 1);
+    assert_eq!(installs, 1);
+    assert!(native_calls > 0);
+    assert!(vm.profiling.jit_stats.native_loop_entries > 0);
+    assert!(vm.profiling.jit_stats.native_loop_iterations > 0);
+  }
+
+  #[cfg(all(unix, target_arch = "x86_64"))]
+  #[test]
+  fn numeric_add_call_loop_preserves_signed_zero() {
+    let (vm, _) = run_script(
+      "function add(left, right) { return left + right; } let total = -0; for (let i = 0; i < 5000; i += 1) total = add(total, 0); globalThis.typed_add_signed_zero = 1 / total;",
+    );
+    assert_eq!(
+      vm.get_global("typed_add_signed_zero"),
+      Some(Value::Number(f64::INFINITY))
+    );
+    assert!(vm.profiling.jit_stats.native_loop_iterations > 0);
+  }
+
+  #[cfg(all(unix, target_arch = "x86_64"))]
+  #[test]
   fn numeric_accumulator_loop_migrates_to_native_code() {
     let (vm, _) = run_script(
       "let total = 0; for (let i = 0; i < 1100; i++) total += i; globalThis.native_accumulator_total = total;",

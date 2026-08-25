@@ -979,6 +979,23 @@ impl Vm {
           }
           Op::Call | Op::TailCall | Op::CallBuiltin => {
             let count = decode_risc_aux16(word) as usize;
+            let fast_result = if op != Op::TailCall
+              && (2..=6).contains(&count)
+              && matches!(registers[2], Value::Number(_))
+              && matches!(registers[3], Value::Number(_))
+            {
+              self.try_cached_numeric_call(
+                instruction_ip,
+                &registers[0],
+                &registers[2..2 + count],
+              )?
+            } else {
+              None
+            };
+            if let Some(result) = fast_result {
+              registers[0] = result;
+              return Ok(None);
+            }
             let mut args: Vec<Value> = (0..count.min(6))
               .map(|index| registers[2 + index].clone())
               .collect();
@@ -1504,6 +1521,40 @@ impl Vm {
       .baseline_returns
       .saturating_add(1);
     Ok(Some(result))
+  }
+
+  fn try_cached_numeric_call(
+    &mut self,
+    call_site: usize,
+    callee: &Value,
+    arguments: &[Value],
+  ) -> Result<Option<Value>, RuntimeError> {
+    let Value::Closure { proto, .. } = callee else {
+      return Ok(None);
+    };
+    let result = {
+      let direct_calls = self.caches.active_direct_calls.borrow();
+      let Some(entry) = direct_calls
+        .get(call_site)
+        .and_then(Option::as_ref)
+        .filter(|entry| Rc::ptr_eq(&entry.expected_proto, proto))
+        .filter(|entry| entry.target.is_valid())
+        .filter(|entry| entry.target.leaf() == crate::vm::jit::DirectLeaf::NumericAdd)
+      else {
+        return Ok(None);
+      };
+      entry
+        .target
+        .call(crate::vm::jit::DirectCallInputs {
+          receiver: &Value::Undefined,
+          arguments,
+        })
+    };
+    self
+      .profiling
+      .jit
+      .record_optimizing_call(result.is_ok());
+    Ok(result.ok())
   }
 
   fn try_run_nested_baseline(
@@ -3085,20 +3136,20 @@ impl Vm {
         let Some(direct) = direct.filter(|entry| entry.target.is_valid()) else {
           return Ok(false);
         };
-        let argument_value = match arguments {
-          crate::vm::region::NumericLeafArguments::None => None,
-          crate::vm::region::NumericLeafArguments::OneConstant { value, .. } => Some(value),
-        };
-        match direct.target.leaf() {
-          crate::vm::jit::DirectLeaf::Number(value) => value,
-          crate::vm::jit::DirectLeaf::Parameter(0) => {
-            let Some(value) = argument_value else {
-              return Ok(false);
-            };
-            value
-          }
-          crate::vm::jit::DirectLeaf::Parameter(_) => return Ok(false),
-          crate::vm::jit::DirectLeaf::NumericAdd => return Ok(false),
+        match (direct.target.leaf(), arguments) {
+          (
+            crate::vm::jit::DirectLeaf::Number(value),
+            crate::vm::region::NumericLeafArguments::None,
+          ) => value,
+          (
+            crate::vm::jit::DirectLeaf::Parameter(0),
+            crate::vm::region::NumericLeafArguments::OneConstant { value, .. },
+          ) => value,
+          (
+            crate::vm::jit::DirectLeaf::NumericAdd,
+            crate::vm::region::NumericLeafArguments::AccumulatorAndConstant { value, .. },
+          ) => value,
+          _ => return Ok(false),
         }
       }
     };
@@ -3138,14 +3189,26 @@ impl Vm {
           registers[accumulator_register] = Value::Number(prepared.accumulator);
           registers[step_register] = Value::Number(region.step);
         }
-        crate::vm::region::NumericBodyWriteback::DirectCall { arguments } => {
-          registers[0] = Value::Number(addend);
-          if let crate::vm::region::NumericLeafArguments::OneConstant { value, register } =
-            arguments
-          {
+        crate::vm::region::NumericBodyWriteback::DirectCall { arguments } => match arguments {
+          crate::vm::region::NumericLeafArguments::None => {
+            registers[0] = Value::Number(addend);
+          }
+          crate::vm::region::NumericLeafArguments::OneConstant { value, register } => {
+            registers[0] = Value::Number(addend);
             registers[register] = Value::Number(value);
           }
-        }
+          crate::vm::region::NumericLeafArguments::AccumulatorAndConstant {
+            accumulator_register,
+            value,
+            value_register,
+            result_register,
+          } => {
+            registers[0] = Value::Number(prepared.accumulator);
+            registers[accumulator_register] = Value::Number(prepared.accumulator);
+            registers[value_register] = Value::Number(value);
+            registers[result_register] = Value::Number(prepared.accumulator);
+          }
+        },
       }
     }
     registers[region.exits.index_register] = Value::Number(prepared.index);
@@ -4124,6 +4187,13 @@ fn build_quickened_sites(
         && let Some(id) = crate::vm::region::RegionId::from_index(regions.len())
       {
         regions.push(crate::vm::region::NativeRegion::DenseMaskedRead(region));
+        SiteAction::Region(id)
+      } else if native_regions_enabled
+        && let Some(region) =
+          crate::vm::region::NumericLoopRegion::decode_numeric_add_call(chunk, ip)
+        && let Some(id) = crate::vm::region::RegionId::from_index(regions.len())
+      {
+        regions.push(crate::vm::region::NativeRegion::NumericLoop(region));
         SiteAction::Region(id)
       } else if native_regions_enabled
         && let Some(region) = crate::vm::region::NumericLoopRegion::decode_call(chunk, ip)

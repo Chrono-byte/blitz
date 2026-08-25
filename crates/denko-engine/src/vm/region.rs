@@ -381,7 +381,16 @@ pub(crate) struct PreparedNumericRegion {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum NumericLeafArguments {
   None,
-  OneConstant { value: f64, register: usize },
+  OneConstant {
+    value: f64,
+    register: usize,
+  },
+  AccumulatorAndConstant {
+    accumulator_register: usize,
+    value: f64,
+    value_register: usize,
+    result_register: usize,
+  },
 }
 
 impl NumericLoopRegion {
@@ -1390,6 +1399,101 @@ impl OwnMethodNumericLoopRegion {
 }
 
 impl NumericLoopRegion {
+  pub(super) fn decode_numeric_add_call(
+    chunk: &Chunk,
+    ip: usize,
+  ) -> Option<Self> {
+    let words = chunk
+      .code
+      .get(ip..ip + NUMERIC_ADD_CALL_LOOP.len())?;
+    if !words
+      .iter()
+      .zip(NUMERIC_ADD_CALL_LOOP)
+      .all(|(word, expected)| opcode(*word) == *expected)
+    {
+      return None;
+    }
+    let index_slot = decode_risc_aux16(words[0]) as usize;
+    let accumulator_slot = decode_risc_aux16(words[4]) as usize;
+    let callee_slot = decode_risc_aux16(words[3]) as usize;
+    let temporary_slot = decode_risc_aux16(words[16]) as usize;
+    let (condition, left, right, exit_offset) = decode_compare_jump(words[2]);
+    let completed_pc = ip + words.len();
+    let jump_payload = ((words[20] >> 8) & 0x00ff_ffff) as i32;
+    let jump_offset = if jump_payload & 0x0080_0000 != 0 {
+      jump_payload | !0x00ff_ffff
+    } else {
+      jump_payload
+    };
+    let index_register = decode_rd(words[0]);
+    let accumulator_register = decode_rd(words[4]);
+    let constant_register = decode_rd(words[5]);
+    let result_register = decode_rd(words[10]);
+    let increment_register = decode_rd(words[13]);
+    if condition != 2
+      || left != index_register
+      || right != decode_rd(words[1])
+      || (ip as i64 + 3 + exit_offset as i64) as usize != completed_pc
+      || (ip as i64 + words.len() as i64 + jump_offset as i64) as usize != ip
+      || decode_rd(words[6]) != 2
+      || decode_rs(words[6]) != accumulator_register
+      || decode_rd(words[7]) != 3
+      || decode_rs(words[7]) != constant_register
+      || decode_rd(words[8]) != 0
+      || decode_rs(words[8]) != decode_rd(words[3])
+      || decode_risc_aux16(words[9]) != 2
+      || decode_rs(words[10]) != 0
+      || decode_rd(words[11]) != result_register
+      || decode_risc_aux16(words[11]) as usize != accumulator_slot
+      || decode_risc_aux16(words[12]) as usize != index_slot
+      || decode_risc_aux16(words[13]) as usize != index_slot
+      || decode_rd(words[15]) != increment_register
+      || decode_rs(words[15]) != decode_rd(words[14])
+      || decode_rd(words[16]) != increment_register
+      || decode_risc_aux16(words[16]) as usize != temporary_slot
+      || decode_risc_aux16(words[17]) as usize != index_slot
+      || decode_risc_aux16(words[18]) as usize != temporary_slot
+      || decode_rd(words[19]) != decode_rd(words[18])
+      || decode_risc_aux16(words[19]) as usize != index_slot
+      || index_slot == accumulator_slot
+      || index_slot == callee_slot
+      || index_slot == temporary_slot
+      || accumulator_slot == callee_slot
+      || accumulator_slot == temporary_slot
+      || callee_slot == temporary_slot
+    {
+      return None;
+    }
+    let argument = NumericLeafArguments::AccumulatorAndConstant {
+      accumulator_register: 2,
+      value: number_constant(chunk, words[5])?,
+      value_register: 3,
+      result_register: result_register as usize,
+    };
+    Some(Self {
+      entry_pc: ip,
+      completed_pc,
+      index_slot,
+      accumulator_slot,
+      temporary_slot,
+      limit: number_constant(chunk, words[1])?,
+      step: number_constant(chunk, words[14])?,
+      prerequisites: NumericLoopPrerequisites::DirectCall {
+        callee_slot,
+        call_site: ip + 9,
+        arguments: argument,
+      },
+      exits: NumericExitMap {
+        index_register: index_register as usize,
+        limit_register: decode_rd(words[1]) as usize,
+        body: NumericBodyWriteback::DirectCall {
+          arguments: argument,
+        },
+      },
+      program: NumericProgramDraft::counted(NumericAddend::Prepared).validate()?,
+    })
+  }
+
   pub(super) fn decode_call(
     chunk: &Chunk,
     ip: usize,
@@ -1570,6 +1674,30 @@ const IDENTITY_CALL_LOOP: &[Op] = &[
   Op::StoreLocal,
   Op::LoadLocal,
   Op::LoadLocal,
+  Op::StoreLocal,
+  Op::CloneLocalCell,
+  Op::LoadLocal,
+  Op::Const,
+  Op::Add,
+  Op::StoreLocal,
+  Op::LoadLocal,
+  Op::LoadLocal,
+  Op::StoreLocal,
+  Op::Jump,
+];
+
+const NUMERIC_ADD_CALL_LOOP: &[Op] = &[
+  Op::LoadLocal,
+  Op::Const,
+  Op::CompareJump,
+  Op::LoadLocal,
+  Op::LoadLocal,
+  Op::Const,
+  Op::Move,
+  Op::Move,
+  Op::Move,
+  Op::Call,
+  Op::Move,
   Op::StoreLocal,
   Op::CloneLocalCell,
   Op::LoadLocal,

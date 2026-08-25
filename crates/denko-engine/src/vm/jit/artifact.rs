@@ -130,7 +130,7 @@ pub(crate) fn emit_numeric_add(
     0x31, 0xC0, // xor eax, eax
     0xC3, // ret
   ];
-  let guard_branches = [6, 28, 50];
+  let guard_branches = [6, 27, 50];
   let guard_failure = bytes.len();
   bytes.extend_from_slice(&[
     0xB8, 1, 0, 0, 0, // mov eax, JIT_EXIT_INTERPRETER
@@ -187,7 +187,7 @@ mod tests {
   fn emits_inert_numeric_add_artifact() {
     let artifact = artifact();
     assert!(!artifact.bytes().is_empty());
-    assert_eq!(artifact.relocations().len(), 3);
+    assert!(artifact.relocations().is_empty());
     assert!(artifact.validate().is_ok());
   }
 
@@ -195,7 +195,17 @@ mod tests {
   #[test]
   fn validation_rejects_overlapping_relocations() {
     let mut artifact = artifact();
-    artifact.relocations[1].offset = artifact.relocations[0].offset;
+    artifact.relocations = vec![
+      ArtifactRelocation {
+        offset: CodeOffset(0),
+        helper: RuntimeHelperId::SetNumberResult,
+      },
+      ArtifactRelocation {
+        offset: CodeOffset(0),
+        helper: RuntimeHelperId::SetNumberResult,
+      },
+    ]
+    .into_boxed_slice();
     assert_eq!(
       artifact
         .validate()
@@ -207,31 +217,32 @@ mod tests {
   #[cfg(all(unix, target_arch = "x86_64"))]
   #[test]
   fn installed_artifact_adds_numbers_and_rejects_other_values() {
-    use crate::value::Value;
     use crate::vm::jit::native::{
-      DirectCallFrame, JIT_EXIT_INTERPRETER, JIT_EXIT_RETURN, NativeCode,
+      CompactDirectCallFrame, JIT_EXIT_INTERPRETER, JIT_EXIT_RETURN, NativeCode,
     };
 
     let code = NativeCode::install_artifact(artifact().validate().expect("valid artifact"))
       .expect("native installation");
-    let mut result = Value::Undefined;
-    let numbers = [Value::Number(2.0), Value::Number(3.0)];
-    let mut frame = DirectCallFrame {
-      result: &mut result,
+    let numbers = [2.0f64.to_bits(), 3.0f64.to_bits()];
+    let mut frame = CompactDirectCallFrame {
+      result_bits: 0,
       arguments: numbers.as_ptr(),
       argument_count: numbers.len(),
     };
     assert_eq!(
-      unsafe { code.call_direct_frame(&mut frame) },
+      unsafe { code.call_compact_direct_frame(&mut frame) },
       JIT_EXIT_RETURN
     );
-    assert_eq!(result, Value::Number(5.0));
+    assert_eq!(f64::from_bits(frame.result_bits), 5.0);
 
-    let mixed = [Value::String("value".into()), Value::Number(3.0)];
+    let mixed = [
+      crate::value::tagged::TaggedValue::UNDEFINED.to_bits(),
+      3.0f64.to_bits(),
+    ];
     frame.arguments = mixed.as_ptr();
     frame.argument_count = mixed.len();
     assert_eq!(
-      unsafe { code.call_direct_frame(&mut frame) },
+      unsafe { code.call_compact_direct_frame(&mut frame) },
       JIT_EXIT_INTERPRETER
     );
   }
