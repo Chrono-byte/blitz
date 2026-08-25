@@ -7,6 +7,7 @@
 //! [`VerifiedTypedFunction`]. Native emitters never accept unchecked IR.
 
 use crate::bytecode::{Chunk, Op, decode_rd, decode_risc_aux16, decode_rs};
+use std::hash::{Hash, Hasher};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct ValueId(u32);
@@ -38,6 +39,13 @@ impl CompilerChunk {
       code: chunk.code.clone().into_boxed_slice(),
       parameter_count: u16::try_from(parameter_count).map_err(|_| IrError::TooManyParameters)?,
     })
+  }
+
+  pub(crate) fn revision(&self) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    self.parameter_count.hash(&mut hasher);
+    self.code.hash(&mut hasher);
+    hasher.finish()
   }
 }
 

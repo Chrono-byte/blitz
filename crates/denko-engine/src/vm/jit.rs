@@ -9,6 +9,7 @@ use crate::value::Value;
 pub(crate) mod artifact;
 pub(crate) mod ir;
 pub(crate) mod native;
+mod worker;
 
 use crate::bytecode::{Chunk, Constant, Op};
 use native::NativeCode;
