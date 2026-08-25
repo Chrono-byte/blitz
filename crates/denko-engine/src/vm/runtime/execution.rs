@@ -2107,6 +2107,215 @@ impl Vm {
     Ok(true)
   }
 
+  fn try_own_method_effect_loop_region(
+    &mut self,
+    region: crate::vm::region::OwnMethodEffectLoopRegion,
+    registers: &mut [Value; 16],
+  ) -> Result<bool, RuntimeError> {
+    if self.execution.active.ip != region.entry_pc
+      || self.execution.active.arguments.object.is_some()
+      || self
+        .execution
+        .active
+        .lexical_env
+        .borrow()
+        .has_object_environment()
+      || self
+        .execution
+        .active
+        .locals
+        .get(region.index_slot)
+        .is_some_and(|cell| Rc::strong_count(cell) != 1)
+      || [
+        region.index_slot,
+        region.call_temporary_slot,
+        region.arithmetic_temporary_slot,
+      ]
+      .into_iter()
+      .any(|slot| {
+        self
+          .execution
+          .active
+          .slots
+          .as_ref()
+          .and_then(|slots| slots.immutable.get(slot))
+          .copied()
+          .unwrap_or(false)
+      })
+    {
+      return Ok(false);
+    }
+    let Some(index) = self
+      .execution
+      .active
+      .locals
+      .get(region.index_slot)
+      .and_then(|cell| match *cell.borrow() {
+        Value::Number(value) => Some(value),
+        _ => None,
+      })
+    else {
+      return Ok(false);
+    };
+    if index.partial_cmp(&region.limit) != Some(std::cmp::Ordering::Less) {
+      registers[region.index_register] = Value::Number(index);
+      registers[region.limit_register] = Value::Number(region.limit);
+      self.execution.active.ip = region.completed_pc;
+      return Ok(true);
+    }
+    const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+    if !index.is_finite()
+      || index < 0.0
+      || (index == 0.0 && index.is_sign_negative())
+      || index.fract() != 0.0
+      || index > MAX_SAFE_INTEGER
+      || !region.limit.is_finite()
+      || region.limit > MAX_SAFE_INTEGER
+    {
+      return Ok(false);
+    }
+    let receiver = self
+      .execution
+      .active
+      .locals
+      .get(region.receiver_slot)
+      .map(|cell| cell.borrow().clone());
+    let Some(Value::Object(object)) = receiver else {
+      return Ok(false);
+    };
+    let receiver = Value::Object(Rc::clone(&object));
+    let Some(crate::bytecode::Constant::String(method_key)) = self
+      .execution
+      .active
+      .chunk
+      .constants
+      .get(region.method_key_constant)
+    else {
+      return Ok(false);
+    };
+    let callee = {
+      let object = object.borrow();
+      if object.module_namespace_exports.is_some() {
+        return Ok(false);
+      }
+      match object
+        .properties
+        .get(&PropertyKey::String(method_key.clone()))
+      {
+        Some(PropertyDescriptor::Data { value, .. }) => value.clone(),
+        _ => return Ok(false),
+      }
+    };
+    let Value::Closure { proto, .. } = &callee else {
+      return Ok(false);
+    };
+    let Some(effect) = crate::vm::region::ReceiverNumericEffect::decode(proto) else {
+      return Ok(false);
+    };
+    if effect.argument_slot != 0
+      || effect.result != crate::vm::region::MethodResultSemantics::Undefined
+    {
+      return Ok(false);
+    }
+    let Some(crate::bytecode::Constant::String(property_key)) = proto
+      .chunk
+      .constants
+      .get(effect.property_key_constant)
+    else {
+      return Ok(false);
+    };
+    if property_key == method_key {
+      return Ok(false);
+    }
+    let initial_value = {
+      let object = object.borrow();
+      match object
+        .properties
+        .get(&PropertyKey::String(property_key.clone()))
+      {
+        Some(PropertyDescriptor::Data {
+          value: Value::Number(value),
+          writable: true,
+          ..
+        }) => *value,
+        _ => return Ok(false),
+      }
+    };
+    let mut prepared = crate::vm::region::PreparedNumericRegion {
+      index,
+      limit: region.limit,
+      accumulator: initial_value,
+      step: region.step,
+      addend: region.argument,
+      iterations: 0,
+      shape: region.program.shape(),
+    };
+    if !self
+      .profiling
+      .jit
+      .run_numeric_region(&mut prepared)
+    {
+      return Ok(false);
+    }
+    if prepared.iterations > u32::from(region.program.cost().max_iterations) {
+      return Err(RuntimeError::from(
+        "native own-method effect loop exceeded its batch bound",
+      ));
+    }
+    {
+      let mut object = object.borrow_mut();
+      let Some(PropertyDescriptor::Data {
+        value,
+        writable: true,
+        ..
+      }) = object
+        .properties
+        .get_mut(&PropertyKey::String(property_key.clone()))
+      else {
+        return Err(RuntimeError::from(
+          "own-method effect descriptor changed during native execution",
+        ));
+      };
+      *value = Value::Number(prepared.accumulator);
+    }
+    self.bump_object_generation(&receiver);
+    ensure_slot(
+      &mut self.execution.active.locals,
+      region.call_temporary_slot,
+    );
+    ensure_slot(
+      &mut self.execution.active.locals,
+      region.arithmetic_temporary_slot,
+    );
+    *self.execution.active.locals[region.call_temporary_slot].borrow_mut() = receiver.clone();
+    *self.execution.active.locals[region.arithmetic_temporary_slot].borrow_mut() =
+      Value::Number(prepared.index);
+    *self.execution.active.locals[region.index_slot].borrow_mut() = Value::Number(prepared.index);
+    registers[0] = Value::Undefined;
+    registers[1] = receiver;
+    registers[2] = Value::Number(region.argument);
+    registers[region.argument_register] = Value::Number(region.argument);
+    registers[region.previous_index_register] = Value::Number(prepared.index - region.step);
+    registers[region.step_register] = Value::Number(region.step);
+    registers[region.next_index_register] = Value::Number(prepared.index);
+    self.execution.active.ip = if prepared.index < region.limit {
+      region.entry_pc
+    } else {
+      region.completed_pc
+    };
+    self.profiling.jit_stats.native_loop_entries = self
+      .profiling
+      .jit_stats
+      .native_loop_entries
+      .saturating_add(1);
+    self.profiling.jit_stats.native_loop_iterations = self
+      .profiling
+      .jit_stats
+      .native_loop_iterations
+      .saturating_add(prepared.iterations as u64);
+    Ok(true)
+  }
+
   fn try_own_method_numeric_loop_region(
     &mut self,
     region: crate::vm::region::OwnMethodNumericLoopRegion,
@@ -2320,6 +2529,9 @@ impl Vm {
       }
       crate::vm::region::NativeRegion::OwnMethodNumericLoop(region) => {
         self.try_own_method_numeric_loop_region(region, registers)
+      }
+      crate::vm::region::NativeRegion::OwnMethodEffectLoop(region) => {
+        self.try_own_method_effect_loop_region(region, registers)
       }
     }
   }
@@ -3456,6 +3668,12 @@ fn build_quickened_sites(
   let sites = (0..code.len())
     .map(|ip| {
       if native_regions_enabled
+        && let Some(region) = crate::vm::region::OwnMethodEffectLoopRegion::decode(chunk, ip)
+        && let Some(id) = crate::vm::region::RegionId::from_index(regions.len())
+      {
+        regions.push(crate::vm::region::NativeRegion::OwnMethodEffectLoop(region));
+        SiteAction::Region(id)
+      } else if native_regions_enabled
         && let Some(region) = crate::vm::region::OwnMethodNumericLoopRegion::decode(chunk, ip)
         && let Some(id) = crate::vm::region::RegionId::from_index(regions.len())
       {

@@ -363,6 +363,53 @@ mod test {
 
   #[cfg(all(unix, target_arch = "x86_64"))]
   #[test]
+  fn own_method_effect_loop_matches_portable_interpretation() {
+    let source = "const counter = { value: 0, add(amount) { this.value += amount; } }; for (let i = 0; i < 2100; i++) counter.add(1); globalThis.counterValue = counter.value;";
+    let (optimized, _) = run_script_with_optimizations(source, true);
+    let (portable, _) = run_script_with_optimizations(source, false);
+    assert_eq!(
+      optimized.get_global("counterValue"),
+      portable.get_global("counterValue")
+    );
+    assert!(optimized.caches.quickened.values().any(|plan| {
+      plan.regions.iter().any(|region| {
+        matches!(
+          region,
+          crate::vm::region::NativeRegion::OwnMethodEffectLoop(_)
+        )
+      })
+    }));
+    assert!(
+      optimized
+        .profiling
+        .jit_stats
+        .native_loop_iterations
+        > 0
+    );
+  }
+
+  #[test]
+  fn own_method_effect_loop_rechecks_method_and_property_descriptors() {
+    let source = "const counter = { value: 0, add(amount) { this.value += amount; } }; for (let i = 0; i < 1200; i++) counter.add(1); counter.add = function(amount) { this.value += amount * 2; }; for (let i = 0; i < 1200; i++) counter.add(1); let backing = counter.value; let gets = 0; let sets = 0; Object.defineProperty(counter, 'value', { get() { gets++; return backing; }, set(value) { sets++; }, configurable: true }); for (let i = 0; i < 1200; i++) counter.add(1); globalThis.effectValue = counter.value; globalThis.effectGets = gets; globalThis.effectSets = sets;";
+    let (optimized, _) = run_script_with_optimizations(source, true);
+    let (portable, _) = run_script_with_optimizations(source, false);
+    for name in ["effectValue", "effectGets", "effectSets"] {
+      assert_eq!(optimized.get_global(name), portable.get_global(name));
+    }
+  }
+
+  #[test]
+  fn own_method_effect_loop_falls_back_for_proxy_and_nonnumeric_values() {
+    let source = "let reads = 0; let writes = 0; const target = { value: 0, add(amount) { this.value += amount; } }; const proxy = new Proxy(target, { get(object, key) { reads++; return object[key]; }, set(object, key, value) { writes++; object[key] = value; return true; } }); for (let i = 0; i < 1200; i++) proxy.add(1); const strings = { value: '', add(amount) { this.value += amount; } }; for (let i = 0; i < 1200; i++) strings.add(1); globalThis.proxyValue = target.value; globalThis.proxyReads = reads; globalThis.proxyWrites = writes; globalThis.stringLength = strings.value.length;";
+    let (optimized, _) = run_script_with_optimizations(source, true);
+    let (portable, _) = run_script_with_optimizations(source, false);
+    for name in ["proxyValue", "proxyReads", "proxyWrites", "stringLength"] {
+      assert_eq!(optimized.get_global(name), portable.get_global(name));
+    }
+  }
+
+  #[cfg(all(unix, target_arch = "x86_64"))]
+  #[test]
   fn native_call_loop_preserves_ordered_addition_across_batch_boundary() {
     let (vm, _) = run_script(
       "function tenth() { return 0.1; } let nativeTotal = 0; for (let i = 0; i < 2130; i += 2) nativeTotal += tenth(); let expected = 0; for (let i = 0; i < 2130; i += 2) expected += 0.1; globalThis.native_batch_matches = nativeTotal === expected;",

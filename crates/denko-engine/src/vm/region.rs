@@ -2,7 +2,9 @@
 
 //! Immutable native-region plans decoded from verified portable bytecode.
 
-use crate::bytecode::{Chunk, Op, decode_compare_jump, decode_rd, decode_risc_aux16, decode_rs};
+use crate::bytecode::{
+  Chunk, FunctionProto, Op, decode_compare_jump, decode_rd, decode_risc_aux16, decode_rs,
+};
 
 const INDEX_VALUE: NumericValue = NumericValue(0);
 const LIMIT_VALUE: NumericValue = NumericValue(1);
@@ -29,6 +31,7 @@ pub(super) enum NativeRegion {
   DenseArrayPush(DenseArrayPushRegion),
   DenseMaskedRead(DenseMaskedReadRegion),
   OwnMethodNumericLoop(OwnMethodNumericLoopRegion),
+  OwnMethodEffectLoop(OwnMethodEffectLoopRegion),
 }
 
 impl NativeRegion {
@@ -38,8 +41,42 @@ impl NativeRegion {
       Self::DenseArrayPush(_) => RegionCost { max_iterations: 64 },
       Self::DenseMaskedRead(_) => RegionCost { max_iterations: 64 },
       Self::OwnMethodNumericLoop(region) => region.program.cost(),
+      Self::OwnMethodEffectLoop(region) => region.program.cost(),
     }
   }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum MethodResultSemantics {
+  Undefined,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct ReceiverNumericEffect {
+  pub(super) property_key_constant: usize,
+  pub(super) argument_slot: usize,
+  pub(super) result: MethodResultSemantics,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct OwnMethodEffectLoopRegion {
+  pub(super) entry_pc: usize,
+  pub(super) completed_pc: usize,
+  pub(super) index_slot: usize,
+  pub(super) receiver_slot: usize,
+  pub(super) call_temporary_slot: usize,
+  pub(super) arithmetic_temporary_slot: usize,
+  pub(super) method_key_constant: usize,
+  pub(super) argument: f64,
+  pub(super) limit: f64,
+  pub(super) step: f64,
+  pub(super) index_register: usize,
+  pub(super) limit_register: usize,
+  pub(super) previous_index_register: usize,
+  pub(super) next_index_register: usize,
+  pub(super) step_register: usize,
+  pub(super) argument_register: usize,
+  pub(super) program: ValidatedNumericProgram,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -634,6 +671,201 @@ impl DenseMaskedReadRegion {
   }
 }
 
+impl ReceiverNumericEffect {
+  pub(super) fn decode(proto: &FunctionProto) -> Option<Self> {
+    const OPS: &[Op] = &[
+      Op::GetThis,
+      Op::StoreLocal,
+      Op::Const,
+      Op::StoreLocal,
+      Op::LoadLocal,
+      Op::LoadLocal,
+      Op::GetProperty,
+      Op::LoadLocal,
+      Op::Add,
+      Op::StoreLocal,
+      Op::LoadLocal,
+      Op::LoadLocal,
+      Op::LoadLocal,
+      Op::Move,
+      Op::Move,
+      Op::Move,
+      Op::SetProperty,
+      Op::Move,
+      Op::Undefined,
+      Op::Return,
+    ];
+    let words = proto.chunk.code.get(..OPS.len())?;
+    if proto.chunk.code.len() != OPS.len()
+      || proto.arity < 1
+      || proto.has_rest
+      || proto.captures_this
+      || !proto.upvalues.is_empty()
+      || !words
+        .iter()
+        .zip(OPS)
+        .all(|(word, expected)| opcode(*word) == *expected)
+    {
+      return None;
+    }
+    let this_register = decode_rd(words[0]);
+    let this_slot = decode_risc_aux16(words[1]) as usize;
+    let key_register = decode_rd(words[2]);
+    let key_slot = decode_risc_aux16(words[3]) as usize;
+    let value_register = decode_rd(words[4]);
+    let loaded_key_register = decode_rd(words[5]);
+    let argument_register = decode_rd(words[7]);
+    let value_slot = decode_risc_aux16(words[9]) as usize;
+    if decode_rd(words[1]) != this_register
+      || decode_rd(words[3]) != key_register
+      || decode_risc_aux16(words[4]) as usize != this_slot
+      || decode_risc_aux16(words[5]) as usize != key_slot
+      || decode_rd(words[6]) != value_register
+      || decode_rs(words[6]) != loaded_key_register
+      || decode_risc_aux16(words[7]) != 0
+      || decode_rd(words[8]) != value_register
+      || decode_rs(words[8]) != argument_register
+      || decode_rd(words[9]) != value_register
+      || decode_risc_aux16(words[10]) as usize != this_slot
+      || decode_risc_aux16(words[11]) as usize != key_slot
+      || decode_risc_aux16(words[12]) as usize != value_slot
+      || decode_rd(words[13]) != 0
+      || decode_rs(words[13]) != decode_rd(words[10])
+      || decode_rd(words[14]) != 1
+      || decode_rs(words[14]) != decode_rd(words[11])
+      || decode_rd(words[15]) != 2
+      || decode_rs(words[15]) != decode_rd(words[12])
+      || decode_rd(words[16]) != 0
+      || decode_rs(words[16]) != 1
+      || decode_risc_aux16(words[16]) != 2
+      || decode_rs(words[17]) != 0
+      || decode_rd(words[18]) != decode_rd(words[17])
+      || decode_rd(words[19]) != decode_rd(words[18])
+    {
+      return None;
+    }
+    let property_key_constant = decode_risc_aux16(words[2]) as usize;
+    match proto.chunk.constants.get(property_key_constant) {
+      Some(crate::bytecode::Constant::String(_)) => Some(Self {
+        property_key_constant,
+        argument_slot: 0,
+        result: MethodResultSemantics::Undefined,
+      }),
+      _ => None,
+    }
+  }
+}
+
+impl OwnMethodEffectLoopRegion {
+  pub(super) fn decode(
+    chunk: &Chunk,
+    ip: usize,
+  ) -> Option<Self> {
+    let words = chunk
+      .code
+      .get(ip..ip + OWN_METHOD_EFFECT_LOOP.len())?;
+    if !words
+      .iter()
+      .zip(OWN_METHOD_EFFECT_LOOP)
+      .all(|(word, expected)| opcode(*word) == *expected)
+    {
+      return None;
+    }
+    let index_slot = decode_risc_aux16(words[0]) as usize;
+    let receiver_slot = decode_risc_aux16(words[3]) as usize;
+    let call_temporary_slot = decode_risc_aux16(words[4]) as usize;
+    let arithmetic_temporary_slot = decode_risc_aux16(words[22]) as usize;
+    let index_register = decode_rd(words[0]);
+    let limit_register = decode_rd(words[1]);
+    let receiver_register = decode_rd(words[3]);
+    let callee_register = decode_rd(words[6]);
+    let key_register = decode_rd(words[7]);
+    let argument_register = decode_rd(words[9]);
+    let previous_index_register = decode_rd(words[16]);
+    let step_register = decode_rd(words[19]);
+    let next_index_register = decode_rd(words[20]);
+    let (condition, left, right, exit_offset) = decode_compare_jump(words[2]);
+    let jump_payload = ((words[26] >> 8) & 0x00ff_ffff) as i32;
+    let jump_offset = if jump_payload & 0x0080_0000 != 0 {
+      jump_payload | !0x00ff_ffff
+    } else {
+      jump_payload
+    };
+    let completed_pc = ip + words.len();
+    if condition != 2
+      || left != index_register
+      || right != limit_register
+      || (ip as i64 + 3 + exit_offset as i64) as usize != completed_pc
+      || (ip as i64 + words.len() as i64 + jump_offset as i64) as usize != ip
+      || decode_rd(words[4]) != receiver_register
+      || decode_risc_aux16(words[5]) as usize != call_temporary_slot
+      || decode_risc_aux16(words[6]) as usize != call_temporary_slot
+      || decode_rd(words[8]) != callee_register
+      || decode_rs(words[8]) != key_register
+      || decode_rd(words[10]) != 2
+      || decode_rs(words[10]) != argument_register
+      || decode_rd(words[11]) != 1
+      || decode_rs(words[11]) != receiver_register
+      || decode_rd(words[12]) != 0
+      || decode_rs(words[12]) != callee_register
+      || decode_risc_aux16(words[13]) != 1
+      || decode_rs(words[14]) != 0
+      || decode_risc_aux16(words[15]) as usize != index_slot
+      || decode_risc_aux16(words[16]) as usize != index_slot
+      || decode_rd(words[17]) != previous_index_register
+      || decode_rs(words[17]) != previous_index_register
+      || decode_rd(words[18]) != previous_index_register
+      || decode_rs(words[18]) != previous_index_register
+      || decode_rd(words[20]) != decode_rd(words[21])
+      || decode_rs(words[20]) != previous_index_register
+      || decode_rs(words[21]) != step_register
+      || decode_rd(words[22]) != next_index_register
+      || decode_rd(words[23]) != next_index_register
+      || decode_risc_aux16(words[23]) as usize != index_slot
+      || decode_rd(words[24]) != next_index_register
+      || decode_risc_aux16(words[24]) as usize != arithmetic_temporary_slot
+      || decode_rd(words[25]) != next_index_register
+      || decode_risc_aux16(words[25]) as usize != index_slot
+      || index_slot == receiver_slot
+      || index_slot == call_temporary_slot
+      || index_slot == arithmetic_temporary_slot
+      || receiver_slot == call_temporary_slot
+      || receiver_slot == arithmetic_temporary_slot
+      || call_temporary_slot == arithmetic_temporary_slot
+    {
+      return None;
+    }
+    let method_key_constant = decode_risc_aux16(words[7]) as usize;
+    match chunk.constants.get(method_key_constant) {
+      Some(crate::bytecode::Constant::String(_)) => {}
+      _ => return None,
+    }
+    let step = number_constant(chunk, words[19])?;
+    if step != 1.0 {
+      return None;
+    }
+    Some(Self {
+      entry_pc: ip,
+      completed_pc,
+      index_slot,
+      receiver_slot,
+      call_temporary_slot,
+      arithmetic_temporary_slot,
+      method_key_constant,
+      argument: number_constant(chunk, words[9])?,
+      limit: number_constant(chunk, words[1])?,
+      step,
+      index_register: index_register as usize,
+      limit_register: limit_register as usize,
+      previous_index_register: previous_index_register as usize,
+      next_index_register: next_index_register as usize,
+      step_register: step_register as usize,
+      argument_register: argument_register as usize,
+      program: NumericProgramDraft::counted(NumericAddend::Prepared).validate()?,
+    })
+  }
+}
+
 impl OwnMethodNumericLoopRegion {
   pub(super) fn decode(
     chunk: &Chunk,
@@ -1042,6 +1274,36 @@ const OWN_METHOD_NUMERIC_LOOP: &[Op] = &[
   Op::LoadLocal,
   Op::LoadLocal,
   Op::StoreLocal,
+  Op::CloneLocalCell,
+  Op::LoadLocal,
+  Op::Neg,
+  Op::Neg,
+  Op::Const,
+  Op::Move,
+  Op::Add,
+  Op::StoreLocal,
+  Op::LoadLocal,
+  Op::LoadLocal,
+  Op::StoreLocal,
+  Op::Jump,
+];
+
+const OWN_METHOD_EFFECT_LOOP: &[Op] = &[
+  Op::LoadLocal,
+  Op::Const,
+  Op::CompareJump,
+  Op::LoadLocal,
+  Op::StoreLocal,
+  Op::LoadLocal,
+  Op::LoadLocal,
+  Op::Const,
+  Op::GetProperty,
+  Op::Const,
+  Op::Move,
+  Op::Move,
+  Op::Move,
+  Op::CallBuiltin,
+  Op::Move,
   Op::CloneLocalCell,
   Op::LoadLocal,
   Op::Neg,
