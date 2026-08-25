@@ -26,11 +26,8 @@ pub(crate) fn install_shared_array_buffer(
       let instance_proto = vm
         .pending_constructor_new_target()
         .and_then(|new_target| {
-          vm.get_property_host(
-            &new_target,
-            &PropertyKey::String("prototype".to_string().into()),
-          )
-          .ok()
+          vm.get_property_host(&new_target, &PropertyKey::prototype())
+            .ok()
         })
         .and_then(|proto| match proto {
           Value::Object(_)
@@ -55,7 +52,7 @@ pub(crate) fn install_shared_array_buffer(
     .borrow_mut()
     .properties
     .insert(
-      PropertyKey::String("prototype".to_string().into()),
+      PropertyKey::prototype(),
       PropertyDescriptor::builtin_prototype(Value::Object(Rc::clone(&sharedarraybuffer_proto_map))),
     );
   sharedarraybuffer_proto_map

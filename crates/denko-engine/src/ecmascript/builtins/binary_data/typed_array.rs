@@ -167,7 +167,7 @@ pub(crate) fn install_typed_arrays(
     .borrow_mut()
     .properties
     .insert(
-      PropertyKey::String("prototype".to_string().into()),
+      PropertyKey::prototype(),
       PropertyDescriptor::builtin_prototype(Value::Object(Rc::clone(&typedarray_proto_map))),
     );
   typedarray_ctor_map
@@ -1167,10 +1167,7 @@ pub(crate) fn install_typed_arrays(
           };
 
           let instance_proto = if let Some(new_target) = vm.pending_constructor_new_target() {
-            let prototype = vm.get_property_host(
-              &new_target,
-              &PropertyKey::String("prototype".to_string().into()),
-            )?;
+            let prototype = vm.get_property_host(&new_target, &PropertyKey::prototype())?;
             match prototype {
               Value::Object(_)
               | Value::Array(..)
@@ -1218,7 +1215,7 @@ pub(crate) fn install_typed_arrays(
       let ctor_val = Value::BuiltinObject(ctor_fn.clone(), ctor_map.clone());
       crate::ecmascript::semantics::set_builtin_length(&ctor_val, 3.0);
       ctor_map.borrow_mut().properties.insert(
-        PropertyKey::String("prototype".to_string().into()),
+        PropertyKey::prototype(),
         PropertyDescriptor::builtin_prototype(Value::Object(proto_map.clone())),
       );
       ctor_map.borrow_mut().properties.insert(

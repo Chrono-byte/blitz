@@ -499,7 +499,7 @@ pub(crate) fn create_date_intrinsics(
     let instance_prototype = vm
       .pending_constructor_new_target()
       .and_then(|new_target| {
-        vm.get_property_host(&new_target, &PropertyKey::String("prototype".into()))
+        vm.get_property_host(&new_target, &PropertyKey::prototype())
           .ok()
       })
       .filter(Value::is_object)
@@ -515,7 +515,7 @@ pub(crate) fn create_date_intrinsics(
     .borrow_mut()
     .properties
     .insert(
-      PropertyKey::String("prototype".into()),
+      PropertyKey::prototype(),
       PropertyDescriptor::builtin_prototype(Value::Object(Rc::clone(&prototype))),
     );
 

@@ -26,7 +26,7 @@ pub(crate) fn create_foundation() -> FoundationIntrinsics {
     .borrow_mut()
     .properties
     .insert(
-      PropertyKey::String("prototype".into()),
+      PropertyKey::prototype(),
       PropertyDescriptor::builtin_prototype(Value::Object(Rc::clone(&function_prototype))),
     );
 
@@ -118,7 +118,7 @@ pub(crate) fn create_foundation() -> FoundationIntrinsics {
     .borrow_mut()
     .properties
     .insert(
-      PropertyKey::String("prototype".into()),
+      PropertyKey::prototype(),
       PropertyDescriptor::builtin_prototype(Value::Object(Rc::clone(&generator_prototype))),
     );
   generator_prototype
@@ -146,7 +146,7 @@ pub(crate) fn create_foundation() -> FoundationIntrinsics {
     .borrow_mut()
     .properties
     .insert(
-      PropertyKey::String("prototype".into()),
+      PropertyKey::prototype(),
       PropertyDescriptor::builtin_prototype(Value::Object(Rc::clone(&object_prototype))),
     );
 

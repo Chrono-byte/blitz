@@ -434,8 +434,7 @@ pub(crate) fn install_data_view(
         return Err(vm.throw_range_error("Invalid DataView length"));
       }
       let instance_proto = if let Some(new_target) = new_target {
-        let prototype =
-          vm.get_property_host(&new_target, &PropertyKey::String("prototype".into()))?;
+        let prototype = vm.get_property_host(&new_target, &PropertyKey::prototype())?;
         match prototype {
           Value::Object(_)
           | Value::Array(..)
@@ -466,7 +465,7 @@ pub(crate) fn install_data_view(
   let dataview_ctor_val =
     Value::BuiltinObject(Rc::clone(&dataview_ctor_fn), Rc::clone(&dataview_ctor_map));
   dataview_ctor_map.borrow_mut().properties.insert(
-    PropertyKey::String("prototype".to_string().into()),
+    PropertyKey::prototype(),
     PropertyDescriptor::builtin_prototype(Value::Object(Rc::clone(&dataview_proto_map))),
   );
   set_builtin_name(&dataview_ctor_val, "DataView");

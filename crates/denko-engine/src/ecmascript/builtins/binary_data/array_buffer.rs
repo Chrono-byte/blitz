@@ -25,10 +25,7 @@ pub(crate) fn install_array_buffer(
     let proto_map_rc = Rc::clone(&arraybuffer_proto_map);
     Rc::new(move |vm, args| {
       let instance_proto = if let Some(new_target) = vm.pending_constructor_new_target() {
-        let prototype = vm.get_property_host(
-          &new_target,
-          &PropertyKey::String("prototype".to_string().into()),
-        )?;
+        let prototype = vm.get_property_host(&new_target, &PropertyKey::prototype())?;
         match prototype {
           Value::Object(_)
           | Value::Array(..)
@@ -55,7 +52,7 @@ pub(crate) fn install_array_buffer(
     .borrow_mut()
     .properties
     .insert(
-      PropertyKey::String("prototype".to_string().into()),
+      PropertyKey::prototype(),
       PropertyDescriptor::builtin_prototype(Value::Object(Rc::clone(&arraybuffer_proto_map))),
     );
   arraybuffer_proto_map

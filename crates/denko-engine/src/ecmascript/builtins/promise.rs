@@ -295,10 +295,7 @@ pub(crate) fn create_promise_intrinsics(
         reject_pending_promise(vm, &promise, reason);
       }
 
-      let prototype = vm.get_property_host(
-        &new_target,
-        &PropertyKey::String("prototype".to_string().into()),
-      )?;
+      let prototype = vm.get_property_host(&new_target, &PropertyKey::prototype())?;
       let prototype = if prototype.is_object() {
         prototype
       } else {

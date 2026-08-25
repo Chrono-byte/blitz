@@ -1,15 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 use super::*;
 use crate::gc;
-use js_string::JsString;
-use std::sync::OnceLock;
-
-fn builtin_metadata_key(
-  name: &'static str,
-  key: &'static OnceLock<JsString>,
-) -> PropertyKey {
-  PropertyKey::String(key.get_or_init(|| name.into()).clone())
-}
 
 /// Installs standard built-in properties on one intrinsic object.
 ///
@@ -91,7 +82,6 @@ pub(crate) fn set_builtin_length(
   length: f64,
 ) {
   let desc = PropertyDescriptor::builtin_metadata(Value::Number(length));
-  static LENGTH: OnceLock<JsString> = OnceLock::new();
   match target {
     Value::Object(props)
     | Value::Array(_, props)
@@ -100,7 +90,7 @@ pub(crate) fn set_builtin_length(
       props
         .borrow_mut()
         .properties
-        .insert(builtin_metadata_key("length", &LENGTH), desc);
+        .insert(PropertyKey::builtin_length(), desc);
     }
     _ => {}
   }
@@ -112,7 +102,6 @@ pub(crate) fn set_builtin_name(
   name: &str,
 ) {
   let desc = PropertyDescriptor::builtin_metadata(Value::String(name.to_string().into()));
-  static NAME: OnceLock<JsString> = OnceLock::new();
   match target {
     Value::Object(props)
     | Value::Array(_, props)
@@ -121,7 +110,7 @@ pub(crate) fn set_builtin_name(
       props
         .borrow_mut()
         .properties
-        .insert(builtin_metadata_key("name", &NAME), desc);
+        .insert(PropertyKey::builtin_name(), desc);
     }
     _ => {}
   }

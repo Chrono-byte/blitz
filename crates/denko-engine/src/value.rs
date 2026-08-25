@@ -63,8 +63,8 @@ use std::cell::RefCell;
 use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
 use std::rc::Weak;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use num_bigint::BigInt as BigIntValue;
 use num_traits::Zero;
@@ -235,6 +235,30 @@ pub enum PropertyKey {
   String(JsString),
   /// Symbol key
   Symbol(SymbolId),
+}
+
+impl PropertyKey {
+  fn shared_string(
+    name: &'static str,
+    key: &'static OnceLock<JsString>,
+  ) -> Self {
+    Self::String(key.get_or_init(|| name.into()).clone())
+  }
+
+  pub(crate) fn builtin_name() -> Self {
+    static KEY: OnceLock<JsString> = OnceLock::new();
+    Self::shared_string("name", &KEY)
+  }
+
+  pub(crate) fn builtin_length() -> Self {
+    static KEY: OnceLock<JsString> = OnceLock::new();
+    Self::shared_string("length", &KEY)
+  }
+
+  pub(crate) fn prototype() -> Self {
+    static KEY: OnceLock<JsString> = OnceLock::new();
+    Self::shared_string("prototype", &KEY)
+  }
 }
 
 /// Property descriptor (data or accessor).
