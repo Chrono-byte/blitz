@@ -106,7 +106,6 @@ impl Vm {
         current_specifier: None,
       },
       jobs: JobState {
-        background_runtime: get_global_bg_runtime(),
         microtasks: VecDeque::new(),
         dynamic_imports: VecDeque::new(),
         unhandled_rejection_hook: None,
@@ -216,7 +215,6 @@ impl Vm {
         current_specifier: None,
       },
       jobs: JobState {
-        background_runtime: Arc::clone(&self.jobs.background_runtime),
         microtasks: VecDeque::new(),
         dynamic_imports: VecDeque::new(),
         unhandled_rejection_hook: self.jobs.unhandled_rejection_hook.clone(),

@@ -445,7 +445,7 @@ impl Vm {
     F: FnOnce() -> R + Send + 'static,
     R: Send + 'static,
   {
-    let rt = Arc::clone(&self.jobs.background_runtime);
+    let rt = get_global_bg_runtime();
     let handle = rt.spawn_blocking(f);
     rt.block_on(handle)
       .map_err(|e| crate::errors::RuntimeError::from(format!("Background task failed: {}", e)))
@@ -462,7 +462,7 @@ impl Vm {
     Fut: Future + Send + 'static,
     Fut::Output: Send + 'static,
   {
-    Ok(Arc::clone(&self.jobs.background_runtime).block_on(fut))
+    Ok(get_global_bg_runtime().block_on(fut))
   }
 
   /// Spawn a fire-and-forget task on the background runtime.
@@ -472,7 +472,7 @@ impl Vm {
   ) where
     Fut: Future<Output = ()> + Send + 'static,
   {
-    drop(self.jobs.background_runtime.spawn(fut));
+    drop(get_global_bg_runtime().spawn(fut));
   }
 }
 

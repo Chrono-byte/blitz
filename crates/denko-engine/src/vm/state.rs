@@ -240,7 +240,6 @@ pub(super) struct ModuleState {
 }
 
 pub(super) struct JobState {
-  pub(super) background_runtime: Arc<Runtime>,
   pub(super) microtasks: VecDeque<Microtask>,
   pub(super) dynamic_imports: VecDeque<DynamicImportJob>,
   pub(super) unhandled_rejection_hook: Option<UnhandledRejectionHook>,
