@@ -443,12 +443,36 @@ pub(crate) struct DirectCallTarget {
   code: Rc<NativeCode>,
   valid: Rc<Cell<bool>>,
   leaf: DirectLeaf,
+  contract: DirectCallContract,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum DirectLeaf {
   Number(f64),
   Parameter(u16),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DirectReceiverUse {
+  Unused,
+  RequiresJsThis,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DirectArgumentUse {
+  None,
+  Parameter(u16),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct DirectCallContract {
+  pub(crate) receiver: DirectReceiverUse,
+  pub(crate) arguments: DirectArgumentUse,
+}
+
+pub(crate) struct DirectCallInputs<'a> {
+  pub(crate) receiver: &'a Value,
+  pub(crate) arguments: &'a [Value],
 }
 
 impl DirectCallTarget {
@@ -460,13 +484,25 @@ impl DirectCallTarget {
     self.leaf
   }
 
+  pub(crate) fn contract(&self) -> DirectCallContract {
+    self.contract
+  }
+
   pub(crate) fn call(
     &self,
-    arguments: &[Value],
+    inputs: DirectCallInputs<'_>,
   ) -> Result<Value, String> {
     if !self.is_valid() {
       return Err("direct call target was invalidated".to_string());
     }
+    match self.contract.receiver {
+      DirectReceiverUse::Unused => {}
+      DirectReceiverUse::RequiresJsThis => {
+        return Err("direct call target requires an unsupported receiver ABI".to_string());
+      }
+    }
+    let _receiver = inputs.receiver;
+    let arguments = inputs.arguments;
     let mut result = Value::Undefined;
     let mut frame = native::DirectCallFrame {
       result: &mut result,
@@ -540,6 +576,13 @@ impl JitRuntime {
       .map(|(code, leaf)| DirectCallTarget {
         code: Rc::new(code),
         valid: Rc::new(Cell::new(true)),
+        contract: DirectCallContract {
+          receiver: DirectReceiverUse::Unused,
+          arguments: match leaf {
+            DirectLeaf::Number(_) => DirectArgumentUse::None,
+            DirectLeaf::Parameter(slot) => DirectArgumentUse::Parameter(slot),
+          },
+        },
         leaf,
       });
     let mut native_blocks = HashMap::new();

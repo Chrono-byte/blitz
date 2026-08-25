@@ -28,6 +28,7 @@ pub(super) enum NativeRegion {
   NumericLoop(NumericLoopRegion),
   DenseArrayPush(DenseArrayPushRegion),
   DenseMaskedRead(DenseMaskedReadRegion),
+  OwnMethodNumericLoop(OwnMethodNumericLoopRegion),
 }
 
 impl NativeRegion {
@@ -36,8 +37,32 @@ impl NativeRegion {
       Self::NumericLoop(region) => region.program.cost(),
       Self::DenseArrayPush(_) => RegionCost { max_iterations: 64 },
       Self::DenseMaskedRead(_) => RegionCost { max_iterations: 64 },
+      Self::OwnMethodNumericLoop(region) => region.program.cost(),
     }
   }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct OwnMethodNumericLoopRegion {
+  pub(super) entry_pc: usize,
+  pub(super) completed_pc: usize,
+  pub(super) index_slot: usize,
+  pub(super) accumulator_slot: usize,
+  pub(super) receiver_slot: usize,
+  pub(super) call_temporary_slot: usize,
+  pub(super) arithmetic_temporary_slot: usize,
+  pub(super) key_constant: usize,
+  pub(super) call_site: usize,
+  pub(super) argument: f64,
+  pub(super) limit: f64,
+  pub(super) step: f64,
+  pub(super) index_register: usize,
+  pub(super) limit_register: usize,
+  pub(super) previous_index_register: usize,
+  pub(super) next_index_register: usize,
+  pub(super) step_register: usize,
+  pub(super) argument_register: usize,
+  pub(super) program: ValidatedNumericProgram,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -331,7 +356,6 @@ impl NumericLoopRegion {
       Some(crate::bytecode::Constant::String(_)) => {}
       _ => return None,
     }
-
     Some(Self {
       entry_pc: ip,
       completed_pc,
@@ -610,6 +634,140 @@ impl DenseMaskedReadRegion {
   }
 }
 
+impl OwnMethodNumericLoopRegion {
+  pub(super) fn decode(
+    chunk: &Chunk,
+    ip: usize,
+  ) -> Option<Self> {
+    let words = chunk
+      .code
+      .get(ip..ip + OWN_METHOD_NUMERIC_LOOP.len())?;
+    if !words
+      .iter()
+      .zip(OWN_METHOD_NUMERIC_LOOP)
+      .all(|(word, expected)| opcode(*word) == *expected)
+    {
+      return None;
+    }
+    let index_slot = decode_risc_aux16(words[0]) as usize;
+    let accumulator_slot = decode_risc_aux16(words[3]) as usize;
+    let receiver_slot = decode_risc_aux16(words[4]) as usize;
+    let call_temporary_slot = decode_risc_aux16(words[5]) as usize;
+    let arithmetic_temporary_slot = decode_risc_aux16(words[17]) as usize;
+    let index_register = decode_rd(words[0]);
+    let limit_register = decode_rd(words[1]);
+    let accumulator_register = decode_rd(words[3]);
+    let receiver_register = decode_rd(words[4]);
+    let callee_register = decode_rd(words[7]);
+    let key_register = decode_rd(words[8]);
+    let argument_register = decode_rd(words[10]);
+    let result_register = decode_rd(words[15]);
+    let previous_index_register = decode_rd(words[22]);
+    let step_register = decode_rd(words[25]);
+    let next_index_register = decode_rd(words[26]);
+    let (condition, left, right, exit_offset) = decode_compare_jump(words[2]);
+    let jump_payload = ((words[32] >> 8) & 0x00ff_ffff) as i32;
+    let jump_offset = if jump_payload & 0x0080_0000 != 0 {
+      jump_payload | !0x00ff_ffff
+    } else {
+      jump_payload
+    };
+    let completed_pc = ip + words.len();
+    let actual_exit = (ip as i64 + 3 + exit_offset as i64) as usize;
+    let actual_backedge = (ip as i64 + words.len() as i64 + jump_offset as i64) as usize;
+    if condition != 2
+      || left != index_register
+      || right != limit_register
+      || actual_exit != completed_pc
+      || actual_backedge != ip
+      || decode_rd(words[5]) != receiver_register
+      || decode_risc_aux16(words[6]) as usize != call_temporary_slot
+      || decode_risc_aux16(words[7]) as usize != call_temporary_slot
+      || decode_rd(words[9]) != callee_register
+      || decode_rs(words[9]) != key_register
+      || decode_rd(words[11]) != 2
+      || decode_rs(words[11]) != argument_register
+      || decode_rd(words[12]) != 1
+      || decode_rs(words[12]) != receiver_register
+      || decode_rd(words[13]) != 0
+      || decode_rs(words[13]) != callee_register
+      || decode_risc_aux16(words[14]) != 1
+      || decode_rd(words[15]) != result_register
+      || decode_rs(words[15]) != 0
+      || decode_rd(words[16]) != accumulator_register
+      || decode_rs(words[16]) != result_register
+      || decode_rd(words[17]) != accumulator_register
+      || decode_risc_aux16(words[18]) as usize != accumulator_slot
+      || decode_risc_aux16(words[19]) as usize != arithmetic_temporary_slot
+      || decode_risc_aux16(words[20]) as usize != accumulator_slot
+      || decode_risc_aux16(words[21]) as usize != index_slot
+      || decode_risc_aux16(words[22]) as usize != index_slot
+      || decode_rd(words[23]) != previous_index_register
+      || decode_rs(words[23]) != previous_index_register
+      || decode_rd(words[24]) != previous_index_register
+      || decode_rs(words[24]) != previous_index_register
+      || decode_rd(words[26]) != decode_rd(words[27])
+      || decode_rs(words[26]) != previous_index_register
+      || decode_rs(words[27]) != step_register
+      || decode_rd(words[28]) != next_index_register
+      || decode_risc_aux16(words[28]) as usize != arithmetic_temporary_slot
+      || decode_rd(words[29]) != next_index_register
+      || decode_risc_aux16(words[29]) as usize != index_slot
+      || decode_rd(words[30]) != next_index_register
+      || decode_risc_aux16(words[30]) as usize != arithmetic_temporary_slot
+      || decode_rd(words[31]) != next_index_register
+      || decode_risc_aux16(words[31]) as usize != index_slot
+      || [
+        index_slot,
+        accumulator_slot,
+        receiver_slot,
+        call_temporary_slot,
+      ]
+      .into_iter()
+      .any(|slot| slot == arithmetic_temporary_slot)
+      || index_slot == accumulator_slot
+      || index_slot == receiver_slot
+      || index_slot == call_temporary_slot
+      || accumulator_slot == receiver_slot
+      || accumulator_slot == call_temporary_slot
+      || receiver_slot == call_temporary_slot
+    {
+      return None;
+    }
+    let key_constant = decode_risc_aux16(words[8]) as usize;
+    match chunk.constants.get(key_constant) {
+      Some(crate::bytecode::Constant::String(_)) => {}
+      _ => return None,
+    }
+    let step = number_constant(chunk, words[25])?;
+    if step != 1.0 {
+      return None;
+    }
+
+    Some(Self {
+      entry_pc: ip,
+      completed_pc,
+      index_slot,
+      accumulator_slot,
+      receiver_slot,
+      call_temporary_slot,
+      arithmetic_temporary_slot,
+      key_constant,
+      call_site: ip + 14,
+      argument: number_constant(chunk, words[10])?,
+      limit: number_constant(chunk, words[1])?,
+      step,
+      index_register: index_register as usize,
+      limit_register: limit_register as usize,
+      previous_index_register: previous_index_register as usize,
+      next_index_register: next_index_register as usize,
+      step_register: step_register as usize,
+      argument_register: argument_register as usize,
+      program: NumericProgramDraft::counted(NumericAddend::Prepared).validate()?,
+    })
+  }
+}
+
 impl NumericLoopRegion {
   pub(super) fn decode_call(
     chunk: &Chunk,
@@ -843,6 +1001,42 @@ const DENSE_MASKED_READ_LOOP: &[Op] = &[
   Op::Const,
   Op::BitAnd,
   Op::GetProperty,
+  Op::Add,
+  Op::StoreLocal,
+  Op::LoadLocal,
+  Op::LoadLocal,
+  Op::StoreLocal,
+  Op::CloneLocalCell,
+  Op::LoadLocal,
+  Op::Neg,
+  Op::Neg,
+  Op::Const,
+  Op::Move,
+  Op::Add,
+  Op::StoreLocal,
+  Op::LoadLocal,
+  Op::LoadLocal,
+  Op::StoreLocal,
+  Op::Jump,
+];
+
+const OWN_METHOD_NUMERIC_LOOP: &[Op] = &[
+  Op::LoadLocal,
+  Op::Const,
+  Op::CompareJump,
+  Op::LoadLocal,
+  Op::LoadLocal,
+  Op::StoreLocal,
+  Op::LoadLocal,
+  Op::LoadLocal,
+  Op::Const,
+  Op::GetProperty,
+  Op::Const,
+  Op::Move,
+  Op::Move,
+  Op::Move,
+  Op::CallBuiltin,
+  Op::Move,
   Op::Add,
   Op::StoreLocal,
   Op::LoadLocal,

@@ -310,6 +310,59 @@ mod test {
 
   #[cfg(all(unix, target_arch = "x86_64"))]
   #[test]
+  fn own_method_numeric_loop_matches_portable_interpretation() {
+    let source = "const object = { identity(value) { return value; } }; let total = 0; for (let i = 0; i < 2100; i++) total += object.identity(42); globalThis.methodTotal = total;";
+    let (optimized, _) = run_script_with_optimizations(source, true);
+    let (portable, _) = run_script_with_optimizations(source, false);
+    assert_eq!(
+      optimized.get_global("methodTotal"),
+      portable.get_global("methodTotal")
+    );
+    assert!(optimized.caches.quickened.values().any(|plan| {
+      plan.regions.iter().any(|region| {
+        matches!(
+          region,
+          crate::vm::region::NativeRegion::OwnMethodNumericLoop(_)
+        )
+      })
+    }));
+    assert!(
+      optimized
+        .profiling
+        .jit_stats
+        .native_loop_iterations
+        > 0
+    );
+  }
+
+  #[test]
+  fn own_method_numeric_loop_rechecks_method_identity() {
+    let source = "const object = { method(value) { return value; } }; let first = 0; for (let i = 0; i < 1200; i++) first += object.method(2); object.method = function(value) { return 3; }; let second = 0; for (let i = 0; i < 1200; i++) second += object.method(2); globalThis.methodFirst = first; globalThis.methodSecond = second;";
+    let (optimized, _) = run_script_with_optimizations(source, true);
+    let (portable, _) = run_script_with_optimizations(source, false);
+    for name in ["methodFirst", "methodSecond"] {
+      assert_eq!(optimized.get_global(name), portable.get_global(name));
+    }
+  }
+
+  #[test]
+  fn own_method_numeric_loop_falls_back_for_observable_lookup_and_this() {
+    let source = "let gets = 0; const target = { identity(value) { return value; } }; const accessor = {}; Object.defineProperty(accessor, 'identity', { get() { gets++; return target.identity; } }); const inherited = Object.create(target); const proxy = new Proxy(target, { get(object, key) { gets++; return object[key]; } }); const readsThis = { value: 4, identity(value) { return this.value + value; } }; let accessorTotal = 0; let inheritedTotal = 0; let proxyTotal = 0; let thisTotal = 0; for (let i = 0; i < 20; i++) accessorTotal += accessor.identity(1); for (let i = 0; i < 20; i++) inheritedTotal += inherited.identity(1); for (let i = 0; i < 20; i++) proxyTotal += proxy.identity(1); for (let i = 0; i < 20; i++) thisTotal += readsThis.identity(1); globalThis.methodGets = gets; globalThis.accessorTotal = accessorTotal; globalThis.inheritedTotal = inheritedTotal; globalThis.proxyTotal = proxyTotal; globalThis.thisTotal = thisTotal;";
+    let (optimized, _) = run_script_with_optimizations(source, true);
+    let (portable, _) = run_script_with_optimizations(source, false);
+    for name in [
+      "methodGets",
+      "accessorTotal",
+      "inheritedTotal",
+      "proxyTotal",
+      "thisTotal",
+    ] {
+      assert_eq!(optimized.get_global(name), portable.get_global(name));
+    }
+  }
+
+  #[cfg(all(unix, target_arch = "x86_64"))]
+  #[test]
   fn native_call_loop_preserves_ordered_addition_across_batch_boundary() {
     let (vm, _) = run_script(
       "function tenth() { return 0.1; } let nativeTotal = 0; for (let i = 0; i < 2130; i += 2) nativeTotal += tenth(); let expected = 0; for (let i = 0; i < 2130; i += 2) expected += 0.1; globalThis.native_batch_matches = nativeTotal === expected;",
