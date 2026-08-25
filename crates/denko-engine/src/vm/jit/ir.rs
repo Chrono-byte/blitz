@@ -59,7 +59,9 @@ pub(crate) struct ExitState {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SemanticValue {
-  Parameter { index: u16 },
+  Parameter {
+    index: u16,
+  },
   JsAdd {
     left: ValueId,
     right: ValueId,
@@ -131,9 +133,7 @@ struct TypedFunction {
 pub(crate) struct VerifiedTypedFunction(TypedFunction);
 
 impl VerifiedTypedFunction {
-  pub(crate) fn specialize_numeric_add(
-    semantic: &SemanticFunction,
-  ) -> Result<Self, IrError> {
+  pub(crate) fn specialize_numeric_add(semantic: &SemanticFunction) -> Result<Self, IrError> {
     let [
       SemanticValue::Parameter { index: left_index },
       SemanticValue::Parameter { index: right_index },
@@ -209,6 +209,29 @@ impl VerifiedTypedFunction {
 
   pub(crate) fn exits(&self) -> &[ExitState] {
     &self.0.exits
+  }
+
+  pub(crate) fn numeric_add_arguments(&self) -> Option<(u16, u16)> {
+    let [
+      TypedValue::GuardedNumberArgument {
+        index: left_index,
+        failure: left_failure,
+      },
+      TypedValue::GuardedNumberArgument {
+        index: right_index,
+        failure: right_failure,
+      },
+      TypedValue::F64Add { left, right },
+    ] = self.0.values.as_slice()
+    else {
+      return None;
+    };
+    (*left_failure == 0
+      && *right_failure == 0
+      && *left == ValueId(0)
+      && *right == ValueId(1)
+      && self.0.return_value == ValueId(2))
+    .then_some((*left_index, *right_index))
   }
 }
 
@@ -291,9 +314,6 @@ mod tests {
 
   #[test]
   fn value_ids_fail_when_the_ir_limit_is_exceeded() {
-    assert_eq!(
-      ValueId::from_index(usize::MAX),
-      Err(IrError::TooManyValues)
-    );
+    assert_eq!(ValueId::from_index(usize::MAX), Err(IrError::TooManyValues));
   }
 }

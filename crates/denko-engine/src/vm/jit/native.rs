@@ -76,6 +76,7 @@ pub(crate) enum RuntimeHelperId {
   SetResultFromLocal,
   SetDirectNumberResult,
   SetDirectArgumentResult,
+  ReadDirectNumberArgument,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -114,6 +115,28 @@ pub(crate) unsafe extern "C" fn denko_jit_set_direct_argument_result(
     } else {
       (*(*frame).arguments.add(slot as usize)).clone()
     };
+  }
+  JIT_EXIT_RETURN
+}
+
+#[unsafe(no_mangle)]
+pub(crate) unsafe extern "C" fn denko_jit_read_direct_number_argument(
+  frame: *mut DirectCallFrame,
+  slot: u32,
+  output: *mut f64,
+) -> JitExitCode {
+  unsafe {
+    if frame.is_null()
+      || output.is_null()
+      || (*frame).arguments.is_null()
+      || slot as usize >= (*frame).argument_count
+    {
+      return JIT_EXIT_INTERPRETER;
+    }
+    let Value::Number(value) = &*(*frame).arguments.add(slot as usize) else {
+      return JIT_EXIT_INTERPRETER;
+    };
+    *output = *value;
   }
   JIT_EXIT_RETURN
 }
@@ -661,6 +684,9 @@ impl NativeCode {
         RuntimeHelperId::SetDirectArgumentResult => {
           denko_jit_set_direct_argument_result as *const () as usize
         }
+        RuntimeHelperId::ReadDirectNumberArgument => {
+          denko_jit_read_direct_number_argument as *const () as usize
+        }
       } as u64;
       let start = relocation.offset as usize;
       bytes
@@ -692,6 +718,22 @@ impl NativeCode {
       ptr,
       len: bytes.len(),
     })
+  }
+
+  #[cfg(all(unix, target_arch = "x86_64"))]
+  pub(crate) fn install_artifact(
+    artifact: crate::vm::jit::artifact::ValidatedArtifact
+  ) -> Result<Self, String> {
+    let (bytes, relocations) = artifact.into_parts();
+    let relocations: Vec<_> = relocations
+      .into_vec()
+      .into_iter()
+      .map(|relocation| Relocation {
+        offset: relocation.offset.index() as u32,
+        helper: relocation.helper,
+      })
+      .collect();
+    Self::from_bytes(&bytes, &relocations)
   }
 
   #[cfg(not(all(unix, target_arch = "x86_64")))]

@@ -6,6 +6,7 @@
 #![allow(dead_code, reason = "staged JIT metadata is consumed incrementally")]
 
 use crate::value::Value;
+pub(crate) mod artifact;
 pub(crate) mod ir;
 pub(crate) mod native;
 
