@@ -34,13 +34,77 @@ impl CodePoint {
   }
 }
 
-/// An immutable JavaScript string backed by UTF-16 code units.
+const INLINE_ASCII_CAPACITY: usize = 7;
+
+/// An immutable JavaScript string backed by exact UTF-16 code units.
 #[derive(Clone)]
 pub struct JsString {
+  repr: Repr,
+}
+
+#[derive(Clone)]
+enum Repr {
+  Inline(InlineAscii),
+  Heap { shared: Arc<HeapString>, len: usize },
+}
+
+#[derive(Clone)]
+struct InlineAscii {
+  units: [u16; INLINE_ASCII_CAPACITY],
+  bytes: [u8; INLINE_ASCII_CAPACITY],
+  len: u8,
+}
+
+struct HeapString {
   storage: Arc<[u16]>,
   start: usize,
-  len: usize,
-  utf8_lossy: Arc<OnceLock<String>>,
+  utf8_lossy: OnceLock<String>,
+}
+
+impl InlineAscii {
+  fn try_from_str(value: &str) -> Option<Self> {
+    if value.len() > INLINE_ASCII_CAPACITY || !value.is_ascii() {
+      return None;
+    }
+    let mut inline = Self {
+      units: [0; INLINE_ASCII_CAPACITY],
+      bytes: [0; INLINE_ASCII_CAPACITY],
+      len: value.len() as u8,
+    };
+    inline.bytes[..value.len()].copy_from_slice(value.as_bytes());
+    for (unit, byte) in inline.units.iter_mut().zip(value.bytes()) {
+      *unit = u16::from(byte);
+    }
+    Some(inline)
+  }
+
+  fn try_from_units(units: &[u16]) -> Option<Self> {
+    if units.len() > INLINE_ASCII_CAPACITY || units.iter().any(|unit| *unit > 0x7F) {
+      return None;
+    }
+    let mut inline = Self {
+      units: [0; INLINE_ASCII_CAPACITY],
+      bytes: [0; INLINE_ASCII_CAPACITY],
+      len: units.len() as u8,
+    };
+    inline.units[..units.len()].copy_from_slice(units);
+    for (byte, unit) in inline.bytes.iter_mut().zip(units.iter().copied()) {
+      *byte = unit as u8;
+    }
+    Some(inline)
+  }
+
+  const fn len(&self) -> usize {
+    self.len as usize
+  }
+
+  fn units(&self) -> &[u16] {
+    &self.units[..self.len()]
+  }
+
+  fn text(&self) -> &str {
+    std::str::from_utf8(&self.bytes[..self.len()]).expect("inline ASCII is valid UTF-8")
+  }
 }
 
 impl JsString {
@@ -53,38 +117,59 @@ impl JsString {
   /// Encode a Rust string as UTF-16.
   #[must_use]
   pub fn new(value: &str) -> Self {
+    if let Some(inline) = InlineAscii::try_from_str(value) {
+      return Self {
+        repr: Repr::Inline(inline),
+      };
+    }
     Self::from_utf16(value.encode_utf16().collect::<Vec<_>>())
   }
 
   /// Construct a JavaScript string from exact UTF-16 code units.
   #[must_use]
   pub fn from_utf16(units: impl Into<Vec<u16>>) -> Self {
-    let storage: Arc<[u16]> = units.into().into();
+    let units = units.into();
+    if let Some(inline) = InlineAscii::try_from_units(&units) {
+      return Self {
+        repr: Repr::Inline(inline),
+      };
+    }
+    let storage: Arc<[u16]> = units.into();
     let len = storage.len();
     Self {
-      storage,
-      start: 0,
-      len,
-      utf8_lossy: Arc::new(OnceLock::new()),
+      repr: Repr::Heap {
+        shared: Arc::new(HeapString {
+          storage,
+          start: 0,
+          utf8_lossy: OnceLock::new(),
+        }),
+        len,
+      },
     }
   }
 
   /// Return the number of UTF-16 code units.
   #[must_use]
   pub const fn len(&self) -> usize {
-    self.len
+    match &self.repr {
+      Repr::Inline(inline) => inline.len(),
+      Repr::Heap { len, .. } => *len,
+    }
   }
 
   /// Return whether this string contains no code units.
   #[must_use]
   pub const fn is_empty(&self) -> bool {
-    self.len == 0
+    self.len() == 0
   }
 
   /// Borrow the exact UTF-16 code units.
   #[must_use]
   pub fn as_slice(&self) -> &[u16] {
-    &self.storage[self.start..self.start + self.len]
+    match &self.repr {
+      Repr::Inline(inline) => inline.units(),
+      Repr::Heap { shared, len } => &shared.storage[shared.start..shared.start + len],
+    }
   }
 
   /// Return a code unit by ECMAScript string index.
@@ -143,14 +228,27 @@ impl JsString {
     &self,
     range: Range<usize>,
   ) -> Option<Self> {
-    if range.start > range.end || range.end > self.len {
+    if range.start > range.end || range.end > self.len() {
       return None;
     }
-    Some(Self {
-      storage: Arc::clone(&self.storage),
-      start: self.start + range.start,
-      len: range.end - range.start,
-      utf8_lossy: Arc::new(OnceLock::new()),
+    let len = range.end - range.start;
+    Some(match &self.repr {
+      Repr::Inline(inline) => Self {
+        repr: Repr::Inline(
+          InlineAscii::try_from_units(&inline.units()[range])
+            .expect("an inline ASCII slice remains inline ASCII"),
+        ),
+      },
+      Repr::Heap { shared, .. } => Self {
+        repr: Repr::Heap {
+          shared: Arc::new(HeapString {
+            storage: Arc::clone(&shared.storage),
+            start: shared.start + range.start,
+            utf8_lossy: OnceLock::new(),
+          }),
+          len,
+        },
+      },
     })
   }
 
@@ -160,7 +258,7 @@ impl JsString {
     &self,
     other: &Self,
   ) -> Self {
-    let mut units = Vec::with_capacity(self.len + other.len);
+    let mut units = Vec::with_capacity(self.len() + other.len());
     units.extend_from_slice(self.as_slice());
     units.extend_from_slice(other.as_slice());
     Self::from_utf16(units)
@@ -191,7 +289,7 @@ impl JsString {
     needle: &Self,
     from: usize,
   ) -> Option<usize> {
-    if from > self.len {
+    if from > self.len() {
       return None;
     }
     if needle.is_empty() {
@@ -200,7 +298,7 @@ impl JsString {
     self
       .as_slice()
       .get(from..)?
-      .windows(needle.len)
+      .windows(needle.len())
       .position(|window| window == needle.as_slice())
       .map(|relative| from + relative)
   }
@@ -227,7 +325,7 @@ impl JsString {
     I: Iterator<Item = char>,
     F: Fn(char) -> I,
   {
-    let mut output = JsStringBuilder::with_capacity(self.len);
+    let mut output = JsStringBuilder::with_capacity(self.len());
     let mut index = 0;
     while let Some(point) = self.code_point_at(index, true) {
       if let Some(character) = char::from_u32(point.value()) {
@@ -253,16 +351,19 @@ impl JsString {
   /// Engine code should use this only at APIs that cannot accept UTF-16.
   #[must_use]
   pub fn as_str_lossy(&self) -> &str {
-    self
-      .utf8_lossy
-      .get_or_init(|| String::from_utf16_lossy(self.as_slice()))
+    match &self.repr {
+      Repr::Inline(inline) => inline.text(),
+      Repr::Heap { shared, .. } => shared
+        .utf8_lossy
+        .get_or_init(|| String::from_utf16_lossy(self.as_slice())),
+    }
   }
 
   /// Return whether the string contains no isolated surrogate code units.
   #[must_use]
   pub fn is_well_formed(&self) -> bool {
     let mut index = 0;
-    while index < self.len {
+    while index < self.len() {
       let unit = self.as_slice()[index];
       if is_leading_surrogate(unit) {
         if self

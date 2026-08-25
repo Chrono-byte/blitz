@@ -1435,6 +1435,11 @@ mod tests {
   use super::*;
 
   #[test]
+  fn value_layout_does_not_grow_with_short_strings() {
+    assert!(std::mem::size_of::<Value>() <= 48);
+  }
+
+  #[test]
   fn proxy_identities_are_stable_and_distinct() {
     let target = || Value::Object(Rc::new(RefCell::new(ObjectData::new())));
     let first = ProxyData::new(target(), target());

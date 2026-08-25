@@ -89,3 +89,61 @@ assert_eq!(
   &[0x0061, 0xD800, 0xD83D, 0xDE00]
 );
   }
+
+#[test]
+fn short_string_layout_and_traits_remain_compact() {
+  assert!(JsString::empty().is_empty());
+  assert!(std::mem::size_of::<JsString>() <= 40);
+  fn assert_send_sync<T: Send + Sync>() {}
+  assert_send_sync::<JsString>();
+}
+
+#[test]
+fn short_and_heap_strings_have_identical_value_semantics() {
+  use std::collections::hash_map::DefaultHasher;
+
+  fn hash(value: &JsString) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
+  }
+
+  let short = JsString::new("length");
+  let sliced = JsString::new("xlengthy").slice(1..7).expect("valid slice");
+  assert_eq!(short, sliced);
+  assert_eq!(short.cmp(&sliced), Ordering::Equal);
+  assert_eq!(hash(&short), hash(&sliced));
+  assert_eq!(short.as_slice(), sliced.as_slice());
+  assert_eq!(short.as_str_lossy(), sliced.as_str_lossy());
+}
+
+#[test]
+fn short_string_boundaries_preserve_exact_utf16() {
+  for units in [
+    vec![],
+    vec![0; 7],
+    vec![u16::from(b'a'); 8],
+    vec![0x007F; 7],
+    vec![0x0080],
+    vec![0xD800],
+    vec![0xDC00],
+    vec![0xD83D, 0xDE00],
+  ] {
+    let value = JsString::from_utf16(units.clone());
+    assert_eq!(value.as_slice(), units);
+    assert_eq!(value.to_string_lossy(), String::from_utf16_lossy(&units));
+  }
+}
+
+#[test]
+fn short_ascii_slices_preserve_code_unit_boundaries_and_stable_views() {
+  let value = JsString::new("abcdefg");
+  assert!(std::ptr::eq(value.as_str_lossy(), value.as_str_lossy()));
+  for start in 0..=value.len() {
+    for end in start..=value.len() {
+      let slice = value.slice(start..end).expect("valid inline slice");
+      assert_eq!(slice.as_slice(), &value.as_slice()[start..end]);
+      assert_eq!(slice.as_str_lossy(), &"abcdefg"[start..end]);
+    }
+  }
+}
