@@ -469,6 +469,57 @@ mod test {
 
   #[cfg(all(unix, target_arch = "x86_64"))]
   #[test]
+  fn own_method_binary_loop_matches_portable_interpretation() {
+    let source = "const object = { add(left, right) { return left + right; } }; let total = 0; for (let i = 0; i < 2100; i++) total += object.add(2, 3); globalThis.binaryTotal = total;";
+    let (optimized, _) = run_script_with_optimizations(source, true);
+    let (portable, _) = run_script_with_optimizations(source, false);
+    assert_eq!(
+      optimized.get_global("binaryTotal"),
+      portable.get_global("binaryTotal")
+    );
+    assert!(optimized.caches.quickened.values().any(|plan| {
+      plan.regions.iter().any(|region| {
+        matches!(
+          region,
+          crate::vm::region::NativeRegion::OwnMethodBinaryLoop(_)
+        )
+      })
+    }));
+    assert!(
+      optimized
+        .profiling
+        .jit_stats
+        .native_loop_iterations
+        > 0
+    );
+  }
+
+  #[test]
+  fn own_method_binary_loop_rechecks_lookup_and_numeric_contract() {
+    let source = "const object = { add(left, right) { return left + right; } }; let first = 0; for (let i = 0; i < 1200; i++) first += object.add(2, 3); object.add = function(left, right) { return left * right; }; let second = 0; for (let i = 0; i < 1200; i++) second += object.add(2, 3); const strings = { add(left, right) { return left + right; } }; let text = ''; for (let i = 0; i < 1200; i++) text += strings.add('a', 'b'); globalThis.binaryFirst = first; globalThis.binarySecond = second; globalThis.binaryTextLength = text.length;";
+    let (optimized, _) = run_script_with_optimizations(source, true);
+    let (portable, _) = run_script_with_optimizations(source, false);
+    for name in ["binaryFirst", "binarySecond", "binaryTextLength"] {
+      assert_eq!(optimized.get_global(name), portable.get_global(name));
+    }
+  }
+
+  #[test]
+  fn own_method_binary_loop_preserves_proxy_and_signed_zero_semantics() {
+    let source = "let gets = 0; const target = { add(left, right) { return left + right; } }; const proxy = new Proxy(target, { get(object, key) { gets++; return object[key]; } }); let proxyTotal = 0; for (let i = 0; i < 1200; i++) proxyTotal += proxy.add(2, 3); const zeros = { add(left, right) { return left + right; } }; let zeroTotal = -0; for (let i = 0; i < 1200; i++) zeroTotal += zeros.add(-0, -0); globalThis.binaryProxyTotal = proxyTotal; globalThis.binaryProxyGets = gets; globalThis.binaryZeroReciprocal = 1 / zeroTotal;";
+    let (optimized, _) = run_script_with_optimizations(source, true);
+    let (portable, _) = run_script_with_optimizations(source, false);
+    for name in [
+      "binaryProxyTotal",
+      "binaryProxyGets",
+      "binaryZeroReciprocal",
+    ] {
+      assert_eq!(optimized.get_global(name), portable.get_global(name));
+    }
+  }
+
+  #[cfg(all(unix, target_arch = "x86_64"))]
+  #[test]
   fn native_call_loop_preserves_ordered_addition_across_batch_boundary() {
     let (vm, _) = run_script(
       "function tenth() { return 0.1; } let nativeTotal = 0; for (let i = 0; i < 2130; i += 2) nativeTotal += tenth(); let expected = 0; for (let i = 0; i < 2130; i += 2) expected += 0.1; globalThis.native_batch_matches = nativeTotal === expected;",

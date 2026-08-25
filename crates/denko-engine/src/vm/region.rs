@@ -33,6 +33,7 @@ pub(super) enum NativeRegion {
   OwnMethodNumericLoop(OwnMethodNumericLoopRegion),
   OwnMethodEffectLoop(OwnMethodEffectLoopRegion),
   OwnMethodReadLoop(OwnMethodReadLoopRegion),
+  OwnMethodBinaryLoop(OwnMethodBinaryLoopRegion),
 }
 
 impl NativeRegion {
@@ -44,8 +45,39 @@ impl NativeRegion {
       Self::OwnMethodNumericLoop(region) => region.program.cost(),
       Self::OwnMethodEffectLoop(region) => region.program.cost(),
       Self::OwnMethodReadLoop(region) => region.program.cost(),
+      Self::OwnMethodBinaryLoop(region) => region.program.cost(),
     }
   }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct NumericBinaryParameters {
+  pub(super) left_slot: usize,
+  pub(super) right_slot: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct OwnMethodBinaryLoopRegion {
+  pub(super) entry_pc: usize,
+  pub(super) completed_pc: usize,
+  pub(super) index_slot: usize,
+  pub(super) accumulator_slot: usize,
+  pub(super) receiver_slot: usize,
+  pub(super) call_temporary_slot: usize,
+  pub(super) arithmetic_temporary_slot: usize,
+  pub(super) method_key_constant: usize,
+  pub(super) left_argument: f64,
+  pub(super) right_argument: f64,
+  pub(super) limit: f64,
+  pub(super) step: f64,
+  pub(super) index_register: usize,
+  pub(super) limit_register: usize,
+  pub(super) previous_index_register: usize,
+  pub(super) next_index_register: usize,
+  pub(super) step_register: usize,
+  pub(super) left_argument_register: usize,
+  pub(super) right_argument_register: usize,
+  pub(super) program: ValidatedNumericProgram,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -694,6 +726,171 @@ impl DenseMaskedReadRegion {
       step_register: step_register as usize,
       mask_register: mask_register as usize,
       limit: number_constant(chunk, words[1])?,
+    })
+  }
+}
+
+impl NumericBinaryParameters {
+  pub(super) fn decode(proto: &FunctionProto) -> Option<Self> {
+    let [left, right, add, return_word] = proto.chunk.code.as_slice() else {
+      return None;
+    };
+    let left_slot = decode_risc_aux16(*left) as usize;
+    let right_slot = decode_risc_aux16(*right) as usize;
+    if proto.arity < 2
+      || proto.has_rest
+      || proto.captures_this
+      || !proto.upvalues.is_empty()
+      || opcode(*left) != Op::LoadLocal
+      || opcode(*right) != Op::LoadLocal
+      || opcode(*add) != Op::Add
+      || opcode(*return_word) != Op::Return
+      || left_slot != 0
+      || right_slot != 1
+      || decode_rd(*add) != decode_rd(*left)
+      || decode_rs(*add) != decode_rd(*right)
+      || decode_rd(*return_word) != decode_rd(*add)
+    {
+      return None;
+    }
+    Some(Self {
+      left_slot,
+      right_slot,
+    })
+  }
+}
+
+impl OwnMethodBinaryLoopRegion {
+  pub(super) fn decode(
+    chunk: &Chunk,
+    ip: usize,
+  ) -> Option<Self> {
+    let words = chunk
+      .code
+      .get(ip..ip + OWN_METHOD_BINARY_LOOP.len())?;
+    if !words
+      .iter()
+      .zip(OWN_METHOD_BINARY_LOOP)
+      .all(|(word, expected)| opcode(*word) == *expected)
+    {
+      return None;
+    }
+    let index_slot = decode_risc_aux16(words[0]) as usize;
+    let accumulator_slot = decode_risc_aux16(words[3]) as usize;
+    let receiver_slot = decode_risc_aux16(words[4]) as usize;
+    let call_temporary_slot = decode_risc_aux16(words[5]) as usize;
+    let arithmetic_temporary_slot = decode_risc_aux16(words[19]) as usize;
+    let index_register = decode_rd(words[0]);
+    let limit_register = decode_rd(words[1]);
+    let accumulator_register = decode_rd(words[3]);
+    let receiver_register = decode_rd(words[4]);
+    let callee_register = decode_rd(words[7]);
+    let key_register = decode_rd(words[8]);
+    let left_argument_register = decode_rd(words[10]);
+    let right_argument_register = decode_rd(words[11]);
+    let result_register = decode_rd(words[17]);
+    let previous_index_register = decode_rd(words[24]);
+    let step_register = decode_rd(words[27]);
+    let next_index_register = decode_rd(words[28]);
+    let (condition, left, right, exit_offset) = decode_compare_jump(words[2]);
+    let jump_payload = ((words[34] >> 8) & 0x00ff_ffff) as i32;
+    let jump_offset = if jump_payload & 0x0080_0000 != 0 {
+      jump_payload | !0x00ff_ffff
+    } else {
+      jump_payload
+    };
+    let completed_pc = ip + words.len();
+    if condition != 2
+      || left != index_register
+      || right != limit_register
+      || (ip as i64 + 3 + exit_offset as i64) as usize != completed_pc
+      || (ip as i64 + words.len() as i64 + jump_offset as i64) as usize != ip
+      || decode_rd(words[5]) != receiver_register
+      || decode_risc_aux16(words[6]) as usize != call_temporary_slot
+      || decode_risc_aux16(words[7]) as usize != call_temporary_slot
+      || decode_rd(words[9]) != callee_register
+      || decode_rs(words[9]) != key_register
+      || decode_rd(words[12]) != 2
+      || decode_rs(words[12]) != left_argument_register
+      || decode_rd(words[13]) != 3
+      || decode_rs(words[13]) != right_argument_register
+      || decode_rd(words[14]) != 1
+      || decode_rs(words[14]) != receiver_register
+      || decode_rd(words[15]) != 0
+      || decode_rs(words[15]) != callee_register
+      || decode_risc_aux16(words[16]) != 2
+      || decode_rd(words[17]) != result_register
+      || decode_rs(words[17]) != 0
+      || decode_rd(words[18]) != accumulator_register
+      || decode_rs(words[18]) != result_register
+      || decode_rd(words[19]) != accumulator_register
+      || decode_risc_aux16(words[20]) as usize != accumulator_slot
+      || decode_risc_aux16(words[21]) as usize != arithmetic_temporary_slot
+      || decode_risc_aux16(words[22]) as usize != accumulator_slot
+      || decode_risc_aux16(words[23]) as usize != index_slot
+      || decode_risc_aux16(words[24]) as usize != index_slot
+      || decode_rd(words[25]) != previous_index_register
+      || decode_rs(words[25]) != previous_index_register
+      || decode_rd(words[26]) != previous_index_register
+      || decode_rs(words[26]) != previous_index_register
+      || decode_rd(words[28]) != decode_rd(words[29])
+      || decode_rs(words[28]) != previous_index_register
+      || decode_rs(words[29]) != step_register
+      || decode_rd(words[30]) != next_index_register
+      || decode_risc_aux16(words[30]) as usize != arithmetic_temporary_slot
+      || decode_rd(words[31]) != next_index_register
+      || decode_risc_aux16(words[31]) as usize != index_slot
+      || decode_rd(words[32]) != next_index_register
+      || decode_risc_aux16(words[32]) as usize != arithmetic_temporary_slot
+      || decode_rd(words[33]) != next_index_register
+      || decode_risc_aux16(words[33]) as usize != index_slot
+      || [
+        index_slot,
+        accumulator_slot,
+        receiver_slot,
+        call_temporary_slot,
+      ]
+      .into_iter()
+      .any(|slot| slot == arithmetic_temporary_slot)
+      || index_slot == accumulator_slot
+      || index_slot == receiver_slot
+      || index_slot == call_temporary_slot
+      || accumulator_slot == receiver_slot
+      || accumulator_slot == call_temporary_slot
+      || receiver_slot == call_temporary_slot
+    {
+      return None;
+    }
+    let method_key_constant = decode_risc_aux16(words[8]) as usize;
+    match chunk.constants.get(method_key_constant) {
+      Some(crate::bytecode::Constant::String(_)) => {}
+      _ => return None,
+    }
+    let step = number_constant(chunk, words[27])?;
+    if step != 1.0 {
+      return None;
+    }
+    Some(Self {
+      entry_pc: ip,
+      completed_pc,
+      index_slot,
+      accumulator_slot,
+      receiver_slot,
+      call_temporary_slot,
+      arithmetic_temporary_slot,
+      method_key_constant,
+      left_argument: number_constant(chunk, words[10])?,
+      right_argument: number_constant(chunk, words[11])?,
+      limit: number_constant(chunk, words[1])?,
+      step,
+      index_register: index_register as usize,
+      limit_register: limit_register as usize,
+      previous_index_register: previous_index_register as usize,
+      next_index_register: next_index_register as usize,
+      step_register: step_register as usize,
+      left_argument_register: left_argument_register as usize,
+      right_argument_register: right_argument_register as usize,
+      program: NumericProgramDraft::counted(NumericAddend::Prepared).validate()?,
     })
   }
 }
@@ -1521,6 +1718,44 @@ const OWN_METHOD_READ_LOOP: &[Op] = &[
   Op::LoadLocal,
   Op::Const,
   Op::GetProperty,
+  Op::Move,
+  Op::Move,
+  Op::CallBuiltin,
+  Op::Move,
+  Op::Add,
+  Op::StoreLocal,
+  Op::LoadLocal,
+  Op::LoadLocal,
+  Op::StoreLocal,
+  Op::CloneLocalCell,
+  Op::LoadLocal,
+  Op::Neg,
+  Op::Neg,
+  Op::Const,
+  Op::Move,
+  Op::Add,
+  Op::StoreLocal,
+  Op::LoadLocal,
+  Op::LoadLocal,
+  Op::StoreLocal,
+  Op::Jump,
+];
+
+const OWN_METHOD_BINARY_LOOP: &[Op] = &[
+  Op::LoadLocal,
+  Op::Const,
+  Op::CompareJump,
+  Op::LoadLocal,
+  Op::LoadLocal,
+  Op::StoreLocal,
+  Op::LoadLocal,
+  Op::LoadLocal,
+  Op::Const,
+  Op::GetProperty,
+  Op::Const,
+  Op::Const,
+  Op::Move,
+  Op::Move,
   Op::Move,
   Op::Move,
   Op::CallBuiltin,
