@@ -99,11 +99,11 @@ pub(crate) enum ArtifactError {
 }
 
 #[cfg(all(unix, target_arch = "x86_64"))]
-pub(crate) fn emit_numeric_add(
+pub(crate) fn emit_numeric_binary(
   function: &VerifiedTypedFunction
 ) -> Result<NativeArtifact, ArtifactError> {
-  let (left, right) = function
-    .numeric_add_arguments()
+  let (operation, left, right) = function
+    .numeric_binary_signature()
     .ok_or(ArtifactError::UnsupportedTypedFunction)?;
   if left != 0 || right != 1 {
     return Err(ArtifactError::UnsupportedTypedFunction);
@@ -115,22 +115,34 @@ pub(crate) fn emit_numeric_add(
     0x48, 0x8B, 0x01, // mov rax, [rcx]
     0x48, 0x89, 0xC2, // mov rdx, rax
     0x48, 0xC1, 0xEA, 0x30, // shr rdx, 48
+    0x66, 0x81, 0xE2, 0xFF, 0x7F, // and dx, 0x7fff (ignore IEEE sign)
     0x66, 0x81, 0xFA, 0xF9, 0x7F, // cmp dx, 0x7ff9
     0x73, 0, // jae guard_failure
     0x66, 0x48, 0x0F, 0x6E, 0xC0, // movq xmm0, rax
     0x48, 0x8B, 0x41, 0x08, // mov rax, [rcx+8]
     0x48, 0x89, 0xC2, // mov rdx, rax
     0x48, 0xC1, 0xEA, 0x30, // shr rdx, 48
+    0x66, 0x81, 0xE2, 0xFF, 0x7F, // and dx, 0x7fff (ignore IEEE sign)
     0x66, 0x81, 0xFA, 0xF9, 0x7F, // cmp dx, 0x7ff9
     0x73, 0, // jae guard_failure
     0x66, 0x48, 0x0F, 0x6E, 0xC8, // movq xmm1, rax
-    0xF2, 0x0F, 0x58, 0xC1, // addsd xmm0, xmm1
+    0xF2, 0x0F, 0, 0xC1, // scalar binary operation xmm0, xmm1
     0x66, 0x48, 0x0F, 0x7E, 0xC0, // movq rax, xmm0
     0x48, 0x89, 0x07, // mov [rdi], rax
     0x31, 0xC0, // xor eax, eax
     0xC3, // ret
   ];
-  let guard_branches = [6, 27, 50];
+  let operation_opcode = bytes
+    .windows(4)
+    .position(|window| window == [0xF2, 0x0F, 0, 0xC1])
+    .ok_or(ArtifactError::InvalidContract)?
+    + 2;
+  bytes[operation_opcode] = match operation {
+    super::NumericBinaryOp::Add => 0x58,
+    super::NumericBinaryOp::Subtract => 0x5C,
+    super::NumericBinaryOp::Multiply => 0x59,
+  };
+  let guard_branches = [6, 32, 60];
   let guard_failure = bytes.len();
   bytes.extend_from_slice(&[
     0xB8, 1, 0, 0, 0, // mov eax, JIT_EXIT_INTERPRETER
@@ -159,7 +171,7 @@ fn relative_i8(
 }
 
 #[cfg(not(all(unix, target_arch = "x86_64")))]
-pub(crate) fn emit_numeric_add(
+pub(crate) fn emit_numeric_binary(
   _function: &VerifiedTypedFunction
 ) -> Result<NativeArtifact, ArtifactError> {
   Err(ArtifactError::InvalidContract)
@@ -178,8 +190,8 @@ mod tests {
     let proto = &chunk.functions[0];
     let snapshot = CompilerChunk::from_chunk(&proto.chunk, proto.arity).expect("snapshot");
     let semantic = SemanticFunction::decode(&snapshot).expect("semantic SSA");
-    let typed = VerifiedTypedFunction::specialize_numeric_add(&semantic).expect("typed SSA");
-    emit_numeric_add(&typed).expect("artifact")
+    let typed = VerifiedTypedFunction::specialize_numeric_binary(&semantic).expect("typed SSA");
+    emit_numeric_binary(&typed).expect("artifact")
   }
 
   #[cfg(all(unix, target_arch = "x86_64"))]
@@ -234,6 +246,14 @@ mod tests {
       JIT_EXIT_RETURN
     );
     assert_eq!(f64::from_bits(frame.result_bits), 5.0);
+
+    let negative_numbers = [(-2.0f64).to_bits(), 3.0f64.to_bits()];
+    frame.arguments = negative_numbers.as_ptr();
+    assert_eq!(
+      unsafe { code.call_compact_direct_frame(&mut frame) },
+      JIT_EXIT_RETURN
+    );
+    assert_eq!(f64::from_bits(frame.result_bits), 1.0);
 
     let mixed = [
       crate::value::tagged::TaggedValue::UNDEFINED.to_bits(),

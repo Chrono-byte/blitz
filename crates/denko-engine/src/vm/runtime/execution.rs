@@ -1376,7 +1376,10 @@ impl Vm {
           receiver: this_value,
           arguments,
         });
-      if entry.target.leaf() == crate::vm::jit::DirectLeaf::NumericAdd {
+      if matches!(
+        entry.target.leaf(),
+        crate::vm::jit::DirectLeaf::NumericBinary(_)
+      ) {
         self
           .profiling
           .jit
@@ -1405,7 +1408,7 @@ impl Vm {
       && let Some(target) = self
         .profiling
         .jit
-        .optimizing_numeric_add_target(function, chunk, parameter_count)
+        .optimizing_numeric_binary_target(function, chunk, parameter_count)
         .map_err(RuntimeError::from)?
     {
       if let Some(slot) = self
@@ -1539,7 +1542,12 @@ impl Vm {
         .and_then(Option::as_ref)
         .filter(|entry| Rc::ptr_eq(&entry.expected_proto, proto))
         .filter(|entry| entry.target.is_valid())
-        .filter(|entry| entry.target.leaf() == crate::vm::jit::DirectLeaf::NumericAdd)
+        .filter(|entry| {
+          matches!(
+            entry.target.leaf(),
+            crate::vm::jit::DirectLeaf::NumericBinary(_)
+          )
+        })
       else {
         return Ok(None);
       };
@@ -2909,7 +2917,10 @@ impl Vm {
         crate::vm::jit::DirectLeaf::Parameter(0),
         crate::vm::jit::DirectArgumentUse::Parameter(0),
       ) => region.argument,
-      (crate::vm::jit::DirectLeaf::NumericAdd, crate::vm::jit::DirectArgumentUse::NumericPair) => {
+      (
+        crate::vm::jit::DirectLeaf::NumericBinary(_),
+        crate::vm::jit::DirectArgumentUse::NumericPair,
+      ) => {
         return Ok(false);
       }
       _ => return Ok(false),
@@ -3067,6 +3078,7 @@ impl Vm {
     let Some(accumulator) = number_local(region.accumulator_slot) else {
       return Ok(false);
     };
+    let mut numeric_shape = region.program.shape();
     let addend = match region.prerequisites {
       crate::vm::region::NumericLoopPrerequisites::AddIndex => 0.0,
       crate::vm::region::NumericLoopPrerequisites::AddProperty {
@@ -3146,9 +3158,22 @@ impl Vm {
             crate::vm::region::NumericLeafArguments::OneConstant { value, .. },
           ) => value,
           (
-            crate::vm::jit::DirectLeaf::NumericAdd,
+            crate::vm::jit::DirectLeaf::NumericBinary(operation),
             crate::vm::region::NumericLeafArguments::AccumulatorAndConstant { value, .. },
-          ) => value,
+          ) => {
+            numeric_shape = match operation {
+              crate::vm::jit::NumericBinaryOp::Add => {
+                crate::vm::region::NumericRegionShape::AddPrepared
+              }
+              crate::vm::jit::NumericBinaryOp::Subtract => {
+                crate::vm::region::NumericRegionShape::SubtractPrepared
+              }
+              crate::vm::jit::NumericBinaryOp::Multiply => {
+                crate::vm::region::NumericRegionShape::MultiplyPrepared
+              }
+            };
+            value
+          }
           _ => return Ok(false),
         }
       }
@@ -3160,7 +3185,7 @@ impl Vm {
       step: region.step,
       addend,
       iterations: 0,
-      shape: region.program.shape(),
+      shape: numeric_shape,
     };
     if !self
       .profiling

@@ -2,9 +2,9 @@
 
 //! Private optimizing-compiler worker.
 
-use super::FunctionId;
-use super::artifact::{ArtifactError, NativeArtifact, emit_numeric_add};
+use super::artifact::{ArtifactError, NativeArtifact, emit_numeric_binary};
 use super::ir::{CompilerChunk, IrError, SemanticFunction, VerifiedTypedFunction};
+use super::{FunctionId, NumericBinaryOp};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::thread::JoinHandle;
@@ -13,7 +13,7 @@ const CAPABILITY_REVISION: CapabilityRevision = CapabilityRevision(1);
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) enum SpecializationKey {
-  NumericBinaryAdd,
+  NumericBinary(NumericBinaryOp),
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -58,17 +58,18 @@ pub(super) struct CompileRequest {
 }
 
 impl CompileRequest {
-  pub(super) fn numeric_add(
+  pub(super) fn numeric_binary(
     ticket: CompileTicket,
     function: FunctionId,
     chunk: CompilerChunk,
+    operation: NumericBinaryOp,
   ) -> Self {
     let stamp = SnapshotStamp::for_chunk(&chunk);
     Self {
       ticket,
       key: CompilationKey {
         function,
-        specialization: SpecializationKey::NumericBinaryAdd,
+        specialization: SpecializationKey::NumericBinary(operation),
       },
       stamp,
       chunk,
@@ -201,10 +202,19 @@ fn worker_main(
 }
 
 fn compile(request: CompileRequest) -> CompileCompletion {
+  let SpecializationKey::NumericBinary(expected_operation) = request.key.specialization;
   let result = SemanticFunction::decode(&request.chunk)
-    .and_then(|semantic| VerifiedTypedFunction::specialize_numeric_add(&semantic))
+    .and_then(|semantic| VerifiedTypedFunction::specialize_numeric_binary(&semantic))
     .map_err(map_ir_error)
-    .and_then(|typed| emit_numeric_add(&typed).map_err(map_artifact_error));
+    .and_then(|typed| {
+      (typed
+        .numeric_binary_signature()
+        .map(|signature| signature.0)
+        == Some(expected_operation))
+      .then_some(typed)
+      .ok_or(RejectionReason::InvalidIr)
+    })
+    .and_then(|typed| emit_numeric_binary(&typed).map_err(map_artifact_error));
   match result {
     Ok(artifact) => CompileCompletion::Compiled {
       ticket: request.ticket,
@@ -263,30 +273,26 @@ mod tests {
   }
 
   #[test]
-  fn worker_compiles_numeric_add_and_rejects_other_bodies() {
+  fn worker_compiles_supported_numeric_binary_bodies() {
     let worker = CompilerWorker::start().expect("worker starts");
-    let add = CompileRequest::numeric_add(
+    let add = CompileRequest::numeric_binary(
       CompileTicket::new(1),
       FunctionId::new(1),
       snapshot("function add(a, b) { return a + b; }"),
+      NumericBinaryOp::Add,
     );
     worker.submit(add).expect("request accepted");
     let completion = worker.completions.recv().expect("completion");
     assert!(matches!(completion, CompileCompletion::Compiled { .. }));
 
-    let multiply = CompileRequest::numeric_add(
+    let multiply = CompileRequest::numeric_binary(
       CompileTicket::new(2),
       FunctionId::new(2),
       snapshot("function multiply(a, b) { return a * b; }"),
+      NumericBinaryOp::Multiply,
     );
     worker.submit(multiply).expect("request accepted");
     let completion = worker.completions.recv().expect("completion");
-    assert!(matches!(
-      completion,
-      CompileCompletion::Rejected {
-        reason: RejectionReason::UnsupportedBody,
-        ..
-      }
-    ));
+    assert!(matches!(completion, CompileCompletion::Compiled { .. }));
   }
 }

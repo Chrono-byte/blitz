@@ -268,6 +268,8 @@ pub(super) enum NumericBodyWriteback {
 pub(crate) enum NumericRegionShape {
   AddIndex,
   AddPrepared,
+  SubtractPrepared,
+  MultiplyPrepared,
 }
 
 impl NumericRegionShape {
@@ -275,6 +277,8 @@ impl NumericRegionShape {
     match self {
       Self::AddIndex => 0,
       Self::AddPrepared => 1,
+      Self::SubtractPrepared => 2,
+      Self::MultiplyPrepared => 3,
     }
   }
 }

@@ -44,6 +44,8 @@ pub(crate) struct CompactDirectCallFrame {
 pub(crate) enum NumericLoopAddend {
   Constant,
   Index,
+  SubtractConstant,
+  MultiplyConstant,
 }
 
 pub(crate) type JitExitCode = u32;
@@ -368,6 +370,12 @@ impl NativeCode {
       }
       NumericLoopAddend::Index => {
         bytes.extend_from_slice(&[0xF2, 0x0F, 0x58, 0xD0]); // addsd xmm2, xmm0
+      }
+      NumericLoopAddend::SubtractConstant => {
+        bytes.extend_from_slice(&[0xF2, 0x0F, 0x5C, 0xD4]); // subsd xmm2, xmm4
+      }
+      NumericLoopAddend::MultiplyConstant => {
+        bytes.extend_from_slice(&[0xF2, 0x0F, 0x59, 0xD4]); // mulsd xmm2, xmm4
       }
     }
     bytes.extend_from_slice(&[

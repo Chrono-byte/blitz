@@ -6,6 +6,7 @@
 //! operations into typed SSA whose verifier is the only constructor for
 //! [`VerifiedTypedFunction`]. Native emitters never accept unchecked IR.
 
+use super::NumericBinaryOp;
 use crate::bytecode::{Chunk, Op, decode_rd, decode_risc_aux16, decode_rs};
 use std::hash::{Hash, Hasher};
 
@@ -47,6 +48,18 @@ impl CompilerChunk {
     self.code.hash(&mut hasher);
     hasher.finish()
   }
+
+  pub(crate) fn numeric_binary_op(&self) -> Option<NumericBinaryOp> {
+    let [_, _, binary, _] = self.code.as_ref() else {
+      return None;
+    };
+    match opcode(*binary) {
+      Op::Add => Some(NumericBinaryOp::Add),
+      Op::Sub => Some(NumericBinaryOp::Subtract),
+      Op::Mul => Some(NumericBinaryOp::Multiply),
+      _ => None,
+    }
+  }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -70,7 +83,8 @@ pub(crate) enum SemanticValue {
   Parameter {
     index: u16,
   },
-  JsAdd {
+  JsNumericBinary {
+    operation: NumericBinaryOp,
     left: ValueId,
     right: ValueId,
     origin: usize,
@@ -85,12 +99,11 @@ pub(crate) struct SemanticFunction {
 
 impl SemanticFunction {
   pub(crate) fn decode(snapshot: &CompilerChunk) -> Result<Self, IrError> {
-    let [left_load, right_load, add, return_word] = snapshot.code.as_ref() else {
+    let [left_load, right_load, binary, return_word] = snapshot.code.as_ref() else {
       return Err(IrError::UnsupportedBody);
     };
     if opcode(*left_load) != Op::LoadLocal
       || opcode(*right_load) != Op::LoadLocal
-      || opcode(*add) != Op::Add
       || opcode(*return_word) != Op::Return
     {
       return Err(IrError::UnsupportedBody);
@@ -100,34 +113,47 @@ impl SemanticFunction {
     if left_slot != 0
       || right_slot != 1
       || snapshot.parameter_count < 2
-      || decode_rd(*add) != decode_rd(*left_load)
-      || decode_rs(*add) != decode_rd(*right_load)
-      || decode_rd(*return_word) != decode_rd(*add)
+      || decode_rd(*binary) != decode_rd(*left_load)
+      || decode_rs(*binary) != decode_rd(*right_load)
+      || decode_rd(*return_word) != decode_rd(*binary)
     {
       return Err(IrError::UnsupportedBody);
     }
     let left = ValueId(0);
     let right = ValueId(1);
-    let sum = ValueId(2);
+    let operation = match opcode(*binary) {
+      Op::Add => NumericBinaryOp::Add,
+      Op::Sub => NumericBinaryOp::Subtract,
+      Op::Mul => NumericBinaryOp::Multiply,
+      _ => return Err(IrError::UnsupportedBody),
+    };
     Ok(Self {
       values: vec![
         SemanticValue::Parameter { index: left_slot },
         SemanticValue::Parameter { index: right_slot },
-        SemanticValue::JsAdd {
+        SemanticValue::JsNumericBinary {
+          operation,
           left,
           right,
           origin: 2,
         },
       ],
-      return_value: sum,
+      return_value: ValueId(2),
     })
   }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TypedValue {
-  GuardedNumberArgument { index: u16, failure: u16 },
-  F64Add { left: ValueId, right: ValueId },
+  GuardedNumberArgument {
+    index: u16,
+    failure: u16,
+  },
+  F64Binary {
+    operation: NumericBinaryOp,
+    left: ValueId,
+    right: ValueId,
+  },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -141,11 +167,16 @@ struct TypedFunction {
 pub(crate) struct VerifiedTypedFunction(TypedFunction);
 
 impl VerifiedTypedFunction {
-  pub(crate) fn specialize_numeric_add(semantic: &SemanticFunction) -> Result<Self, IrError> {
+  pub(crate) fn specialize_numeric_binary(semantic: &SemanticFunction) -> Result<Self, IrError> {
     let [
       SemanticValue::Parameter { index: left_index },
       SemanticValue::Parameter { index: right_index },
-      SemanticValue::JsAdd { left, right, .. },
+      SemanticValue::JsNumericBinary {
+        operation,
+        left,
+        right,
+        ..
+      },
     ] = semantic.values.as_slice()
     else {
       return Err(IrError::UnsupportedBody);
@@ -163,7 +194,8 @@ impl VerifiedTypedFunction {
           index: *right_index,
           failure: 0,
         },
-        TypedValue::F64Add {
+        TypedValue::F64Binary {
+          operation: *operation,
           left: ValueId(0),
           right: ValueId(1),
         },
@@ -187,16 +219,16 @@ impl VerifiedTypedFunction {
             return Err(IrError::InvalidSsa);
           }
         }
-        TypedValue::F64Add { left, right } => {
+        TypedValue::F64Binary { left, right, .. } => {
           if left.index() >= index
             || right.index() >= index
             || !matches!(
               function.values[left.index()],
-              TypedValue::GuardedNumberArgument { .. } | TypedValue::F64Add { .. }
+              TypedValue::GuardedNumberArgument { .. } | TypedValue::F64Binary { .. }
             )
             || !matches!(
               function.values[right.index()],
-              TypedValue::GuardedNumberArgument { .. } | TypedValue::F64Add { .. }
+              TypedValue::GuardedNumberArgument { .. } | TypedValue::F64Binary { .. }
             )
           {
             return Err(IrError::InvalidSsa);
@@ -219,7 +251,7 @@ impl VerifiedTypedFunction {
     &self.0.exits
   }
 
-  pub(crate) fn numeric_add_arguments(&self) -> Option<(u16, u16)> {
+  pub(crate) fn numeric_binary_signature(&self) -> Option<(NumericBinaryOp, u16, u16)> {
     let [
       TypedValue::GuardedNumberArgument {
         index: left_index,
@@ -229,7 +261,11 @@ impl VerifiedTypedFunction {
         index: right_index,
         failure: right_failure,
       },
-      TypedValue::F64Add { left, right },
+      TypedValue::F64Binary {
+        operation,
+        left,
+        right,
+      },
     ] = self.0.values.as_slice()
     else {
       return None;
@@ -239,7 +275,7 @@ impl VerifiedTypedFunction {
       && *left == ValueId(0)
       && *right == ValueId(1)
       && self.0.return_value == ValueId(2))
-    .then_some((*left_index, *right_index))
+    .then_some((*operation, *left_index, *right_index))
   }
 }
 
@@ -277,28 +313,30 @@ mod tests {
       vec![
         SemanticValue::Parameter { index: 0 },
         SemanticValue::Parameter { index: 1 },
-        SemanticValue::JsAdd {
+        SemanticValue::JsNumericBinary {
+          operation: NumericBinaryOp::Add,
           left: ValueId(0),
           right: ValueId(1),
           origin: 2,
         },
       ]
     );
-    let typed = VerifiedTypedFunction::specialize_numeric_add(&semantic).expect("typed SSA");
+    let typed = VerifiedTypedFunction::specialize_numeric_binary(&semantic).expect("typed SSA");
     assert_eq!(typed.return_value(), ValueId(2));
     assert_eq!(typed.exits().len(), 1);
   }
 
   #[test]
-  fn rejects_non_add_and_malformed_typed_ssa() {
+  fn rejects_unsupported_binary_and_malformed_typed_ssa() {
     let mut snapshot = add_snapshot();
-    snapshot.code[2] = (snapshot.code[2] & !0xff) | Op::Mul as u32;
+    snapshot.code[2] = (snapshot.code[2] & !0xff) | Op::Div as u32;
     assert_eq!(
       SemanticFunction::decode(&snapshot),
       Err(IrError::UnsupportedBody)
     );
     let malformed = TypedFunction {
-      values: vec![TypedValue::F64Add {
+      values: vec![TypedValue::F64Binary {
+        operation: NumericBinaryOp::Add,
         left: ValueId(0),
         right: ValueId(0),
       }],

@@ -457,7 +457,14 @@ pub(crate) struct DirectCallTarget {
 pub(crate) enum DirectLeaf {
   Number(f64),
   Parameter(u16),
-  NumericAdd,
+  NumericBinary(NumericBinaryOp),
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum NumericBinaryOp {
+  Add,
+  Subtract,
+  Multiply,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -512,7 +519,7 @@ impl DirectCallTarget {
     }
     let _receiver = inputs.receiver;
     let arguments = inputs.arguments;
-    if self.leaf == DirectLeaf::NumericAdd {
+    if matches!(self.leaf, DirectLeaf::NumericBinary(_)) {
       let compact_arguments = [
         compact_direct_argument(arguments.first()),
         compact_direct_argument(arguments.get(1)),
@@ -553,7 +560,7 @@ fn compact_direct_argument(value: Option<&Value>) -> u64 {
 pub(crate) struct JitRuntime {
   pub(crate) code: HashMap<FunctionId, Vec<JitCode>>,
   next_version: u64,
-  numeric_regions: [NumericRegionCode; 2],
+  numeric_regions: [NumericRegionCode; 4],
   dense_array_push_region: NumericRegionCode,
   dense_masked_read_region: NumericRegionCode,
   optimizing: OptimizingTier,
@@ -662,7 +669,7 @@ impl JitRuntime {
           arguments: match leaf {
             DirectLeaf::Number(_) => DirectArgumentUse::None,
             DirectLeaf::Parameter(slot) => DirectArgumentUse::Parameter(slot),
-            DirectLeaf::NumericAdd => DirectArgumentUse::NumericPair,
+            DirectLeaf::NumericBinary(_) => DirectArgumentUse::NumericPair,
           },
         },
         leaf,
@@ -723,7 +730,7 @@ impl JitRuntime {
       .and_then(|code| code.direct_call.clone())
   }
 
-  pub(crate) fn optimizing_numeric_add_target(
+  pub(crate) fn optimizing_numeric_binary_target(
     &mut self,
     function: FunctionId,
     chunk: &Chunk,
@@ -735,9 +742,12 @@ impl JitRuntime {
     }
     let snapshot = ir::CompilerChunk::from_chunk(chunk, parameter_count)
       .map_err(|error| format!("optimizing snapshot rejected: {error:?}"))?;
+    let Some(operation) = snapshot.numeric_binary_op() else {
+      return Ok(None);
+    };
     let key = CompilationKey {
       function,
-      specialization: SpecializationKey::NumericBinaryAdd,
+      specialization: SpecializationKey::NumericBinary(operation),
     };
     let stamp = SnapshotStamp::for_chunk(&snapshot);
     match self.optimizing.states.get(&key) {
@@ -770,7 +780,7 @@ impl JitRuntime {
     }
     self.optimizing.next_ticket = self.optimizing.next_ticket.saturating_add(1);
     let ticket = CompileTicket::new(self.optimizing.next_ticket);
-    let request = CompileRequest::numeric_add(ticket, function, snapshot);
+    let request = CompileRequest::numeric_binary(ticket, function, snapshot, operation);
     self
       .optimizing
       .states
@@ -859,7 +869,9 @@ impl JitRuntime {
             let target = DirectCallTarget {
               code: Rc::new(code),
               valid: Rc::new(Cell::new(true)),
-              leaf: DirectLeaf::NumericAdd,
+              leaf: match key.specialization {
+                SpecializationKey::NumericBinary(operation) => DirectLeaf::NumericBinary(operation),
+              },
               contract: DirectCallContract {
                 receiver: DirectReceiverUse::Unused,
                 arguments: DirectArgumentUse::NumericPair,
@@ -956,6 +968,12 @@ impl JitRuntime {
     let addend = match prepared.shape {
       crate::vm::region::NumericRegionShape::AddIndex => native::NumericLoopAddend::Index,
       crate::vm::region::NumericRegionShape::AddPrepared => native::NumericLoopAddend::Constant,
+      crate::vm::region::NumericRegionShape::SubtractPrepared => {
+        native::NumericLoopAddend::SubtractConstant
+      }
+      crate::vm::region::NumericRegionShape::MultiplyPrepared => {
+        native::NumericLoopAddend::MultiplyConstant
+      }
     };
     let slot = &mut self.numeric_regions[prepared.shape.index()];
     if matches!(slot, NumericRegionCode::Uncompiled) {

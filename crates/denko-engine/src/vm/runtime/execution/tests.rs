@@ -145,7 +145,7 @@ mod test {
       Some(Value::String("value3".into()))
     );
     let (attempts, installs, native_calls, guard_failures) = vm.profiling.jit.optimizing_stats();
-    assert_eq!(attempts, 2);
+    assert_eq!(attempts, 1);
     assert_eq!(installs, 1);
     assert!(native_calls > 0);
     assert_eq!(guard_failures, 1);
@@ -153,19 +153,40 @@ mod test {
 
   #[cfg(all(unix, target_arch = "x86_64"))]
   #[test]
-  fn unsupported_numeric_body_is_rejected_once() {
+  fn unsupported_numeric_division_body_is_rejected_once() {
     let (vm, _) = run_script(
-      "function multiply(left, right) { return left * right; } let total = 1; for (let i = 0; i < 3000; i += 1) total = multiply(total, 1); globalThis.typed_multiply_total = total;",
+      "function divide(left, right) { return left / right; } let total = 1; for (let i = 0; i < 3000; i += 1) total = divide(total, 1); globalThis.typed_divide_total = total;",
     );
     assert_eq!(
-      vm.get_global("typed_multiply_total"),
+      vm.get_global("typed_divide_total"),
       Some(Value::Number(1.0))
     );
     let (attempts, installs, native_calls, guard_failures) = vm.profiling.jit.optimizing_stats();
-    assert_eq!(attempts, 1);
+    assert_eq!(attempts, 0);
     assert_eq!(installs, 0);
     assert_eq!(native_calls, 0);
     assert_eq!(guard_failures, 0);
+  }
+
+  #[cfg(all(unix, target_arch = "x86_64"))]
+  #[test]
+  fn subtraction_and_multiplication_call_loops_consume_typed_targets() {
+    let (vm, _) = run_script(
+      "function subtract(left, right) { return left - right; } function multiply(left, right) { return left * right; } let difference = 10000; for (let i = 0; i < 5000; i += 1) difference = subtract(difference, 1); let product = 1; for (let i = 0; i < 5001; i += 1) product = multiply(product, 1.0001); globalThis.typed_subtract_total = difference; globalThis.typed_multiply_total = product;",
+    );
+    assert_eq!(
+      vm.get_global("typed_subtract_total"),
+      Some(Value::Number(5000.0))
+    );
+    assert!(
+      matches!(vm.get_global("typed_multiply_total"), Some(Value::Number(value)) if value > 1.64 && value < 1.66)
+    );
+    let (attempts, installs, native_calls, guard_failures) = vm.profiling.jit.optimizing_stats();
+    assert_eq!(attempts, 2);
+    assert_eq!(installs, 2);
+    assert!(native_calls > 0);
+    assert_eq!(guard_failures, 0);
+    assert!(vm.profiling.jit_stats.native_loop_iterations > 0);
   }
 
   #[cfg(all(unix, target_arch = "x86_64"))]
