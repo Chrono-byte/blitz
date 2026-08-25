@@ -32,6 +32,7 @@ pub(super) enum NativeRegion {
   DenseMaskedRead(DenseMaskedReadRegion),
   OwnMethodNumericLoop(OwnMethodNumericLoopRegion),
   OwnMethodEffectLoop(OwnMethodEffectLoopRegion),
+  OwnMethodReadLoop(OwnMethodReadLoopRegion),
 }
 
 impl NativeRegion {
@@ -42,8 +43,34 @@ impl NativeRegion {
       Self::DenseMaskedRead(_) => RegionCost { max_iterations: 64 },
       Self::OwnMethodNumericLoop(region) => region.program.cost(),
       Self::OwnMethodEffectLoop(region) => region.program.cost(),
+      Self::OwnMethodReadLoop(region) => region.program.cost(),
     }
   }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct ReceiverNumericRead {
+  pub(super) property_key_constant: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct OwnMethodReadLoopRegion {
+  pub(super) entry_pc: usize,
+  pub(super) completed_pc: usize,
+  pub(super) index_slot: usize,
+  pub(super) accumulator_slot: usize,
+  pub(super) receiver_slot: usize,
+  pub(super) call_temporary_slot: usize,
+  pub(super) arithmetic_temporary_slot: usize,
+  pub(super) method_key_constant: usize,
+  pub(super) limit: f64,
+  pub(super) step: f64,
+  pub(super) index_register: usize,
+  pub(super) limit_register: usize,
+  pub(super) previous_index_register: usize,
+  pub(super) next_index_register: usize,
+  pub(super) step_register: usize,
+  pub(super) program: ValidatedNumericProgram,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -667,6 +694,171 @@ impl DenseMaskedReadRegion {
       step_register: step_register as usize,
       mask_register: mask_register as usize,
       limit: number_constant(chunk, words[1])?,
+    })
+  }
+}
+
+impl ReceiverNumericRead {
+  pub(super) fn decode(proto: &FunctionProto) -> Option<Self> {
+    let words = proto.chunk.code.as_slice();
+    let [get_this, key, get_property, return_word, ..] = words else {
+      return None;
+    };
+    let valid_legacy_trailer = match words {
+      [_, _, _, _, implicit_undefined, implicit_return] => {
+        opcode(*implicit_undefined) == Op::Undefined
+          && opcode(*implicit_return) == Op::Return
+          && decode_rd(*implicit_return) == decode_rd(*implicit_undefined)
+      }
+      [_, _, _, _] => true,
+      _ => false,
+    };
+    if proto.arity != 0
+      || proto.has_rest
+      || proto.captures_this
+      || !proto.upvalues.is_empty()
+      || !valid_legacy_trailer
+      || opcode(*get_this) != Op::GetThis
+      || opcode(*key) != Op::Const
+      || opcode(*get_property) != Op::GetProperty
+      || opcode(*return_word) != Op::Return
+      || decode_rd(*get_property) != decode_rd(*get_this)
+      || decode_rs(*get_property) != decode_rd(*key)
+      || decode_rd(*return_word) != decode_rd(*get_property)
+    {
+      return None;
+    }
+    let property_key_constant = decode_risc_aux16(*key) as usize;
+    match proto.chunk.constants.get(property_key_constant) {
+      Some(crate::bytecode::Constant::String(_)) => Some(Self {
+        property_key_constant,
+      }),
+      _ => None,
+    }
+  }
+}
+
+impl OwnMethodReadLoopRegion {
+  pub(super) fn decode(
+    chunk: &Chunk,
+    ip: usize,
+  ) -> Option<Self> {
+    let words = chunk
+      .code
+      .get(ip..ip + OWN_METHOD_READ_LOOP.len())?;
+    if !words
+      .iter()
+      .zip(OWN_METHOD_READ_LOOP)
+      .all(|(word, expected)| opcode(*word) == *expected)
+    {
+      return None;
+    }
+    let index_slot = decode_risc_aux16(words[0]) as usize;
+    let accumulator_slot = decode_risc_aux16(words[3]) as usize;
+    let receiver_slot = decode_risc_aux16(words[4]) as usize;
+    let call_temporary_slot = decode_risc_aux16(words[5]) as usize;
+    let arithmetic_temporary_slot = decode_risc_aux16(words[15]) as usize;
+    let index_register = decode_rd(words[0]);
+    let limit_register = decode_rd(words[1]);
+    let accumulator_register = decode_rd(words[3]);
+    let receiver_register = decode_rd(words[4]);
+    let callee_register = decode_rd(words[7]);
+    let key_register = decode_rd(words[8]);
+    let result_register = decode_rd(words[13]);
+    let previous_index_register = decode_rd(words[20]);
+    let step_register = decode_rd(words[23]);
+    let next_index_register = decode_rd(words[24]);
+    let (condition, left, right, exit_offset) = decode_compare_jump(words[2]);
+    let jump_payload = ((words[30] >> 8) & 0x00ff_ffff) as i32;
+    let jump_offset = if jump_payload & 0x0080_0000 != 0 {
+      jump_payload | !0x00ff_ffff
+    } else {
+      jump_payload
+    };
+    let completed_pc = ip + words.len();
+    if condition != 2
+      || left != index_register
+      || right != limit_register
+      || (ip as i64 + 3 + exit_offset as i64) as usize != completed_pc
+      || (ip as i64 + words.len() as i64 + jump_offset as i64) as usize != ip
+      || decode_rd(words[5]) != receiver_register
+      || decode_risc_aux16(words[6]) as usize != call_temporary_slot
+      || decode_risc_aux16(words[7]) as usize != call_temporary_slot
+      || decode_rd(words[9]) != callee_register
+      || decode_rs(words[9]) != key_register
+      || decode_rd(words[10]) != 1
+      || decode_rs(words[10]) != receiver_register
+      || decode_rd(words[11]) != 0
+      || decode_rs(words[11]) != callee_register
+      || decode_risc_aux16(words[12]) != 0
+      || decode_rd(words[13]) != result_register
+      || decode_rs(words[13]) != 0
+      || decode_rd(words[14]) != accumulator_register
+      || decode_rs(words[14]) != result_register
+      || decode_rd(words[15]) != accumulator_register
+      || decode_risc_aux16(words[16]) as usize != accumulator_slot
+      || decode_risc_aux16(words[17]) as usize != arithmetic_temporary_slot
+      || decode_risc_aux16(words[18]) as usize != accumulator_slot
+      || decode_risc_aux16(words[19]) as usize != index_slot
+      || decode_risc_aux16(words[20]) as usize != index_slot
+      || decode_rd(words[21]) != previous_index_register
+      || decode_rs(words[21]) != previous_index_register
+      || decode_rd(words[22]) != previous_index_register
+      || decode_rs(words[22]) != previous_index_register
+      || decode_rd(words[24]) != decode_rd(words[25])
+      || decode_rs(words[24]) != previous_index_register
+      || decode_rs(words[25]) != step_register
+      || decode_rd(words[26]) != next_index_register
+      || decode_risc_aux16(words[26]) as usize != arithmetic_temporary_slot
+      || decode_rd(words[27]) != next_index_register
+      || decode_risc_aux16(words[27]) as usize != index_slot
+      || decode_rd(words[28]) != next_index_register
+      || decode_risc_aux16(words[28]) as usize != arithmetic_temporary_slot
+      || decode_rd(words[29]) != next_index_register
+      || decode_risc_aux16(words[29]) as usize != index_slot
+      || [
+        index_slot,
+        accumulator_slot,
+        receiver_slot,
+        call_temporary_slot,
+      ]
+      .into_iter()
+      .any(|slot| slot == arithmetic_temporary_slot)
+      || index_slot == accumulator_slot
+      || index_slot == receiver_slot
+      || index_slot == call_temporary_slot
+      || accumulator_slot == receiver_slot
+      || accumulator_slot == call_temporary_slot
+      || receiver_slot == call_temporary_slot
+    {
+      return None;
+    }
+    let method_key_constant = decode_risc_aux16(words[8]) as usize;
+    match chunk.constants.get(method_key_constant) {
+      Some(crate::bytecode::Constant::String(_)) => {}
+      _ => return None,
+    }
+    let step = number_constant(chunk, words[23])?;
+    if step != 1.0 {
+      return None;
+    }
+    Some(Self {
+      entry_pc: ip,
+      completed_pc,
+      index_slot,
+      accumulator_slot,
+      receiver_slot,
+      call_temporary_slot,
+      arithmetic_temporary_slot,
+      method_key_constant,
+      limit: number_constant(chunk, words[1])?,
+      step,
+      index_register: index_register as usize,
+      limit_register: limit_register as usize,
+      previous_index_register: previous_index_register as usize,
+      next_index_register: next_index_register as usize,
+      step_register: step_register as usize,
+      program: NumericProgramDraft::counted(NumericAddend::Prepared).validate()?,
     })
   }
 }
@@ -1304,6 +1496,40 @@ const OWN_METHOD_EFFECT_LOOP: &[Op] = &[
   Op::Move,
   Op::CallBuiltin,
   Op::Move,
+  Op::CloneLocalCell,
+  Op::LoadLocal,
+  Op::Neg,
+  Op::Neg,
+  Op::Const,
+  Op::Move,
+  Op::Add,
+  Op::StoreLocal,
+  Op::LoadLocal,
+  Op::LoadLocal,
+  Op::StoreLocal,
+  Op::Jump,
+];
+
+const OWN_METHOD_READ_LOOP: &[Op] = &[
+  Op::LoadLocal,
+  Op::Const,
+  Op::CompareJump,
+  Op::LoadLocal,
+  Op::LoadLocal,
+  Op::StoreLocal,
+  Op::LoadLocal,
+  Op::LoadLocal,
+  Op::Const,
+  Op::GetProperty,
+  Op::Move,
+  Op::Move,
+  Op::CallBuiltin,
+  Op::Move,
+  Op::Add,
+  Op::StoreLocal,
+  Op::LoadLocal,
+  Op::LoadLocal,
+  Op::StoreLocal,
   Op::CloneLocalCell,
   Op::LoadLocal,
   Op::Neg,

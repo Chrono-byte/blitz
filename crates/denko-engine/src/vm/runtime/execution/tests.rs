@@ -410,6 +410,65 @@ mod test {
 
   #[cfg(all(unix, target_arch = "x86_64"))]
   #[test]
+  fn own_method_read_loop_matches_portable_interpretation() {
+    let source = "const object = { value: 7, read() { return this.value; } }; let total = 0; for (let i = 0; i < 2100; i++) total += object.read(); globalThis.readTotal = total; globalThis.readMethod = object.read;";
+    let (optimized, _) = run_script_with_optimizations(source, true);
+    let (portable, _) = run_script_with_optimizations(source, false);
+    assert_eq!(
+      optimized.get_global("readTotal"),
+      portable.get_global("readTotal")
+    );
+    let Some(Value::Closure { proto, .. }) = optimized.get_global("readMethod") else {
+      panic!("read method should remain a closure");
+    };
+    assert!(
+      crate::vm::region::ReceiverNumericRead::decode(&proto).is_some(),
+      "arity={} rest={} captures_this={} upvalues={} code={:?}",
+      proto.arity,
+      proto.has_rest,
+      proto.captures_this,
+      proto.upvalues.len(),
+      proto.chunk.code
+    );
+    assert!(optimized.caches.quickened.values().any(|plan| {
+      plan.regions.iter().any(|region| {
+        matches!(
+          region,
+          crate::vm::region::NativeRegion::OwnMethodReadLoop(_)
+        )
+      })
+    }));
+    assert!(
+      optimized
+        .profiling
+        .jit_stats
+        .native_loop_iterations
+        > 0
+    );
+  }
+
+  #[test]
+  fn own_method_read_loop_rechecks_method_and_property_descriptors() {
+    let source = "const object = { value: 2, other: 5, read() { return this.value; } }; let first = 0; for (let i = 0; i < 1200; i++) first += object.read(); object.read = function() { return this.other; }; let second = 0; for (let i = 0; i < 1200; i++) second += object.read(); let gets = 0; Object.defineProperty(object, 'other', { get() { gets++; return 7; }, configurable: true }); let third = 0; for (let i = 0; i < 1200; i++) third += object.read(); globalThis.readFirst = first; globalThis.readSecond = second; globalThis.readThird = third; globalThis.readGets = gets;";
+    let (optimized, _) = run_script_with_optimizations(source, true);
+    let (portable, _) = run_script_with_optimizations(source, false);
+    for name in ["readFirst", "readSecond", "readThird", "readGets"] {
+      assert_eq!(optimized.get_global(name), portable.get_global(name));
+    }
+  }
+
+  #[test]
+  fn own_method_read_loop_falls_back_for_proxy_and_nonnumeric_values() {
+    let source = "let gets = 0; const target = { value: 3, read() { return this.value; } }; const proxy = new Proxy(target, { get(object, key) { gets++; return object[key]; } }); let proxyTotal = 0; for (let i = 0; i < 1200; i++) proxyTotal += proxy.read(); const strings = { value: 'x', read() { return this.value; } }; let stringTotal = ''; for (let i = 0; i < 1200; i++) stringTotal += strings.read(); globalThis.proxyReadTotal = proxyTotal; globalThis.proxyReadGets = gets; globalThis.stringReadLength = stringTotal.length;";
+    let (optimized, _) = run_script_with_optimizations(source, true);
+    let (portable, _) = run_script_with_optimizations(source, false);
+    for name in ["proxyReadTotal", "proxyReadGets", "stringReadLength"] {
+      assert_eq!(optimized.get_global(name), portable.get_global(name));
+    }
+  }
+
+  #[cfg(all(unix, target_arch = "x86_64"))]
+  #[test]
   fn native_call_loop_preserves_ordered_addition_across_batch_boundary() {
     let (vm, _) = run_script(
       "function tenth() { return 0.1; } let nativeTotal = 0; for (let i = 0; i < 2130; i += 2) nativeTotal += tenth(); let expected = 0; for (let i = 0; i < 2130; i += 2) expected += 0.1; globalThis.native_batch_matches = nativeTotal === expected;",
