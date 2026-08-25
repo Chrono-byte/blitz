@@ -359,6 +359,16 @@ impl Compiler {
     self.pending_operand_bytes = 0;
   }
 
+  pub(crate) fn emit_fallthrough_return(
+    &mut self,
+    line: u32,
+  ) {
+    if self.risc.is_reachable() {
+      self.emit(Op::Undefined, line);
+      self.emit(Op::Return, line);
+    }
+  }
+
   /// Emit a single instruction word with a 24-bit payload packed into bits 8..31.
   /// This is the preferred path for RISC-style fixed-width instructions where
   /// the opcode and all operands must be written as one u32.

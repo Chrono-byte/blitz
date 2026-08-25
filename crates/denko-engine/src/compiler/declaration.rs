@@ -2346,8 +2346,7 @@ impl Compiler {
         inner.compile_statement_oast(statement)?;
       }
     }
-    inner.emit(Op::Undefined, LINE);
-    inner.emit(Op::Return, LINE);
+    inner.emit_fallthrough_return(LINE);
     let chunk = super::risc::RiscBuilder::finish(
       std::mem::take(&mut inner.chunk),
       std::mem::take(&mut inner.risc),
@@ -2964,8 +2963,7 @@ impl Compiler {
       }
     }
 
-    inner.emit(Op::Undefined, LINE);
-    inner.emit(Op::Return, LINE);
+    inner.emit_fallthrough_return(LINE);
     let mut chunk = super::risc::RiscBuilder::finish(
       std::mem::take(&mut inner.chunk),
       std::mem::take(&mut inner.risc),
@@ -3214,8 +3212,7 @@ impl Compiler {
               inner.compile_statement_oast(stmt)?;
             }
           }
-          inner.emit(Op::Undefined, LINE);
-          inner.emit(Op::Return, LINE);
+          inner.emit_fallthrough_return(LINE);
         }
       } else {
         // Regular function body with explicit statements
@@ -3225,8 +3222,7 @@ impl Compiler {
           }
           inner.compile_statement_oast(stmt)?;
         }
-        inner.emit(Op::Undefined, LINE);
-        inner.emit(Op::Return, LINE);
+        inner.emit_fallthrough_return(LINE);
       }
     } else if func.expression && func.body.statements.len() == 1 {
       if let oast::Statement::ExpressionStatement(expr_stmt) = &func.body.statements[0] {
@@ -3238,8 +3234,7 @@ impl Compiler {
             inner.compile_statement_oast(stmt)?;
           }
         }
-        inner.emit(Op::Undefined, LINE);
-        inner.emit(Op::Return, LINE);
+        inner.emit_fallthrough_return(LINE);
       }
     } else {
       for stmt in &func.body.statements {
@@ -3248,8 +3243,7 @@ impl Compiler {
         }
         inner.compile_statement_oast(stmt)?;
       }
-      inner.emit(Op::Undefined, LINE);
-      inner.emit(Op::Return, LINE);
+      inner.emit_fallthrough_return(LINE);
     }
 
     let mut chunk = super::risc::RiscBuilder::finish(

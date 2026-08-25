@@ -235,6 +235,10 @@ impl RiscBuilder {
   pub(crate) fn is_empty(&self) -> bool {
     self.instructions.is_empty() && self.pending.is_none()
   }
+  pub(crate) fn is_reachable(&mut self) -> bool {
+    self.finalize_pending();
+    self.reachable
+  }
   pub(crate) fn op_at(
     &self,
     index: usize,

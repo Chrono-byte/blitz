@@ -1580,6 +1580,25 @@ mod test {
   }
 
   #[test]
+  fn explicit_terminal_return_omits_unreachable_implicit_return() {
+    let src = crate::js!("const object = { read() { return this.value; } };");
+    let session = crate::parser::Parser::parse_source(src).expect("parse ok");
+    let chunk = compile(session.program(), session.source()).expect("compile ok");
+    let proto = chunk
+      .functions
+      .iter()
+      .find(|proto| proto.name == "read")
+      .expect("read method proto");
+    let ops = proto
+      .chunk
+      .code
+      .iter()
+      .map(|word| Op::from_byte((word & 0xff) as u8).expect("valid opcode"))
+      .collect::<Vec<_>>();
+    assert_eq!(ops, [Op::GetThis, Op::Const, Op::GetProperty, Op::Return]);
+  }
+
+  #[test]
   fn strict_direct_return_calls_emit_tail_call() {
     let src = crate::js!(r#""use strict"; function recurse(value) { return recurse(value - 1); }"#);
     let session = crate::parser::Parser::parse_source(src).expect("parse ok");
