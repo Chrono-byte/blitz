@@ -81,6 +81,8 @@ pub(super) enum RejectionReason {
   UnsupportedBody,
   InvalidIr,
   UnsupportedTarget,
+  InvalidArtifact,
+  WorkerUnavailable,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

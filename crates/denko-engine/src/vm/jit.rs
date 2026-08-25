@@ -16,6 +16,10 @@ use native::NativeCode;
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use worker::{
+  CompilationKey, CompileCompletion, CompileRequest, CompileTicket, CompilerWorker,
+  RejectionReason, SnapshotStamp, SpecializationKey,
+};
 
 #[derive(Clone, Copy, Debug)]
 enum BaselineOp {
@@ -453,6 +457,7 @@ pub(crate) struct DirectCallTarget {
 pub(crate) enum DirectLeaf {
   Number(f64),
   Parameter(u16),
+  NumericAdd,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -465,6 +470,7 @@ pub(crate) enum DirectReceiverUse {
 pub(crate) enum DirectArgumentUse {
   None,
   Parameter(u16),
+  NumericPair,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -527,6 +533,55 @@ pub(crate) struct JitRuntime {
   numeric_regions: [NumericRegionCode; 2],
   dense_array_push_region: NumericRegionCode,
   dense_masked_read_region: NumericRegionCode,
+  optimizing: OptimizingTier,
+}
+
+enum CompilationState {
+  Pending {
+    ticket: CompileTicket,
+    stamp: SnapshotStamp,
+  },
+  Installed {
+    version: CodeVersionId,
+    stamp: SnapshotStamp,
+  },
+  Rejected {
+    stamp: SnapshotStamp,
+    reason: RejectionReason,
+  },
+}
+
+struct OptimizingTier {
+  worker: Option<CompilerWorker>,
+  states: HashMap<CompilationKey, CompilationState>,
+  next_ticket: u64,
+  disabled: bool,
+  compile_attempts: u64,
+  compile_installs: u64,
+  compile_rejections: u64,
+  stale_results: u64,
+  native_calls: u64,
+  guard_failures: u64,
+  worker_failures: u64,
+}
+
+impl Default for OptimizingTier {
+  fn default() -> Self {
+    Self {
+      worker: None,
+      states: HashMap::new(),
+      next_ticket: 0,
+      disabled: std::env::var_os("DENKO_DISABLE_OPT_JIT").is_some()
+        || !cfg!(all(unix, target_arch = "x86_64")),
+      compile_attempts: 0,
+      compile_installs: 0,
+      compile_rejections: 0,
+      stale_results: 0,
+      native_calls: 0,
+      guard_failures: 0,
+      worker_failures: 0,
+    }
+  }
 }
 
 #[derive(Default)]
@@ -584,6 +639,7 @@ impl JitRuntime {
           arguments: match leaf {
             DirectLeaf::Number(_) => DirectArgumentUse::None,
             DirectLeaf::Parameter(slot) => DirectArgumentUse::Parameter(slot),
+            DirectLeaf::NumericAdd => DirectArgumentUse::NumericPair,
           },
         },
         leaf,
@@ -642,6 +698,232 @@ impl JitRuntime {
       .iter()
       .find(|code| code.state == JitCodeState::Valid)
       .and_then(|code| code.direct_call.clone())
+  }
+
+  pub(crate) fn optimizing_numeric_add_target(
+    &mut self,
+    function: FunctionId,
+    chunk: &Chunk,
+    parameter_count: usize,
+  ) -> Result<Option<DirectCallTarget>, String> {
+    self.poll_optimizing_completions();
+    if self.optimizing.disabled {
+      return Ok(None);
+    }
+    let snapshot = ir::CompilerChunk::from_chunk(chunk, parameter_count)
+      .map_err(|error| format!("optimizing snapshot rejected: {error:?}"))?;
+    let key = CompilationKey {
+      function,
+      specialization: SpecializationKey::NumericBinaryAdd,
+    };
+    let stamp = SnapshotStamp::for_chunk(&snapshot);
+    match self.optimizing.states.get(&key) {
+      Some(CompilationState::Installed {
+        version,
+        stamp: installed_stamp,
+      }) if *installed_stamp == stamp => {
+        return Ok(self.optimizing_target(function, *version));
+      }
+      Some(CompilationState::Pending {
+        stamp: pending_stamp,
+        ..
+      }) if *pending_stamp == stamp => return Ok(None),
+      Some(CompilationState::Rejected {
+        stamp: rejected_stamp,
+        ..
+      }) if *rejected_stamp == stamp => return Ok(None),
+      _ => {
+        self.optimizing.states.remove(&key);
+      }
+    }
+    if self.optimizing.worker.is_none() {
+      match CompilerWorker::start() {
+        Ok(worker) => self.optimizing.worker = Some(worker),
+        Err(_) => {
+          self.disable_optimizing_worker();
+          return Ok(None);
+        }
+      }
+    }
+    self.optimizing.next_ticket = self.optimizing.next_ticket.saturating_add(1);
+    let ticket = CompileTicket::new(self.optimizing.next_ticket);
+    let request = CompileRequest::numeric_add(ticket, function, snapshot);
+    self
+      .optimizing
+      .states
+      .insert(key, CompilationState::Pending { ticket, stamp });
+    self.optimizing.compile_attempts = self.optimizing.compile_attempts.saturating_add(1);
+    let submitted = self
+      .optimizing
+      .worker
+      .as_ref()
+      .is_some_and(|worker| worker.submit(request).is_ok());
+    if !submitted {
+      self.optimizing.states.insert(
+        key,
+        CompilationState::Rejected {
+          stamp,
+          reason: RejectionReason::WorkerUnavailable,
+        },
+      );
+      self.disable_optimizing_worker();
+    }
+    Ok(None)
+  }
+
+  fn optimizing_target(
+    &self,
+    function: FunctionId,
+    version: CodeVersionId,
+  ) -> Option<DirectCallTarget> {
+    self
+      .code
+      .get(&function)?
+      .iter()
+      .find(|code| code.version == version && code.state == JitCodeState::Valid)?
+      .direct_call
+      .clone()
+  }
+
+  fn poll_optimizing_completions(&mut self) {
+    while let Some(worker) = self.optimizing.worker.as_ref() {
+      let completion = match worker.try_recv() {
+        Ok(Some(completion)) => completion,
+        Ok(None) => break,
+        Err(_) => {
+          self.disable_optimizing_worker();
+          break;
+        }
+      };
+      self.accept_optimizing_completion(completion);
+    }
+  }
+
+  fn accept_optimizing_completion(
+    &mut self,
+    completion: CompileCompletion,
+  ) {
+    let (ticket, key, stamp) = match &completion {
+      CompileCompletion::Compiled {
+        ticket, key, stamp, ..
+      }
+      | CompileCompletion::Rejected {
+        ticket, key, stamp, ..
+      }
+      | CompileCompletion::Failed {
+        ticket, key, stamp, ..
+      } => (*ticket, *key, *stamp),
+    };
+    if !matches!(
+      self.optimizing.states.get(&key),
+      Some(CompilationState::Pending {
+        ticket: pending_ticket,
+        stamp: pending_stamp,
+      }) if *pending_ticket == ticket && *pending_stamp == stamp
+    ) {
+      self.optimizing.stale_results = self.optimizing.stale_results.saturating_add(1);
+      return;
+    }
+    match completion {
+      CompileCompletion::Compiled { artifact, .. } => {
+        let installed = artifact
+          .validate()
+          .map_err(|_| ())
+          .and_then(|artifact| NativeCode::install_artifact(artifact).map_err(|_| ()));
+        match installed {
+          Ok(code) => {
+            let version = self.allocate_version();
+            let target = DirectCallTarget {
+              code: Rc::new(code),
+              valid: Rc::new(Cell::new(true)),
+              leaf: DirectLeaf::NumericAdd,
+              contract: DirectCallContract {
+                receiver: DirectReceiverUse::Unused,
+                arguments: DirectArgumentUse::NumericPair,
+              },
+            };
+            self
+              .code
+              .entry(key.function)
+              .or_default()
+              .push(JitCode {
+                function: key.function,
+                version,
+                state: JitCodeState::Valid,
+                cfg_blocks: Vec::new(),
+                pc_map: PcMap::default(),
+                preferred_entry: 0,
+                native_blocks: HashMap::new(),
+                direct_call: Some(target),
+              });
+            self
+              .optimizing
+              .states
+              .insert(key, CompilationState::Installed { version, stamp });
+            self.optimizing.compile_installs = self.optimizing.compile_installs.saturating_add(1);
+          }
+          Err(()) => {
+            self.optimizing.states.insert(
+              key,
+              CompilationState::Rejected {
+                stamp,
+                reason: RejectionReason::InvalidArtifact,
+              },
+            );
+            self.optimizing.compile_rejections = self
+              .optimizing
+              .compile_rejections
+              .saturating_add(1);
+          }
+        }
+      }
+      CompileCompletion::Rejected { reason, .. } => {
+        self
+          .optimizing
+          .states
+          .insert(key, CompilationState::Rejected { stamp, reason });
+        self.optimizing.compile_rejections = self
+          .optimizing
+          .compile_rejections
+          .saturating_add(1);
+      }
+      CompileCompletion::Failed { .. } => self.disable_optimizing_worker(),
+    }
+  }
+
+  fn disable_optimizing_worker(&mut self) {
+    self.optimizing.disabled = true;
+    self.optimizing.worker_failures = self.optimizing.worker_failures.saturating_add(1);
+    self.optimizing.worker.take();
+    for state in self.optimizing.states.values_mut() {
+      if let CompilationState::Pending { stamp, .. } = *state {
+        *state = CompilationState::Rejected {
+          stamp,
+          reason: RejectionReason::WorkerUnavailable,
+        };
+      }
+    }
+  }
+
+  pub(crate) fn record_optimizing_call(
+    &mut self,
+    returned: bool,
+  ) {
+    if returned {
+      self.optimizing.native_calls = self.optimizing.native_calls.saturating_add(1);
+    } else {
+      self.optimizing.guard_failures = self.optimizing.guard_failures.saturating_add(1);
+    }
+  }
+
+  #[cfg(test)]
+  pub(crate) fn optimizing_stats(&self) -> (u64, u64, u64, u64) {
+    (
+      self.optimizing.compile_attempts,
+      self.optimizing.compile_installs,
+      self.optimizing.native_calls,
+      self.optimizing.guard_failures,
+    )
   }
 
   pub(crate) fn run_numeric_region(

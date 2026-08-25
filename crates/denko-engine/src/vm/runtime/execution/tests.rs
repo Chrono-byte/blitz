@@ -132,6 +132,44 @@ mod test {
 
   #[cfg(all(unix, target_arch = "x86_64"))]
   #[test]
+  fn numeric_add_function_migrates_to_async_typed_native_code() {
+    let (vm, _) = run_script(
+      "function add(left, right) { return left + right; } function invoke(left, right) { return add(left, right); } let total = 0; for (let i = 0; i < 5000; i += 1) total = invoke(total, 1); globalThis.typed_add_total = total; globalThis.typed_add_mixed = invoke('value', 3);",
+    );
+    assert_eq!(
+      vm.get_global("typed_add_total"),
+      Some(Value::Number(5000.0))
+    );
+    assert_eq!(
+      vm.get_global("typed_add_mixed"),
+      Some(Value::String("value3".into()))
+    );
+    let (attempts, installs, native_calls, guard_failures) = vm.profiling.jit.optimizing_stats();
+    assert_eq!(attempts, 2);
+    assert_eq!(installs, 1);
+    assert!(native_calls > 0);
+    assert_eq!(guard_failures, 1);
+  }
+
+  #[cfg(all(unix, target_arch = "x86_64"))]
+  #[test]
+  fn unsupported_numeric_body_is_rejected_once() {
+    let (vm, _) = run_script(
+      "function multiply(left, right) { return left * right; } let total = 1; for (let i = 0; i < 3000; i += 1) total = multiply(total, 1); globalThis.typed_multiply_total = total;",
+    );
+    assert_eq!(
+      vm.get_global("typed_multiply_total"),
+      Some(Value::Number(1.0))
+    );
+    let (attempts, installs, native_calls, guard_failures) = vm.profiling.jit.optimizing_stats();
+    assert_eq!(attempts, 1);
+    assert_eq!(installs, 0);
+    assert_eq!(native_calls, 0);
+    assert_eq!(guard_failures, 0);
+  }
+
+  #[cfg(all(unix, target_arch = "x86_64"))]
+  #[test]
   fn numeric_accumulator_loop_migrates_to_native_code() {
     let (vm, _) = run_script(
       "let total = 0; for (let i = 0; i < 1100; i++) total += i; globalThis.native_accumulator_total = total;",

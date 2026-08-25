@@ -1352,28 +1352,78 @@ impl Vm {
       .filter(|entry| Rc::ptr_eq(&entry.expected_proto, proto));
     if let Some(entry) = cached
       && entry.target.is_valid()
-      && let Ok(result) = entry
+    {
+      let result = entry
         .target
         .call(crate::vm::jit::DirectCallInputs {
           receiver: this_value,
           arguments,
-        })
-    {
-      self.profiling.jit_stats.baseline_entries = self
-        .profiling
-        .jit_stats
-        .baseline_entries
-        .saturating_add(1);
-      self.profiling.jit_stats.baseline_returns = self
-        .profiling
-        .jit_stats
-        .baseline_returns
-        .saturating_add(1);
-      return Ok(Some(result));
+        });
+      if entry.target.leaf() == crate::vm::jit::DirectLeaf::NumericAdd {
+        self
+          .profiling
+          .jit
+          .record_optimizing_call(result.is_ok());
+      }
+      if let Ok(result) = result {
+        self.profiling.jit_stats.baseline_entries = self
+          .profiling
+          .jit_stats
+          .baseline_entries
+          .saturating_add(1);
+        self.profiling.jit_stats.baseline_returns = self
+          .profiling
+          .jit_stats
+          .baseline_returns
+          .saturating_add(1);
+        return Ok(Some(result));
+      }
     }
     let chunk = &proto.chunk;
     let parameter_count = proto.arity;
     let function = self.function_id_for_chunk(chunk);
+    if arguments.len() >= 2
+      && matches!(arguments[0], Value::Number(_))
+      && matches!(arguments[1], Value::Number(_))
+      && let Some(target) = self
+        .profiling
+        .jit
+        .optimizing_numeric_add_target(function, chunk, parameter_count)
+        .map_err(RuntimeError::from)?
+    {
+      if let Some(slot) = self
+        .caches
+        .active_direct_calls
+        .borrow_mut()
+        .get_mut(call_site)
+      {
+        *slot = Some(crate::vm::state::DirectCallSite {
+          expected_proto: Rc::clone(proto),
+          target: target.clone(),
+        });
+      }
+      let result = target.call(crate::vm::jit::DirectCallInputs {
+        receiver: this_value,
+        arguments,
+      });
+      self
+        .profiling
+        .jit
+        .record_optimizing_call(result.is_ok());
+      if let Ok(result) = result {
+        self.profiling.jit_stats.baseline_entries = self
+          .profiling
+          .jit_stats
+          .baseline_entries
+          .saturating_add(1);
+        self.profiling.jit_stats.baseline_returns = self
+          .profiling
+          .jit_stats
+          .baseline_returns
+          .saturating_add(1);
+        return Ok(Some(result));
+      }
+    }
     let profile = self
       .profiling
       .functions
@@ -2808,6 +2858,9 @@ impl Vm {
         crate::vm::jit::DirectLeaf::Parameter(0),
         crate::vm::jit::DirectArgumentUse::Parameter(0),
       ) => region.argument,
+      (crate::vm::jit::DirectLeaf::NumericAdd, crate::vm::jit::DirectArgumentUse::NumericPair) => {
+        return Ok(false);
+      }
       _ => return Ok(false),
     };
     let mut prepared = crate::vm::region::PreparedNumericRegion {
@@ -3045,6 +3098,7 @@ impl Vm {
             value
           }
           crate::vm::jit::DirectLeaf::Parameter(_) => return Ok(false),
+          crate::vm::jit::DirectLeaf::NumericAdd => return Ok(false),
         }
       }
     };

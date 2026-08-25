@@ -737,6 +737,13 @@ impl NativeCode {
   }
 
   #[cfg(not(all(unix, target_arch = "x86_64")))]
+  pub(crate) fn install_artifact(
+    _artifact: crate::vm::jit::artifact::ValidatedArtifact
+  ) -> Result<Self, String> {
+    Err("optimizing JIT requires Unix x86-64".to_string())
+  }
+
+  #[cfg(not(all(unix, target_arch = "x86_64")))]
   pub(crate) fn return_number(_value: f64) -> Result<Self, String> {
     Err("minimal native backend requires Unix x86-64".to_string())
   }
