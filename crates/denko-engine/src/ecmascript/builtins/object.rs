@@ -30,6 +30,15 @@ pub(crate) fn install_object_intrinsics(
 ) -> ObjectIntrinsics {
   use PropertyKey as PKey;
 
+  constructor_properties
+    .borrow_mut()
+    .properties
+    .reserve(32);
+  object_prototype
+    .borrow_mut()
+    .properties
+    .reserve(16);
+
   let constructor_properties_for_constructor = Rc::clone(constructor_properties);
   let constructor_function: BuiltinFn = Rc::new(move |vm, args| {
     let value_idx = if args.len() > 1 { 1 } else { 0 };

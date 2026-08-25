@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 /// Builds the ECMAScript intrinsics and installs the available global bindings.
 pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) -> Intrinsics {
+  globals.borrow_mut().properties.reserve(64);
   let foundation = create_foundation();
   let object_proto_map = foundation.object_prototype;
   let function_proto_map = foundation.function_prototype;
