@@ -32,6 +32,14 @@ pub(crate) struct DirectCallFrame {
   pub(crate) argument_count: usize,
 }
 
+/// Compact direct-call frame used by typed numeric code.
+#[repr(C)]
+pub(crate) struct CompactDirectCallFrame {
+  pub(crate) result_bits: u64,
+  pub(crate) arguments: *const u64,
+  pub(crate) argument_count: usize,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum NumericLoopAddend {
   Constant,
@@ -769,6 +777,16 @@ impl NativeCode {
     frame: *mut DirectCallFrame,
   ) -> JitExitCode {
     let entry: unsafe extern "C" fn(*mut DirectCallFrame) -> JitExitCode =
+      unsafe { std::mem::transmute(self.ptr.as_ptr()) };
+    unsafe { entry(frame) }
+  }
+
+  #[cfg(all(unix, target_arch = "x86_64"))]
+  pub(crate) unsafe fn call_compact_direct_frame(
+    &self,
+    frame: *mut CompactDirectCallFrame,
+  ) -> JitExitCode {
+    let entry: unsafe extern "C" fn(*mut CompactDirectCallFrame) -> JitExitCode =
       unsafe { std::mem::transmute(self.ptr.as_ptr()) };
     unsafe { entry(frame) }
   }

@@ -105,40 +105,37 @@ pub(crate) fn emit_numeric_add(
   let (left, right) = function
     .numeric_add_arguments()
     .ok_or(ArtifactError::UnsupportedTypedFunction)?;
+  if left != 0 || right != 1 {
+    return Err(ArtifactError::UnsupportedTypedFunction);
+  }
   let mut bytes = vec![
-    0x41, 0x54, // push r12; align stack and retain the frame
-    0x49, 0x89, 0xFC, // mov r12, rdi
-    0x48, 0x83, 0xEC, 0x10, // sub rsp, 16
-  ];
-  let mut relocations = Vec::with_capacity(3);
-  emit_argument_guard(&mut bytes, &mut relocations, left, 0)?;
-  emit_argument_guard(&mut bytes, &mut relocations, right, 8)?;
-  bytes.extend_from_slice(&[
-    0xF2, 0x0F, 0x10, 0x04, 0x24, // movsd xmm0, [rsp]
-    0xF2, 0x0F, 0x58, 0x44, 0x24, 0x08, // addsd xmm0, [rsp+8]
-    0x4C, 0x89, 0xE7, // mov rdi, r12
-    0x48, 0xB8,
-  ]);
-  let result_relocation = CodeOffset::from_index(bytes.len())?;
-  bytes.extend_from_slice(&[0; 8]);
-  bytes.extend_from_slice(&[
-    0xFF, 0xD0, // call rax
-    0x48, 0x83, 0xC4, 0x10, // add rsp, 16
-    0x41, 0x5C, // pop r12
+    0x48, 0x83, 0x7F, 0x10, 0x02, // cmp qword [rdi+16], 2
+    0x72, 0, // jb guard_failure
+    0x48, 0x8B, 0x4F, 0x08, // mov rcx, [rdi+8]
+    0x48, 0x8B, 0x01, // mov rax, [rcx]
+    0x48, 0x89, 0xC2, // mov rdx, rax
+    0x48, 0xC1, 0xEA, 0x30, // shr rdx, 48
+    0x66, 0x81, 0xFA, 0xF9, 0x7F, // cmp dx, 0x7ff9
+    0x73, 0, // jae guard_failure
+    0x66, 0x48, 0x0F, 0x6E, 0xC0, // movq xmm0, rax
+    0x48, 0x8B, 0x41, 0x08, // mov rax, [rcx+8]
+    0x48, 0x89, 0xC2, // mov rdx, rax
+    0x48, 0xC1, 0xEA, 0x30, // shr rdx, 48
+    0x66, 0x81, 0xFA, 0xF9, 0x7F, // cmp dx, 0x7ff9
+    0x73, 0, // jae guard_failure
+    0x66, 0x48, 0x0F, 0x6E, 0xC8, // movq xmm1, rax
+    0xF2, 0x0F, 0x58, 0xC1, // addsd xmm0, xmm1
+    0x66, 0x48, 0x0F, 0x7E, 0xC0, // movq rax, xmm0
+    0x48, 0x89, 0x07, // mov [rdi], rax
+    0x31, 0xC0, // xor eax, eax
     0xC3, // ret
-  ]);
-  relocations.push(ArtifactRelocation {
-    offset: result_relocation,
-    helper: RuntimeHelperId::SetDirectNumberResult,
-  });
+  ];
+  let guard_branches = [6, 28, 50];
   let guard_failure = bytes.len();
   bytes.extend_from_slice(&[
     0xB8, 1, 0, 0, 0, // mov eax, JIT_EXIT_INTERPRETER
-    0x48, 0x83, 0xC4, 0x10, // add rsp, 16
-    0x41, 0x5C, // pop r12
     0xC3,
   ]);
-  let guard_branches: Vec<_> = guard_branch_indices(&bytes).collect();
   for branch_index in guard_branches {
     bytes[branch_index] = relative_i8(branch_index, guard_failure)?;
   }
@@ -147,45 +144,8 @@ pub(crate) fn emit_numeric_add(
     abi: NATIVE_ARTIFACT_ABI,
     entry: CodeOffset(0),
     bytes: bytes.into_boxed_slice(),
-    relocations: relocations.into_boxed_slice(),
+    relocations: Box::new([]),
   })
-}
-
-#[cfg(all(unix, target_arch = "x86_64"))]
-fn emit_argument_guard(
-  bytes: &mut Vec<u8>,
-  relocations: &mut Vec<ArtifactRelocation>,
-  argument: u16,
-  stack_offset: u8,
-) -> Result<(), ArtifactError> {
-  bytes.extend_from_slice(&[0x4C, 0x89, 0xE7, 0xBE]);
-  bytes.extend_from_slice(&(argument as u32).to_le_bytes());
-  if stack_offset == 0 {
-    bytes.extend_from_slice(&[0x48, 0x89, 0xE2]); // mov rdx, rsp
-  } else {
-    bytes.extend_from_slice(&[0x48, 0x8D, 0x54, 0x24, stack_offset]); // lea rdx, [rsp+offset]
-  }
-  bytes.extend_from_slice(&[0x48, 0xB8]);
-  let offset = CodeOffset::from_index(bytes.len())?;
-  bytes.extend_from_slice(&[0; 8]);
-  bytes.extend_from_slice(&[
-    0xFF, 0xD0, // call rax
-    0x85, 0xC0, // test eax, eax
-    0x75, 0, // jne guard_failure; patched after emission
-  ]);
-  relocations.push(ArtifactRelocation {
-    offset,
-    helper: RuntimeHelperId::ReadDirectNumberArgument,
-  });
-  Ok(())
-}
-
-#[cfg(all(unix, target_arch = "x86_64"))]
-fn guard_branch_indices(bytes: &[u8]) -> impl Iterator<Item = usize> + '_ {
-  bytes
-    .windows(2)
-    .enumerate()
-    .filter_map(|(index, pair)| (pair == [0x75, 0]).then_some(index + 1))
 }
 
 #[cfg(all(unix, target_arch = "x86_64"))]

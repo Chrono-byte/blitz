@@ -512,6 +512,22 @@ impl DirectCallTarget {
     }
     let _receiver = inputs.receiver;
     let arguments = inputs.arguments;
+    if self.leaf == DirectLeaf::NumericAdd {
+      let compact_arguments = [
+        compact_direct_argument(arguments.first()),
+        compact_direct_argument(arguments.get(1)),
+      ];
+      let mut frame = native::CompactDirectCallFrame {
+        result_bits: 0,
+        arguments: compact_arguments.as_ptr(),
+        argument_count: arguments.len(),
+      };
+      let exit = unsafe { self.code.call_compact_direct_frame(&mut frame) };
+      if native::decode_exit(exit)? != native::JitExit::Return {
+        return Err("typed numeric call requested interpreter fallback".to_string());
+      }
+      return Ok(Value::Number(f64::from_bits(frame.result_bits)));
+    }
     let mut result = Value::Undefined;
     let mut frame = native::DirectCallFrame {
       result: &mut result,
@@ -524,6 +540,13 @@ impl DirectCallTarget {
     }
     Ok(result)
   }
+}
+
+fn compact_direct_argument(value: Option<&Value>) -> u64 {
+  value
+    .and_then(|value| crate::value::tagged::TaggedValue::try_from(value).ok())
+    .unwrap_or(crate::value::tagged::TaggedValue::UNDEFINED)
+    .to_bits()
 }
 
 #[derive(Default)]
