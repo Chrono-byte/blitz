@@ -715,10 +715,15 @@ impl ObjectData {
 
   /// Create an empty object data container with a null prototype.
   pub fn new() -> Self {
+    Self::with_property_capacity(0)
+  }
+
+  /// Create an empty object with reserved ordinary-property storage.
+  pub(crate) fn with_property_capacity(capacity: usize) -> Self {
     Self {
       identity: Self::next_identity(),
       mutation_generation: 0,
-      properties: IndexMap::new(),
+      properties: IndexMap::with_capacity(capacity),
       strong_prototype: None,
       weak_prototype: None,
       internal_slots: IndexMap::new(),
@@ -737,7 +742,14 @@ impl ObjectData {
 
   /// Create an empty object with a specific prototype.
   pub fn with_prototype(prototype: Value) -> Self {
-    let mut object = Self::new();
+    Self::with_prototype_and_property_capacity(prototype, 0)
+  }
+
+  pub(crate) fn with_prototype_and_property_capacity(
+    prototype: Value,
+    capacity: usize,
+  ) -> Self {
+    let mut object = Self::with_property_capacity(capacity);
     object.set_prototype_value(prototype);
     object
   }

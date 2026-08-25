@@ -69,7 +69,7 @@ pub(crate) fn builtin_object(
   f: BuiltinFn,
   function_proto: &Rc<RefCell<ObjectData>>,
 ) -> Value {
-  let props = gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
+  let props = gc::track_object(Rc::new(RefCell::new(ObjectData::with_property_capacity(2))));
   props
     .borrow_mut()
     .set_prototype_value(Value::Object(Rc::clone(function_proto)));

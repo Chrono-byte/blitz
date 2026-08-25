@@ -151,12 +151,18 @@ pub(crate) fn install_typed_arrays(
   array_entries_builtin: Value,
   array_to_string_builtin: Value,
 ) -> TypedArrayIntrinsics {
-  let typedarray_proto_map = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
-    Rc::clone(object_proto_map),
-  ))));
-  let typedarray_ctor_map = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
-    Rc::clone(function_proto_map),
-  ))));
+  let typedarray_proto_map = Rc::new(RefCell::new(
+    ObjectData::with_prototype_and_property_capacity(
+      Value::Object(Rc::clone(object_proto_map)),
+      12,
+    ),
+  ));
+  let typedarray_ctor_map = Rc::new(RefCell::new(
+    ObjectData::with_prototype_and_property_capacity(
+      Value::Object(Rc::clone(function_proto_map)),
+      4,
+    ),
+  ));
   typedarray_ctor_map
     .borrow_mut()
     .properties
@@ -1023,12 +1029,15 @@ pub(crate) fn install_typed_arrays(
 
   macro_rules! create_typed_array_ctor {
     ($name:expr, $element_count:expr, $zero_value:expr, $shared:expr) => {{
-      let proto_map = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
-        typedarray_proto_map.clone(),
-      ))));
-      let ctor_map = Rc::new(RefCell::new(ObjectData::with_prototype(
-        typedarray_ctor_val.clone(),
-      )));
+      let proto_map = Rc::new(RefCell::new(
+        ObjectData::with_prototype_and_property_capacity(
+          Value::Object(typedarray_proto_map.clone()),
+          2,
+        ),
+      ));
+      let ctor_map = Rc::new(RefCell::new(
+        ObjectData::with_prototype_and_property_capacity(typedarray_ctor_val.clone(), 4),
+      ));
       ctor_map
         .borrow_mut()
         .set_internal_slot("[[DefersInstanceAllocation]]", Value::Bool(true));
