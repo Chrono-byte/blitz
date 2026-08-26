@@ -76,6 +76,12 @@ pub struct Match {
 }
 
 impl Match {
+  pub(crate) fn captureless(range: Range<usize>) -> Self {
+    Self {
+      captures: vec![Some(Capture { range })],
+    }
+  }
+
   /// Return the complete match's UTF-16 range.
   #[must_use]
   pub fn range(&self) -> Range<usize> {
@@ -397,7 +403,7 @@ fn match_backreference(
   vec![state]
 }
 
-fn class_matches(
+pub(crate) fn class_matches(
   class: &CharacterClass,
   symbol: u32,
   flags: Flags,
@@ -475,7 +481,7 @@ fn is_space(symbol: u32) -> bool {
   )
 }
 
-const fn is_line_terminator(symbol: u32) -> bool {
+pub(crate) const fn is_line_terminator(symbol: u32) -> bool {
   matches!(symbol, 0x000A | 0x000D | 0x2028 | 0x2029)
 }
 

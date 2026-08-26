@@ -15,6 +15,7 @@ mod canonical;
 #[allow(dead_code, reason = "compiled execution lands in the next barrier")]
 mod compiler;
 mod error;
+mod executor;
 mod flags;
 #[allow(
   dead_code,
@@ -50,6 +51,7 @@ pub struct Regex {
   body: Node,
   capture_count: usize,
   capture_names: Vec<Option<JsString>>,
+  program: Option<program::VerifiedProgram>,
 }
 
 impl Regex {
@@ -68,12 +70,16 @@ impl Regex {
   ) -> Result<Self, Error> {
     let flags = Flags::parse(flags)?;
     let parsed = parser::parse(source, flags)?;
+    let program = ir::IrNode::from_ast(&parsed.body)
+      .ok()
+      .and_then(|ir| compiler::compile(&ir).ok());
     Ok(Self {
       source: source.clone(),
       flags,
       body: parsed.body,
       capture_count: parsed.capture_count,
       capture_names: parsed.capture_names,
+      program,
     })
   }
 
@@ -154,7 +160,26 @@ impl Regex {
     input: &Input,
     start: usize,
   ) -> Result<Option<Match>, MatchError> {
+    if let Some(program) = &self.program {
+      executor::find(program, input, start, self.flags)
+        .map(|matched| matched.map(matcher::Match::captureless))
+    } else {
+      matcher::find(self, input, start)
+    }
+  }
+
+  #[cfg(test)]
+  pub(crate) fn try_find_legacy(
+    &self,
+    input: &Input,
+    start: usize,
+  ) -> Result<Option<Match>, MatchError> {
     matcher::find(self, input, start)
+  }
+
+  #[cfg(test)]
+  pub(crate) fn uses_compiled_program(&self) -> bool {
+    self.program.is_some()
   }
 
   /// Parse `text` as UTF-16 and find the first match.
