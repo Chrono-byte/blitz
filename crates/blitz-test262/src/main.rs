@@ -39,7 +39,11 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio, exit};
 use std::rc::Rc;
-use std::sync::{Arc, Mutex, OnceLock, mpsc};
+use std::sync::{
+  Arc, Mutex, OnceLock,
+  atomic::{AtomicU64, Ordering},
+  mpsc,
+};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -816,12 +820,17 @@ fn unique_temp_path(
   prefix: &str,
   ext: &str,
 ) -> PathBuf {
+  static NEXT_TEMP_PATH: AtomicU64 = AtomicU64::new(0);
+
   let pid = std::process::id();
   let nanos = SystemTime::now()
     .duration_since(UNIX_EPOCH)
     .unwrap_or_default()
     .as_nanos();
-  env::temp_dir().join(format!("blitz-test262-{prefix}-{pid}-{nanos}.{ext}"))
+  let sequence = NEXT_TEMP_PATH.fetch_add(1, Ordering::Relaxed);
+  env::temp_dir().join(format!(
+    "blitz-test262-{prefix}-{pid}-{nanos}-{sequence}.{ext}"
+  ))
 }
 
 /// Returns true if subprocess batches should be used for the given options and selected test count.
@@ -3265,6 +3274,25 @@ mod tests {
 
     assert!(should_use_subprocess_batches(&opts, 1));
     assert!(!should_use_subprocess_batches(&opts, 0));
+  }
+
+  #[test]
+  fn concurrent_subprocess_temp_paths_are_unique() {
+    let paths = (0..16)
+      .map(|_| {
+        thread::spawn(|| {
+          (0..256)
+            .map(|_| unique_temp_path("report", "json"))
+            .collect::<Vec<_>>()
+        })
+      })
+      .collect::<Vec<_>>()
+      .into_iter()
+      .flat_map(|handle| handle.join().expect("temp path worker"))
+      .collect::<Vec<_>>();
+    let unique = paths.iter().collect::<HashSet<_>>();
+
+    assert_eq!(unique.len(), paths.len());
   }
 
   #[test]
