@@ -5,7 +5,7 @@ use crate::errors::RuntimeError;
 use crate::gc;
 use crate::value::{ObjectData, SharedValue, Value};
 use crate::vm::Vm;
-use crate::vm::state::{GeneratorRunner, RiscExecutionState, RiscRunOutcome};
+use crate::vm::state::{GeneratorRunner, GeneratorStatus, RiscExecutionState, RiscRunOutcome};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -54,7 +54,10 @@ impl Vm {
     };
     match initialization {
       RiscRunOutcome::Initialized => {}
-      RiscRunOutcome::Return(_) | RiscRunOutcome::Yield(_) | RiscRunOutcome::YieldStar(_) => {
+      RiscRunOutcome::Return(_)
+      | RiscRunOutcome::Yield(_)
+      | RiscRunOutcome::YieldStar(_)
+      | RiscRunOutcome::Await(_) => {
         return Err(RuntimeError::from(
           "generator body reached a suspension before initialization",
         ));
@@ -63,8 +66,7 @@ impl Vm {
     let runner = Rc::new(RefCell::new(GeneratorRunner {
       vm: child,
       risc_state,
-      started: false,
-      completed: false,
+      status: GeneratorStatus::SuspendedStart,
     }));
     let next_runner = Rc::clone(&runner);
     let throw_runner = Rc::clone(&runner);
@@ -100,11 +102,11 @@ impl Vm {
           .cloned()
           .unwrap_or(Value::Undefined);
 
-        if runner.completed {
+        if runner.status == GeneratorStatus::Completed {
           Ok(Self::make_iterator_result(Value::Undefined, true))
         } else {
-          if !runner.started {
-            runner.started = true;
+          if runner.status == GeneratorStatus::SuspendedStart {
+            runner.status = GeneratorStatus::SuspendedYield;
           } else {
             runner.resume_next(first_arg);
           }
@@ -117,15 +119,19 @@ impl Vm {
             Ok(RiscRunOutcome::Yield(value)) => Ok(Self::make_iterator_result(value, false)),
             Ok(RiscRunOutcome::YieldStar(result)) => Ok(result),
             Ok(RiscRunOutcome::Return(value)) => {
-              runner.completed = true;
+              runner.complete();
               Ok(Self::make_iterator_result(value, true))
             }
             Ok(RiscRunOutcome::Initialized) => Err(RuntimeError::from(
               "generator initialization marker executed twice",
             )),
+            Ok(RiscRunOutcome::Await(_)) => {
+              Err(RuntimeError::from("await boundary reached in generator"))
+            }
             Err(error) => {
-              runner.completed = true;
-              Err(vm.propagate_generator_error(&mut runner, error))
+              let error = vm.propagate_generator_error(&mut runner, error);
+              runner.complete();
+              Err(error)
             }
           }
         }
@@ -147,16 +153,14 @@ impl Vm {
           .cloned()
           .unwrap_or(Value::Undefined);
 
-        if runner.completed {
-          Err(RuntimeError::from(format!(
-            "Uncaught: {}",
-            runner.vm.format_uncaught_thrown_value(&thrown)
-          )))
+        if runner.status == GeneratorStatus::Completed {
+          Err(vm.throw_exception(thrown))
         } else {
           let delegated = runner.resume_throw(thrown.clone());
           if !delegated && let Err(err) = runner.vm.throw_value(thrown) {
-            runner.completed = true;
-            return Err(vm.propagate_generator_error(&mut runner, err));
+            let error = vm.propagate_generator_error(&mut runner, err);
+            runner.complete();
+            return Err(error);
           }
 
           let outcome = {
@@ -171,15 +175,19 @@ impl Vm {
             Ok(RiscRunOutcome::Yield(value)) => Ok(Self::make_iterator_result(value, false)),
             Ok(RiscRunOutcome::YieldStar(result)) => Ok(result),
             Ok(RiscRunOutcome::Return(value)) => {
-              runner.completed = true;
+              runner.complete();
               Ok(Self::make_iterator_result(value, true))
             }
             Ok(RiscRunOutcome::Initialized) => Err(RuntimeError::from(
               "generator initialization marker executed twice",
             )),
+            Ok(RiscRunOutcome::Await(_)) => {
+              Err(RuntimeError::from("await boundary reached in generator"))
+            }
             Err(error) => {
-              runner.completed = true;
-              Err(vm.propagate_generator_error(&mut runner, error))
+              let error = vm.propagate_generator_error(&mut runner, error);
+              runner.complete();
+              Err(error)
             }
           }
         }
@@ -201,7 +209,7 @@ impl Vm {
           .cloned()
           .unwrap_or(Value::Undefined);
         if !runner.resume_return(result_value.clone()) {
-          runner.completed = true;
+          runner.complete();
           return Ok(Self::make_iterator_result(result_value, true));
         }
 
@@ -213,15 +221,19 @@ impl Vm {
           Ok(RiscRunOutcome::Yield(value)) => Ok(Self::make_iterator_result(value, false)),
           Ok(RiscRunOutcome::YieldStar(result)) => Ok(result),
           Ok(RiscRunOutcome::Return(value)) => {
-            runner.completed = true;
+            runner.complete();
             Ok(Self::make_iterator_result(value, true))
           }
           Ok(RiscRunOutcome::Initialized) => Err(RuntimeError::from(
             "generator initialization marker executed twice",
           )),
+          Ok(RiscRunOutcome::Await(_)) => {
+            Err(RuntimeError::from("await boundary reached in generator"))
+          }
           Err(error) => {
-            runner.completed = true;
-            Err(vm.propagate_generator_error(&mut runner, error))
+            let error = vm.propagate_generator_error(&mut runner, error);
+            runner.complete();
+            Err(error)
           }
         }
       })),

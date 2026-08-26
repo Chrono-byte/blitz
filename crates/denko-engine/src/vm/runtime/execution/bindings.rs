@@ -1,0 +1,121 @@
+// SPDX-License-Identifier: MPL-2.0
+
+use crate::environment::EnvironmentRecord;
+use crate::value::{PropertyDescriptor, PropertyKey, Value};
+use crate::vm::Vm;
+use crate::vm::state::SlotMetadata;
+use std::cell::RefCell;
+use std::rc::Rc;
+
+impl Vm {
+  pub(super) fn persist_root_bindings(&mut self) {
+    let Some(slots) = self.execution.active.slots.as_ref() else {
+      return;
+    };
+    let names = slots.names.clone();
+    let immutable = slots.immutable.clone();
+    let locals = self.execution.active.locals.clone();
+    let mut global_env = self.realm_state.global_env.borrow_mut();
+
+    for (index, name) in names.into_iter().enumerate() {
+      let (Some(name), Some(cell)) = (name, locals.get(index)) else {
+        continue;
+      };
+      let initialized = !matches!(*cell.borrow(), Value::Uninitialized);
+      if immutable.get(index).copied().unwrap_or(false) {
+        global_env.create_immutable_binding(name, Rc::clone(cell), initialized);
+      } else {
+        global_env.create_mutable_binding(name, Rc::clone(cell), initialized);
+      }
+    }
+  }
+
+  pub(super) fn initialize_root_bindings(&mut self) {
+    let slot_names = self
+      .execution
+      .active
+      .chunk
+      .root_slot_names
+      .clone();
+    let slot_tdz = self
+      .execution
+      .active
+      .chunk
+      .root_lexical_tdz
+      .clone();
+    let slot_types = self
+      .execution
+      .active
+      .chunk
+      .root_slot_types
+      .clone();
+    let slot_immutable = self
+      .execution
+      .active
+      .chunk
+      .root_slot_immutable
+      .clone();
+    let slot_sloppy_immutable_silent = vec![false; slot_names.len()];
+    let slot_count = slot_names
+      .len()
+      .max(slot_tdz.len())
+      .max(slot_types.len())
+      .max(slot_immutable.len());
+    if slot_count == 0 {
+      return;
+    }
+
+    self.execution.active.locals =
+      std::iter::repeat_with(|| Rc::new(RefCell::new(Value::Undefined)))
+        .take(slot_count)
+        .collect();
+    for (idx, is_tdz) in slot_tdz.iter().copied().enumerate() {
+      if is_tdz && idx < self.execution.active.locals.len() {
+        *self.execution.active.locals[idx].borrow_mut() = Value::Uninitialized;
+      }
+    }
+
+    let root_env = Rc::new(RefCell::new(EnvironmentRecord::new(Some(Rc::clone(
+      &self.execution.active.lexical_env,
+    )))));
+    for (idx, maybe_name) in slot_names.iter().enumerate() {
+      if let Some(name) = maybe_name
+        && idx < self.execution.active.locals.len()
+      {
+        let initialized = !slot_tdz.get(idx).copied().unwrap_or(false);
+        if slot_immutable.get(idx).copied().unwrap_or(false) {
+          root_env.borrow_mut().create_immutable_binding(
+            name.clone(),
+            Rc::clone(&self.execution.active.locals[idx]),
+            initialized,
+          );
+        } else {
+          root_env.borrow_mut().create_mutable_binding(
+            name.clone(),
+            Rc::clone(&self.execution.active.locals[idx]),
+            initialized,
+          );
+        }
+        if initialized {
+          let value = self.execution.active.locals[idx].borrow().clone();
+          self
+            .realm_state
+            .globals
+            .borrow_mut()
+            .properties
+            .insert(
+              PropertyKey::String(name.clone().into()),
+              PropertyDescriptor::ordinary_data(value),
+            );
+        }
+      }
+    }
+    self.execution.active.lexical_env = root_env;
+    self.execution.active.slots = Some(SlotMetadata {
+      types: slot_types,
+      names: slot_names,
+      immutable: slot_immutable,
+      sloppy_immutable_silent: slot_sloppy_immutable_silent,
+    });
+  }
+}

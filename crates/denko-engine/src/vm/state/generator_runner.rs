@@ -2,16 +2,20 @@
 use super::{RiscExecutionState, Vm, YieldStarResume};
 use crate::value::Value;
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum GeneratorStatus {
+  SuspendedStart,
+  SuspendedYield,
+  Completed,
+}
+
 /// Manages the execution state of a generator function.
 pub(crate) struct GeneratorRunner {
   /// The VM executing the generator.
   pub(crate) vm: Vm,
   /// Persistent register file and spills for the suspended function.
   pub(crate) risc_state: RiscExecutionState,
-  /// Whether the generator has been started.
-  pub(crate) started: bool,
-  /// Whether the generator has completed execution.
-  pub(crate) completed: bool,
+  pub(crate) status: GeneratorStatus,
 }
 
 impl GeneratorRunner {
@@ -47,5 +51,12 @@ impl GeneratorRunner {
     } else {
       self.vm.begin_generator_return(value)
     }
+  }
+
+  pub(crate) fn complete(&mut self) {
+    self
+      .vm
+      .discard_suspended_risc_activation(&mut self.risc_state);
+    self.status = GeneratorStatus::Completed;
   }
 }

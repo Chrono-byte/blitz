@@ -549,6 +549,84 @@ fn generator_return_runs_finally_and_finishes_the_iterator() {
 }
 
 #[test]
+fn completed_generator_throw_uses_a_javascript_throw_completion() {
+  run(&format!(
+    r#"
+      {ASSERT}
+      function* values() {{}}
+      const iterator = values();
+      iterator.next();
+
+      const sentinel = 42;
+      let caught;
+      try {{ iterator.throw(sentinel); }} catch (error) {{ caught = error; }}
+      assert(caught === sentinel, "completed generator throw is catchable");
+    "#
+  ));
+}
+
+#[test]
+fn await_suspends_until_a_later_microtask() {
+  run(&format!(
+    r#"
+      {ASSERT}
+      let order = "";
+      async function appendAfterAwait() {{
+        order += "a";
+        await 0;
+        order += "b";
+      }}
+
+      const promise = appendAfterAwait();
+      order += "c";
+      assert(order === "ac", "await suspends the async function");
+      promise.then(() => {{
+        assert(order === "acb", "await resumes from a promise reaction");
+      }});
+    "#
+  ));
+}
+
+#[test]
+fn await_resumes_after_later_fulfillment_and_rejection() {
+  run(&format!(
+    r#"
+      {ASSERT}
+      let resolvePending;
+      const pending = new Promise((resolve) => {{ resolvePending = resolve; }});
+
+      async function fulfillLater() {{
+        const first = await pending;
+        const second = await Promise.resolve(2);
+        return first + second;
+      }}
+
+      async function catchRejection() {{
+        try {{
+          await Promise.reject(9);
+        }} catch (error) {{
+          return error + 1;
+        }}
+      }}
+
+      let fulfillment;
+      let rejection;
+      fulfillLater().then((value) => {{ fulfillment = value; }});
+      catchRejection().then((value) => {{ rejection = value; }});
+      Promise.resolve().then(() => {{ resolvePending(5); }});
+      Promise.resolve().then(() => {{
+        Promise.resolve().then(() => {{
+          Promise.resolve().then(() => {{
+            assert(fulfillment === 7, "later fulfillment resumes through both awaits");
+            assert(rejection === 10, "await rejection resumes through the active catch");
+          }});
+        }});
+      }});
+    "#
+  ));
+}
+
+#[test]
 fn lexical_shadowing_and_closure_capture_resolve_the_correct_environment() {
   run(&format!(
     r#"
@@ -639,6 +717,82 @@ fn relational_and_equality_coercions_observe_spec_order() {
       assert(order === "v", "abstract equality invokes primitive conversion once");
       assert(!(numericString === 2), "strict equality does not coerce");
       assert(order === "v", "strict equality performs no additional coercion");
+    "#
+  ));
+}
+
+#[test]
+fn bigint_and_comparison_opcodes_preserve_ecmascript_semantics() {
+  run(&format!(
+    r#"
+      {ASSERT}
+      assert((5n & 3n) === 1n, "BigInt bitwise and");
+      assert((5n | 2n) === 7n, "BigInt bitwise or");
+      assert((5n ^ 1n) === 4n, "BigInt bitwise xor");
+      assert((3n << 2n) === 12n, "BigInt left shift");
+      assert((12n >> 2n) === 3n, "BigInt right shift");
+
+      let updated = 1n;
+      const previous = updated++;
+      assert(previous === 1n && updated === 2n, "BigInt postfix update");
+
+      let order = "";
+      const left = {{ valueOf() {{ order += "l"; return 1; }} }};
+      const right = {{ valueOf() {{ order += "r"; return 2; }} }};
+      assert(left <= right && order === "lr", "less-than-or-equal coerces left first");
+      order = "";
+      assert(!(left > right) && order === "lr", "greater-than coerces left first");
+      assert(9007199254740993n > 9007199254740992,
+        "mixed BigInt and Number comparison remains exact");
+
+      const proxy = new Proxy({{ valueOf() {{ return 1; }} }}, {{}});
+      assert(proxy == 1, "proxy participates in abstract equality coercion");
+      assert(Promise.resolve() == "[object Promise]",
+        "promise participates in abstract equality coercion");
+    "#
+  ));
+}
+
+#[test]
+fn private_fields_require_receiver_owned_brands() {
+  run(&format!(
+    r#"
+      {ASSERT}
+      class Counter {{
+        #value = 4;
+        read(receiver) {{ return receiver.#value; }}
+        write(receiver, value) {{ receiver.#value = value; }}
+      }}
+      const counter = new Counter();
+      const inherited = Object.create(counter);
+      let inheritedReadThrew = false;
+      let inheritedWriteThrew = false;
+      let unrelatedWriteThrew = false;
+      try {{ counter.read(inherited); }} catch (error) {{ inheritedReadThrew = error instanceof TypeError; }}
+      try {{ counter.write(inherited, 5); }} catch (error) {{ inheritedWriteThrew = error instanceof TypeError; }}
+      try {{ counter.write({{}}, 5); }} catch (error) {{ unrelatedWriteThrew = error instanceof TypeError; }}
+      assert(inheritedReadThrew && inheritedWriteThrew && unrelatedWriteThrew,
+        "private access rejects missing own brands");
+      counter.write(counter, 8);
+      assert(counter.read(counter) === 8, "private assignment retains valid branded access");
+    "#
+  ));
+}
+
+#[test]
+fn spread_array_literals_preserve_holes_and_array_prototype() {
+  run(&format!(
+    r#"
+      {ASSERT}
+      const leadingHole = [,...[]];
+      const middleHole = [1,,...[],2];
+      const spread = [...[]];
+      assert(leadingHole.length === 1 && !(0 in leadingHole),
+        "leading elision survives spread flattening");
+      assert(middleHole.length === 3 && !(1 in middleHole),
+        "middle elision survives spread flattening");
+      assert(spread instanceof Array && Object.getPrototypeOf(spread) === Array.prototype,
+        "spread literal uses the realm Array prototype");
     "#
   ));
 }

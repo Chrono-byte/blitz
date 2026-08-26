@@ -631,108 +631,94 @@ pub(crate) fn dynamic_import_value(
   // the selected compatibility profile, while its private records remain
   // inaccessible to source resolution in the child VM.
   let loader_handle = vm.module_loader_handle();
-  let mut import_vm = Vm::new_with_module_loader(vm.globals_rc(), loader_handle.clone());
-  import_vm.share_host_roots_from(vm);
-  let result = (|| -> Result<Value, Value> {
-    let entry = {
-      let mut loader = loader_handle.borrow_mut();
-      let entry = loader
-        .construct_from_importer(
-          &base_dir,
-          importer_specifier.as_deref(),
-          specifier_str.as_str_lossy(),
-        )
-        .map_err(|err| {
+  let globals = vm.globals_rc();
+  vm.queue_dynamic_import_job(move |vm| {
+    let mut import_vm = Vm::new_with_module_loader(Rc::clone(&globals), loader_handle.clone());
+    import_vm.share_host_roots_from(vm);
+    let result = (|| -> Result<Value, Value> {
+      let entry = {
+        let mut loader = loader_handle.borrow_mut();
+        let entry = loader
+          .construct_from_importer(
+            &base_dir,
+            importer_specifier.as_deref(),
+            specifier_str.as_str_lossy(),
+          )
+          .map_err(|err| {
+            host_error_object(
+              vm,
+              "SyntaxError",
+              &format!("dynamic import construct failed: {}", err),
+            )
+          })?;
+        loader.instantiate_all().map_err(|err| {
           host_error_object(
             vm,
             "SyntaxError",
-            &format!("dynamic import construct failed: {}", err),
+            &format!("dynamic import instantiate failed: {}", err),
           )
         })?;
-      loader.instantiate_all().map_err(|err| {
-        host_error_object(
-          vm,
-          "SyntaxError",
-          &format!("dynamic import instantiate failed: {}", err),
-        )
-      })?;
-      entry
-    };
-    let entry_path = entry.borrow().path.clone();
-    crate::module::evaluate_entry_shared(&loader_handle, &entry_path, &mut import_vm, false)
-      .map_err(|err| {
-        import_vm
-          .exceptions
-          .last_uncaught
-          .take()
-          .or_else(|| {
-            Some(host_error_object(
-              vm,
-              "TypeError",
-              &format!("dynamic import evaluate failed: {}", err),
-            ))
-          })
-          .unwrap_or(Value::String(
-            format!("dynamic import evaluate failed: {}", err).into(),
-          ))
-      })?;
+        entry
+      };
+      let entry_path = entry.borrow().path.clone();
+      crate::module::evaluate_entry_shared(&loader_handle, &entry_path, &mut import_vm, false)
+        .map_err(|err| {
+          import_vm
+            .exceptions
+            .last_uncaught
+            .take()
+            .unwrap_or_else(|| {
+              host_error_object(
+                vm,
+                "TypeError",
+                &format!("dynamic import evaluate failed: {}", err),
+              )
+            })
+        })?;
 
-    if !matches!(options, Value::Undefined) {
-      // Import options are evaluated by the compiler before this builtin is
-      // called. The runtime currently ignores their contents after those
-      // side effects; import attributes are not implemented yet.
-    }
-
-    let module_index = entry.borrow().module_index.ok_or_else(|| {
-      Value::String(
-        "dynamic import failed: module missing index"
-          .to_string()
-          .into(),
-      )
-    })?;
-    let exports = {
-      let loader = loader_handle.borrow();
-      loader
-        .map
-        .values()
-        .filter_map(|record| {
-          let record = record.borrow();
-          record
-            .module_index
-            .map(|index| (index, record.exports.clone()))
-        })
-        .collect::<Vec<_>>()
-    };
-    for (index, exports) in exports {
-      vm.ensure_module_exports(index, exports);
-    }
-    vm.module_namespace_value(module_index)
-      .ok_or_else(|| {
+      let module_index = entry.borrow().module_index.ok_or_else(|| {
         Value::String(
-          "dynamic import failed: module namespace missing"
+          "dynamic import failed: module missing index"
             .to_string()
             .into(),
         )
-      })
-  })();
+      })?;
+      let exports = {
+        let loader = loader_handle.borrow();
+        loader
+          .map
+          .values()
+          .filter_map(|record| {
+            let record = record.borrow();
+            record
+              .module_index
+              .map(|index| (index, record.exports.clone()))
+          })
+          .collect::<Vec<_>>()
+      };
+      for (index, exports) in exports {
+        vm.ensure_module_exports(index, exports);
+      }
+      vm.module_namespace_value(module_index)
+        .ok_or_else(|| {
+          Value::String(
+            "dynamic import failed: module namespace missing"
+              .to_string()
+              .into(),
+          )
+        })
+    })();
 
-  match result {
-    Ok(value) => {
-      let promise_for_fulfill = Rc::clone(&promise);
-      let value_for_fulfill = value;
-      vm.queue_dynamic_import_job(move |vm| {
-        fulfill_pending_promise(vm, &promise_for_fulfill, value_for_fulfill.clone());
-        Ok(())
-      });
+    match result {
+      Ok(value) => fulfill_pending_promise(vm, &promise, value),
+      Err(reason) => reject_pending_promise(vm, &promise, reason),
     }
-    Err(reason) => {
-      let promise_for_reject = Rc::clone(&promise);
-      let reason_for_reject = reason;
-      vm.queue_dynamic_import_job(move |vm| {
-        reject_pending_promise(vm, &promise_for_reject, reason_for_reject.clone());
-        Ok(())
-      });
-    }
+    Ok(())
+  });
+
+  if !matches!(options, Value::Undefined) {
+    // The options expression has already been evaluated. Import attributes
+    // are not implemented yet, so no option state needs to cross the job.
   }
 
   Ok(promise_value)

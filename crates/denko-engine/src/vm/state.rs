@@ -51,8 +51,11 @@ mod stack;
 mod yield_star;
 
 pub(crate) use frame::Frame;
-pub(crate) use generator_runner::GeneratorRunner;
-pub(crate) use handler::{FinallyHandlerRecord, HandlerRecord, RiscExecutionState, RiscRunOutcome};
+pub(crate) use generator_runner::{GeneratorRunner, GeneratorStatus};
+pub(crate) use handler::{
+  AwaitSettlement, FinallyHandlerRecord, HandlerRecord, PendingOperationStep, PendingRiscOperation,
+  RiscExecutionState, RiscRunOutcome,
+};
 pub(crate) use partial_descriptor::PartialDescriptor;
 pub(crate) use stack::{CallStack, HandlerStack};
 pub(crate) use yield_star::{YieldStarResume, YieldStarState};

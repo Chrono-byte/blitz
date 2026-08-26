@@ -32,9 +32,7 @@ impl Vm {
         .and_then(|v| v.as_ref())
         .is_some_and(|v| self.to_boolean(v));
       if !spread {
-        if let Some(v) = value {
-          flat.push(v);
-        }
+        flat.push(value.unwrap_or(Value::Uninitialized));
         continue;
       }
 

@@ -33,6 +33,45 @@ pub(crate) struct RiscExecutionState {
   pub(crate) registers: [Value; 16],
   pub(crate) spills: Vec<Value>,
   pub(crate) resume_register: Option<usize>,
+  pub(crate) pending_operation: Option<PendingRiscOperation>,
+  pub(crate) await_settlement: Option<AwaitSettlement>,
+}
+
+pub(crate) enum AwaitSettlement {
+  Fulfilled(Value),
+  Rejected(Value),
+}
+
+pub(crate) enum PendingRiscOperation {
+  NextNative {
+    destination: usize,
+    record: Value,
+  },
+  NextSync {
+    destination: usize,
+    record: Value,
+    done: bool,
+  },
+  CloseNative {
+    destination: usize,
+    record: Value,
+  },
+  CloseSync {
+    destination: usize,
+    record: Value,
+  },
+}
+
+pub(crate) enum PendingOperationStep {
+  Complete {
+    destination: usize,
+    value: Value,
+  },
+  Await {
+    value: Value,
+    operation: PendingRiscOperation,
+  },
+  Throw(Value),
 }
 
 impl RiscExecutionState {
@@ -46,7 +85,16 @@ impl RiscExecutionState {
       registers,
       spills: vec![Value::Undefined; spill_count],
       resume_register: None,
+      pending_operation: None,
+      await_settlement: None,
     }
+  }
+
+  pub(crate) fn settle_pending_operation(
+    &mut self,
+    settlement: AwaitSettlement,
+  ) {
+    self.await_settlement = Some(settlement);
   }
 
   pub(crate) fn resume_with(
@@ -57,6 +105,14 @@ impl RiscExecutionState {
       self.registers[register] = value;
     }
   }
+
+  pub(crate) fn clear(&mut self) {
+    self.registers.fill(Value::Undefined);
+    self.spills.clear();
+    self.resume_register = None;
+    self.pending_operation = None;
+    self.await_settlement = None;
+  }
 }
 
 /// Boundary reached while executing a persistent RISC state.
@@ -65,4 +121,5 @@ pub(crate) enum RiscRunOutcome {
   Return(Value),
   Yield(Value),
   YieldStar(Value),
+  Await(Value),
 }

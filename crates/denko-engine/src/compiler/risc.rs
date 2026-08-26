@@ -580,6 +580,8 @@ impl RiscBuilder {
         | Op::Ushr
         | Op::And
         | Op::Or
+        | Op::Increment
+        | Op::Decrement
         | Op::GetProperty
         | Op::DeleteProperty
         | Op::HasProperty
@@ -1050,6 +1052,8 @@ fn risc_executor_supports(op: Op) -> bool {
       | Op::Mod
       | Op::Pow
       | Op::Neg
+      | Op::Increment
+      | Op::Decrement
       | Op::BitNot
       | Op::BitAnd
       | Op::BitOr
@@ -1367,6 +1371,8 @@ fn operation_shape(
     | Op::Ushr
     | Op::And
     | Op::Or
+    | Op::Increment
+    | Op::Decrement
     | Op::GetProperty
     | Op::DeleteProperty
     | Op::HasProperty

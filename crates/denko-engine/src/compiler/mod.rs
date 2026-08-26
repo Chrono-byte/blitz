@@ -1420,14 +1420,14 @@ mod test {
       .code
       .iter()
       .filter_map(|b| Op::from_byte((*b & 0xFF) as u8))
-      .any(|op| matches!(op, Op::Add));
+      .any(|op| matches!(op, Op::Increment));
     let saw_set_local = chunk
       .code
       .iter()
       .filter_map(|b| Op::from_byte((*b & 0xFF) as u8))
       .any(|op| matches!(op, Op::StoreLocal));
 
-    assert!(saw_add, "expected i++ to emit Add");
+    assert!(saw_add, "expected i++ to emit Increment");
     assert!(saw_set_local, "expected i++ to emit StoreLocal");
   }
 

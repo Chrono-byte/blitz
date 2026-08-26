@@ -4,7 +4,9 @@ use crate::errors::RuntimeError;
 use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value};
 use crate::vm::Vm;
 use crate::vm::runtime::execution::{YieldStarStep, ensure_slot};
-use crate::vm::state::{YieldStarResume, YieldStarState};
+use crate::vm::state::{
+  AwaitSettlement, PendingOperationStep, PendingRiscOperation, YieldStarResume, YieldStarState,
+};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -108,6 +110,188 @@ fn mark_async_iterator_done(wrapper: &Rc<RefCell<ObjectData>>) {
 }
 
 impl Vm {
+  pub(super) fn begin_async_iterator_next(
+    &mut self,
+    iterator: &Value,
+    destination: usize,
+  ) -> Result<Option<PendingOperationStep>, RuntimeError> {
+    let Some(record) = async_iterator_record(iterator) else {
+      return Ok(None);
+    };
+    let result = self.call_value_with_this(&record.next, &record.iterator, &[])?;
+    if record.sync {
+      if !result.is_object() {
+        return Err(self.throw_type_error("Iterator result must be an object"));
+      }
+      let done =
+        self.get_property_host(&result, &PropertyKey::String("done".to_string().into()))?;
+      let done = self.to_boolean(&done);
+      let value =
+        self.get_property_host(&result, &PropertyKey::String("value".to_string().into()))?;
+      return Ok(Some(PendingOperationStep::Await {
+        value,
+        operation: PendingRiscOperation::NextSync {
+          destination,
+          record: iterator.clone(),
+          done,
+        },
+      }));
+    }
+    Ok(Some(PendingOperationStep::Await {
+      value: result,
+      operation: PendingRiscOperation::NextNative {
+        destination,
+        record: iterator.clone(),
+      },
+    }))
+  }
+
+  pub(super) fn begin_async_iterator_close(
+    &mut self,
+    iterator: &Value,
+    destination: usize,
+  ) -> Result<Option<PendingOperationStep>, RuntimeError> {
+    let Some(record) = async_iterator_record(iterator) else {
+      return Ok(None);
+    };
+    if record.done {
+      return Ok(Some(PendingOperationStep::Complete {
+        destination,
+        value: iterator.clone(),
+      }));
+    }
+    mark_async_iterator_done(&record.wrapper);
+    let return_fn = self.get_property_host(
+      &record.iterator,
+      &PropertyKey::String("return".to_string().into()),
+    )?;
+    if matches!(return_fn, Value::Undefined | Value::Null) {
+      return Ok(Some(PendingOperationStep::Complete {
+        destination,
+        value: iterator.clone(),
+      }));
+    }
+    if !Self::is_callable_value(&return_fn) {
+      return Err(self.throw_type_error("Iterator return is not callable"));
+    }
+    let result = self.call_value_with_this(&return_fn, &record.iterator, &[])?;
+    if record.sync {
+      if !result.is_object() {
+        return Err(self.throw_type_error("Iterator return result is not an object"));
+      }
+      let _done =
+        self.get_property_host(&result, &PropertyKey::String("done".to_string().into()))?;
+      let value =
+        self.get_property_host(&result, &PropertyKey::String("value".to_string().into()))?;
+      return Ok(Some(PendingOperationStep::Await {
+        value,
+        operation: PendingRiscOperation::CloseSync {
+          destination,
+          record: iterator.clone(),
+        },
+      }));
+    }
+    Ok(Some(PendingOperationStep::Await {
+      value: result,
+      operation: PendingRiscOperation::CloseNative {
+        destination,
+        record: iterator.clone(),
+      },
+    }))
+  }
+
+  pub(super) fn resume_pending_iterator_operation(
+    &mut self,
+    operation: PendingRiscOperation,
+    settlement: AwaitSettlement,
+  ) -> Result<PendingOperationStep, RuntimeError> {
+    if let (
+      PendingRiscOperation::NextSync {
+        record,
+        done: false,
+        ..
+      },
+      AwaitSettlement::Rejected(reason),
+    ) = (&operation, &settlement)
+    {
+      if let Some(record) = async_iterator_record(record) {
+        mark_async_iterator_done(&record.wrapper);
+        drop(self.close_iterator_in_fork(&record.iterator));
+      }
+      return Ok(PendingOperationStep::Throw(reason.clone()));
+    }
+    match (operation, settlement) {
+      (_, AwaitSettlement::Rejected(reason)) => Ok(PendingOperationStep::Throw(reason)),
+      (
+        PendingRiscOperation::NextNative {
+          destination,
+          record,
+        },
+        AwaitSettlement::Fulfilled(result),
+      ) => {
+        if !result.is_object() {
+          return Err(self.throw_type_error("Async iterator result must be an object"));
+        }
+        let done =
+          self.get_property_host(&result, &PropertyKey::String("done".to_string().into()))?;
+        let done = self.to_boolean(&done);
+        let value = if done {
+          Value::Undefined
+        } else {
+          self.get_property_host(&result, &PropertyKey::String("value".to_string().into()))?
+        };
+        if done && let Some(record) = async_iterator_record(&record) {
+          mark_async_iterator_done(&record.wrapper);
+        }
+        Ok(PendingOperationStep::Complete {
+          destination,
+          value: Self::make_iterator_result(value, done),
+        })
+      }
+      (
+        PendingRiscOperation::NextSync {
+          destination,
+          record,
+          done,
+        },
+        AwaitSettlement::Fulfilled(value),
+      ) => {
+        if done && let Some(record) = async_iterator_record(&record) {
+          mark_async_iterator_done(&record.wrapper);
+        }
+        Ok(PendingOperationStep::Complete {
+          destination,
+          value: Self::make_iterator_result(value, done),
+        })
+      }
+      (
+        PendingRiscOperation::CloseNative {
+          destination,
+          record,
+        },
+        AwaitSettlement::Fulfilled(result),
+      ) => {
+        if !result.is_object() {
+          return Err(self.throw_type_error("Async iterator return result is not an object"));
+        }
+        Ok(PendingOperationStep::Complete {
+          destination,
+          value: record,
+        })
+      }
+      (
+        PendingRiscOperation::CloseSync {
+          destination,
+          record,
+        },
+        AwaitSettlement::Fulfilled(_),
+      ) => Ok(PendingOperationStep::Complete {
+        destination,
+        value: record,
+      }),
+    }
+  }
+
   pub(crate) fn get_sync_iterator(
     &mut self,
     iterable: Value,

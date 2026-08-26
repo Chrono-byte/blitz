@@ -1,10 +1,14 @@
 #![allow(trivial_numeric_casts)]
 // SPDX-License-Identifier: MPL-2.0
 
+mod bindings;
+mod patterns;
+
 use crate::bytecode::{
   Chunk, Op, VerifiedChunk, decode_aux8, decode_compare_jump, decode_rd, decode_risc_aux16,
   decode_risc_cond_offset, decode_rs,
 };
+use crate::ecmascript::semantics::properties::own_property_descriptor;
 use crate::environment::EnvironmentRecord;
 use crate::errors::RuntimeError;
 use crate::gc;
@@ -15,7 +19,7 @@ use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, SharedValue, Val
 use crate::vm::runtime::property::{set_property, values_equal};
 use crate::vm::state::*;
 use js_string::JsStringBuilder;
-use num_traits::{ToPrimitive, Zero};
+use num_traits::{Signed, ToPrimitive, Zero};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -136,10 +140,59 @@ impl Vm {
       RiscRunOutcome::Yield(_) | RiscRunOutcome::YieldStar(_) => {
         Err(RuntimeError::from("yield outside generator execution"))
       }
+      RiscRunOutcome::Await(_) => Err(RuntimeError::from("await outside async execution")),
       RiscRunOutcome::Initialized => Err(RuntimeError::from(
         "generator boundary outside generator execution",
       )),
     }
+  }
+
+  pub(crate) fn discard_suspended_risc_activation(
+    &mut self,
+    state: &mut RiscExecutionState,
+  ) {
+    while let Some(frame) = self.execution.call_stack.pop() {
+      self.execution.active = frame.context;
+    }
+    self.execution.active.locals.clear();
+    self.execution.active.closure_env = None;
+    self.execution.active.slots = None;
+    self.execution.active.yield_star = None;
+    self.execution.active.lexical_env = Rc::clone(&self.realm_state.global_env);
+    self.exceptions.handlers.clear();
+    self.exceptions.pending = None;
+    self.exceptions.pending_frame_count = None;
+    self.exceptions.unwound_risc_state = None;
+    state.clear();
+  }
+
+  fn restore_pending_risc_exception(
+    &mut self,
+    registers: &mut [Value; 16],
+    spills: &mut Vec<Value>,
+    resume_register: &mut Option<usize>,
+    boundary_frame_count: usize,
+  ) -> bool {
+    if self.exceptions.pending.is_none()
+      || !self
+        .exceptions
+        .pending_frame_count
+        .is_some_and(|target| target >= boundary_frame_count)
+    {
+      return false;
+    }
+    if let Some(caller_state) = self.exceptions.unwound_risc_state.take() {
+      *registers = caller_state.registers;
+      *spills = caller_state.spills;
+      *resume_register = caller_state.resume_register;
+    }
+    self.exceptions.pending_frame_count = None;
+    registers[7] = self
+      .exceptions
+      .pending
+      .take()
+      .unwrap_or(Value::Undefined);
+    true
   }
 
   fn finish_risc_return(
@@ -181,14 +234,16 @@ impl Vm {
     stop_at_generator_init: bool,
   ) -> Result<RiscRunOutcome, RuntimeError> {
     self.execution.interpreter_depth += 1;
-    let result = if !stop_at_generator_init {
-      self.try_run_baseline(state)?.map_or_else(
-        || self.run_risc_state_inner(state, stop_at_generator_init),
-        Ok,
-      )
-    } else {
-      self.run_risc_state_inner(state, stop_at_generator_init)
-    };
+    let result = (|| {
+      if !stop_at_generator_init {
+        self.try_run_baseline(state)?.map_or_else(
+          || self.run_risc_state_inner(state, stop_at_generator_init),
+          Ok,
+        )
+      } else {
+        self.run_risc_state_inner(state, stop_at_generator_init)
+      }
+    })();
     self.process_baseline_requests();
     self.execution.interpreter_depth -= 1;
     result
@@ -216,9 +271,66 @@ impl Vm {
       registers[7] = exception;
     }
 
-    self.poll_execution_interrupt()?;
+    if let Err(error) = self.poll_execution_interrupt()
+      && !self.restore_pending_risc_exception(
+        registers,
+        spills,
+        &mut state.resume_register,
+        boundary_frame_count,
+      )
+    {
+      return Err(error);
+    }
 
     loop {
+      macro_rules! boundary_try {
+        ($operation:expr) => {
+          match $operation {
+            Ok(value) => value,
+            Err(error) => {
+              if self.restore_pending_risc_exception(
+                registers,
+                spills,
+                &mut state.resume_register,
+                boundary_frame_count,
+              ) {
+                continue;
+              }
+              return Err(error);
+            }
+          }
+        };
+      }
+
+      if let (Some(operation), Some(settlement)) = (
+        state.pending_operation.take(),
+        state.await_settlement.take(),
+      ) {
+        match boundary_try!(self.resume_pending_iterator_operation(operation, settlement)) {
+          PendingOperationStep::Complete { destination, value } => {
+            registers[destination] = value;
+          }
+          PendingOperationStep::Await { value, operation } => {
+            state.pending_operation = Some(operation);
+            return Ok(RiscRunOutcome::Await(value));
+          }
+          PendingOperationStep::Throw(reason) => {
+            let error = match self.throw_value(reason) {
+              Ok(()) => RuntimeError::from("JS exception"),
+              Err(error) => error,
+            };
+            if self.restore_pending_risc_exception(
+              registers,
+              spills,
+              &mut state.resume_register,
+              boundary_frame_count,
+            ) {
+              continue;
+            }
+            return Err(error);
+          }
+        }
+      }
       // Portable RISC remains unchanged; the VM quickens recognized sites once
       // per chunk and only invokes the matching guarded operation here.
       let action = if crate::trace::enabled() || !self.caches.optimized_execution_enabled {
@@ -227,7 +339,7 @@ impl Vm {
         self.site_action()
       };
       if let SiteAction::Region(region) = action
-        && self.try_native_region(region, registers)?
+        && boundary_try!(self.try_native_region(region, registers))
       {
         self.record_jit_backedge(self.execution.active.ip.saturating_sub(1));
         let cost = self
@@ -238,7 +350,7 @@ impl Vm {
         gc_poll_countdown = gc_poll_countdown.saturating_sub(cost);
         if gc_poll_countdown == 0 {
           gc_poll_countdown = GC_POLL_INTERVAL;
-          self.poll_execution_interrupt()?;
+          boundary_try!(self.poll_execution_interrupt());
         }
         continue;
       }
@@ -247,7 +359,7 @@ impl Vm {
         SiteAction::Interpret | SiteAction::Region(_) => QuickenedKind::Ordinary,
       };
       if quickened == QuickenedKind::NumericCompareBranch
-        && self.try_numeric_compare_branch_sequence(registers)?
+        && boundary_try!(self.try_numeric_compare_branch_sequence(registers))
       {
         if self.profiling.enabled {
           self.profiling.opcode_counts[Op::LoadLocal as usize] =
@@ -260,12 +372,12 @@ impl Vm {
         gc_poll_countdown = gc_poll_countdown.saturating_sub(3);
         if gc_poll_countdown == 0 {
           gc_poll_countdown = GC_POLL_INTERVAL;
-          self.poll_execution_interrupt()?;
+          boundary_try!(self.poll_execution_interrupt());
         }
         continue;
       }
       if quickened == QuickenedKind::SingleArgumentMethodCall
-        && self.try_single_argument_method_call_sequence(registers)?
+        && boundary_try!(self.try_single_argument_method_call_sequence(registers))
       {
         if self.profiling.enabled {
           for (op, count) in [
@@ -283,12 +395,12 @@ impl Vm {
         gc_poll_countdown = gc_poll_countdown.saturating_sub(12);
         if gc_poll_countdown == 0 {
           gc_poll_countdown = GC_POLL_INTERVAL;
-          self.poll_execution_interrupt()?;
+          boundary_try!(self.poll_execution_interrupt());
         }
         continue;
       }
       if quickened == QuickenedKind::NumericPropertyAdd
-        && self.try_numeric_property_add_sequence(registers)?
+        && boundary_try!(self.try_numeric_property_add_sequence(registers))
       {
         if self.profiling.enabled {
           for (op, count) in [
@@ -305,12 +417,12 @@ impl Vm {
         gc_poll_countdown = gc_poll_countdown.saturating_sub(9);
         if gc_poll_countdown == 0 {
           gc_poll_countdown = GC_POLL_INTERVAL;
-          self.poll_execution_interrupt()?;
+          boundary_try!(self.poll_execution_interrupt());
         }
         continue;
       }
       if quickened == QuickenedKind::NumericIncrement
-        && self.try_numeric_increment_sequence(registers)?
+        && boundary_try!(self.try_numeric_increment_sequence(registers))
       {
         if self.profiling.enabled {
           for (op, count) in [
@@ -328,12 +440,12 @@ impl Vm {
         gc_poll_countdown = gc_poll_countdown.saturating_sub(10);
         if gc_poll_countdown == 0 {
           gc_poll_countdown = GC_POLL_INTERVAL;
-          self.poll_execution_interrupt()?;
+          boundary_try!(self.poll_execution_interrupt());
         }
         continue;
       }
       if quickened == QuickenedKind::NumericAddLocal
-        && self.try_numeric_add_local_sequence(registers)?
+        && boundary_try!(self.try_numeric_add_local_sequence(registers))
       {
         if self.profiling.enabled {
           self.profiling.opcode_counts[Op::LoadLocal as usize] =
@@ -346,7 +458,7 @@ impl Vm {
         gc_poll_countdown = gc_poll_countdown.saturating_sub(4);
         if gc_poll_countdown == 0 {
           gc_poll_countdown = GC_POLL_INTERVAL;
-          self.poll_execution_interrupt()?;
+          boundary_try!(self.poll_execution_interrupt());
         }
         continue;
       }
@@ -675,6 +787,21 @@ impl Vm {
             };
           }
           Op::Typeof => registers[rd] = Value::String(registers[rs].type_name().to_string().into()),
+          Op::Increment | Op::Decrement => {
+            let value = self.to_primitive(&registers[rd], Some("number"))?;
+            registers[rd] = match value {
+              Value::BigInt(value) => Value::BigInt(if matches!(op, Op::Increment) {
+                value + 1
+              } else {
+                value - 1
+              }),
+              value => Value::Number(if matches!(op, Op::Increment) {
+                self.to_number_value(&value)? + 1.0
+              } else {
+                self.to_number_value(&value)? - 1.0
+              }),
+            };
+          }
           Op::Add => {
             let left = self.to_primitive(&registers[rd], None)?;
             let right = self.to_primitive(&registers[rs], None)?;
@@ -739,34 +866,61 @@ impl Vm {
             };
           }
           Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr | Op::Ushr => {
-            let left = registers[rd].clone();
-            let right = registers[rs].clone();
-            registers[rd] = match op {
-              Op::BitAnd => {
-                Value::Number((self.to_int32_value(&left)? & self.to_int32_value(&right)?) as f64)
+            let left = self.to_primitive(&registers[rd], Some("number"))?;
+            let right = self.to_primitive(&registers[rs], Some("number"))?;
+            registers[rd] = match (&left, &right) {
+              (Value::BigInt(left), Value::BigInt(right)) => match op {
+                Op::BitAnd => Value::BigInt(left & right),
+                Op::BitOr => Value::BigInt(left | right),
+                Op::BitXor => Value::BigInt(left ^ right),
+                Op::Shl | Op::Shr => {
+                  let reverse = right.is_negative();
+                  let shift = right
+                    .abs()
+                    .to_usize()
+                    .ok_or_else(|| self.throw_range_error("BigInt shift count is too large"))?;
+                  let shift_left = matches!(op, Op::Shl) != reverse;
+                  Value::BigInt(if shift_left {
+                    left << shift
+                  } else {
+                    left >> shift
+                  })
+                }
+                Op::Ushr => {
+                  return Err(self.throw_type_error("BigInts have no unsigned right shift"));
+                }
+                _ => unreachable!(),
+              },
+              (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
+                return Err(self.throw_type_error("Cannot mix BigInt and other types"));
               }
-              Op::BitOr => {
-                Value::Number((self.to_int32_value(&left)? | self.to_int32_value(&right)?) as f64)
-              }
-              Op::BitXor => {
-                Value::Number((self.to_int32_value(&left)? ^ self.to_int32_value(&right)?) as f64)
-              }
-              Op::Shl => Value::Number(
-                self
-                  .to_int32_value(&left)?
-                  .wrapping_shl(self.to_uint32_value(&right)? & 0x1f) as f64,
-              ),
-              Op::Shr => Value::Number(
-                self
-                  .to_int32_value(&left)?
-                  .wrapping_shr(self.to_uint32_value(&right)? & 0x1f) as f64,
-              ),
-              Op::Ushr => Value::Number(
-                self
-                  .to_uint32_value(&left)?
-                  .wrapping_shr(self.to_uint32_value(&right)? & 0x1f) as f64,
-              ),
-              _ => unreachable!(),
+              _ => match op {
+                Op::BitAnd => {
+                  Value::Number((self.to_int32_value(&left)? & self.to_int32_value(&right)?) as f64)
+                }
+                Op::BitOr => {
+                  Value::Number((self.to_int32_value(&left)? | self.to_int32_value(&right)?) as f64)
+                }
+                Op::BitXor => {
+                  Value::Number((self.to_int32_value(&left)? ^ self.to_int32_value(&right)?) as f64)
+                }
+                Op::Shl => Value::Number(
+                  self
+                    .to_int32_value(&left)?
+                    .wrapping_shl(self.to_uint32_value(&right)? & 0x1f) as f64,
+                ),
+                Op::Shr => Value::Number(
+                  self
+                    .to_int32_value(&left)?
+                    .wrapping_shr(self.to_uint32_value(&right)? & 0x1f) as f64,
+                ),
+                Op::Ushr => Value::Number(
+                  self
+                    .to_uint32_value(&left)?
+                    .wrapping_shr(self.to_uint32_value(&right)? & 0x1f) as f64,
+                ),
+                _ => unreachable!(),
+              },
             };
           }
           Op::And => {
@@ -815,16 +969,16 @@ impl Vm {
               0 => self.abstract_equality(left, right)?,
               1 => !self.abstract_equality(left, right)?,
               2 => self
-                .abstract_relational_comparison(left, right)?
+                .abstract_relational_comparison(left, right, true)?
                 .unwrap_or(false),
               3 => self
-                .abstract_relational_comparison(right, left)?
+                .abstract_relational_comparison(right, left, false)?
                 .is_some_and(|result| !result),
               4 => self
-                .abstract_relational_comparison(right, left)?
+                .abstract_relational_comparison(right, left, false)?
                 .unwrap_or(false),
               5 => self
-                .abstract_relational_comparison(left, right)?
+                .abstract_relational_comparison(left, right, true)?
                 .is_some_and(|result| !result),
               6 => values_equal(left, right),
               7 => !values_equal(left, right),
@@ -844,7 +998,8 @@ impl Vm {
             let key = registers[rs].clone();
             let key = self.to_property_key(&key)?;
             if matches!(&key, PropertyKey::Symbol(symbol) if symbol.is_private())
-              && !self.has_property_host(&object, &key)?
+              && (matches!(object, Value::Proxy(_))
+                || own_property_descriptor(&object, &key).is_none())
             {
               return Err(self.throw_type_error("Cannot access private member on this object"));
             }
@@ -854,6 +1009,12 @@ impl Vm {
             let receiver = registers[rd].clone();
             let key = self.to_property_key(&registers[rs])?;
             let value = registers[(decode_aux8(word) & 0xF) as usize].clone();
+            if matches!(&key, PropertyKey::Symbol(symbol) if symbol.is_private())
+              && (matches!(receiver, Value::Proxy(_))
+                || own_property_descriptor(&receiver, &key).is_none())
+            {
+              return Err(self.throw_type_error("Cannot access private member on this object"));
+            }
             if receiver.is_object() {
               self.set_property_with_receiver(&receiver, &key, value.clone(), &receiver)?;
             } else {
@@ -926,7 +1087,8 @@ impl Vm {
           Op::ArrayFromSpread => {
             let values = registers[rd].clone();
             let mask = registers[rs].clone();
-            registers[rd] = array_from_values(self.flatten_spread_values(values, mask)?);
+            let values = self.flatten_spread_values(values, mask)?;
+            registers[rd] = self.build_array_value(values)?;
           }
           Op::Spread => {
             let callee = registers[rd].clone();
@@ -1052,6 +1214,8 @@ impl Vm {
                   ),
                   spills: std::mem::replace(spills, vec![Value::Undefined; callee_spill_count]),
                   resume_register: state.resume_register,
+                  pending_operation: None,
+                  await_settlement: None,
                 };
                 self
                   .execution
@@ -1203,10 +1367,44 @@ impl Vm {
             registers[rd] = self.delete_identifier(registers[rd].clone())?;
           }
           Op::IteratorNext => {
-            registers[rd] = self.iterator_next(registers[rd].clone())?;
+            let iterator = registers[rd].clone();
+            if let Some(step) = self.begin_async_iterator_next(&iterator, rd)? {
+              match step {
+                PendingOperationStep::Complete { destination, value } => {
+                  registers[destination] = value;
+                }
+                PendingOperationStep::Await { value, operation } => {
+                  state.pending_operation = Some(operation);
+                  return Ok(Some(RiscRunOutcome::Await(value)));
+                }
+                PendingOperationStep::Throw(reason) => {
+                  self.throw_value(reason)?;
+                  return Err(RuntimeError::from("JS exception"));
+                }
+              }
+            } else {
+              registers[rd] = self.iterator_next(iterator)?;
+            }
           }
           Op::IteratorClose => {
-            registers[rd] = self.iterator_close(registers[rd].clone())?;
+            let iterator = registers[rd].clone();
+            if let Some(step) = self.begin_async_iterator_close(&iterator, rd)? {
+              match step {
+                PendingOperationStep::Complete { destination, value } => {
+                  registers[destination] = value;
+                }
+                PendingOperationStep::Await { value, operation } => {
+                  state.pending_operation = Some(operation);
+                  return Ok(Some(RiscRunOutcome::Await(value)));
+                }
+                PendingOperationStep::Throw(reason) => {
+                  self.throw_value(reason)?;
+                  return Err(RuntimeError::from("JS exception"));
+                }
+              }
+            } else {
+              registers[rd] = self.iterator_close(iterator)?;
+            }
           }
           Op::GetAsyncIterator => {
             registers[rd] = self.get_async_iterator(registers[rd].clone())?;
@@ -1252,7 +1450,8 @@ impl Vm {
             }
           }
           Op::AwaitPromise => {
-            registers[rd] = self.await_value_or_throw(registers[rd].clone())?;
+            state.resume_register = Some(rd);
+            return Ok(Some(RiscRunOutcome::Await(registers[rd].clone())));
           }
           Op::Return => {
             let result = registers[rd].clone();
@@ -1276,23 +1475,13 @@ impl Vm {
         Ok(None) if switched_risc_context => continue,
         Ok(None) => {}
         Err(_error)
-          if self.exceptions.pending.is_some()
-            && self
-              .exceptions
-              .pending_frame_count
-              .is_some_and(|target| target >= boundary_frame_count) =>
+          if self.restore_pending_risc_exception(
+            registers,
+            spills,
+            &mut state.resume_register,
+            boundary_frame_count,
+          ) =>
         {
-          if let Some(caller_state) = self.exceptions.unwound_risc_state.take() {
-            *registers = caller_state.registers;
-            *spills = caller_state.spills;
-            state.resume_register = caller_state.resume_register;
-          }
-          self.exceptions.pending_frame_count = None;
-          registers[7] = self
-            .exceptions
-            .pending
-            .take()
-            .unwrap_or(Value::Undefined);
           continue;
         }
         Err(error) => return Err(error),
@@ -3788,117 +3977,6 @@ impl Vm {
     })
   }
 
-  fn persist_root_bindings(&mut self) {
-    let Some(slots) = self.execution.active.slots.as_ref() else {
-      return;
-    };
-    let names = slots.names.clone();
-    let immutable = slots.immutable.clone();
-    let locals = self.execution.active.locals.clone();
-    let mut global_env = self.realm_state.global_env.borrow_mut();
-
-    for (index, name) in names.into_iter().enumerate() {
-      let (Some(name), Some(cell)) = (name, locals.get(index)) else {
-        continue;
-      };
-      let initialized = !matches!(*cell.borrow(), Value::Uninitialized);
-      if immutable.get(index).copied().unwrap_or(false) {
-        global_env.create_immutable_binding(name, Rc::clone(cell), initialized);
-      } else {
-        global_env.create_mutable_binding(name, Rc::clone(cell), initialized);
-      }
-    }
-  }
-
-  fn initialize_root_bindings(&mut self) {
-    let slot_names = self
-      .execution
-      .active
-      .chunk
-      .root_slot_names
-      .clone();
-    let slot_tdz = self
-      .execution
-      .active
-      .chunk
-      .root_lexical_tdz
-      .clone();
-    let slot_types = self
-      .execution
-      .active
-      .chunk
-      .root_slot_types
-      .clone();
-    let slot_immutable = self
-      .execution
-      .active
-      .chunk
-      .root_slot_immutable
-      .clone();
-    let slot_sloppy_immutable_silent = vec![false; slot_names.len()];
-    let slot_count = slot_names
-      .len()
-      .max(slot_tdz.len())
-      .max(slot_types.len())
-      .max(slot_immutable.len());
-    if slot_count == 0 {
-      return;
-    }
-
-    self.execution.active.locals =
-      std::iter::repeat_with(|| Rc::new(RefCell::new(Value::Undefined)))
-        .take(slot_count)
-        .collect();
-    for (idx, is_tdz) in slot_tdz.iter().copied().enumerate() {
-      if is_tdz && idx < self.execution.active.locals.len() {
-        *self.execution.active.locals[idx].borrow_mut() = Value::Uninitialized;
-      }
-    }
-
-    let root_env = Rc::new(RefCell::new(EnvironmentRecord::new(Some(Rc::clone(
-      &self.execution.active.lexical_env,
-    )))));
-    for (idx, maybe_name) in slot_names.iter().enumerate() {
-      if let Some(name) = maybe_name
-        && idx < self.execution.active.locals.len()
-      {
-        let initialized = !slot_tdz.get(idx).copied().unwrap_or(false);
-        if slot_immutable.get(idx).copied().unwrap_or(false) {
-          root_env.borrow_mut().create_immutable_binding(
-            name.clone(),
-            Rc::clone(&self.execution.active.locals[idx]),
-            initialized,
-          );
-        } else {
-          root_env.borrow_mut().create_mutable_binding(
-            name.clone(),
-            Rc::clone(&self.execution.active.locals[idx]),
-            initialized,
-          );
-        }
-        if initialized {
-          let value = self.execution.active.locals[idx].borrow().clone();
-          self
-            .realm_state
-            .globals
-            .borrow_mut()
-            .properties
-            .insert(
-              PropertyKey::String(name.clone().into()),
-              PropertyDescriptor::ordinary_data(value),
-            );
-        }
-      }
-    }
-    self.execution.active.lexical_env = root_env;
-    self.execution.active.slots = Some(SlotMetadata {
-      types: slot_types,
-      names: slot_names,
-      immutable: slot_immutable,
-      sloppy_immutable_silent: slot_sloppy_immutable_silent,
-    });
-  }
-
   // -----------------------------------------------------------------------
   // Opcode helpers (called from the main loop)
   // -----------------------------------------------------------------------
@@ -4001,289 +4079,7 @@ impl Vm {
 // Free functions
 // ---------------------------------------------------------------------------
 
-fn build_quickened_sites(
-  chunk: &Chunk,
-  native_regions_enabled: bool,
-) -> (Vec<SiteAction>, Vec<crate::vm::region::NativeRegion>) {
-  let code = &chunk.code;
-  fn matches_ops(
-    code: &[u32],
-    ip: usize,
-    ops: &[Op],
-  ) -> bool {
-    code
-      .get(ip..ip.saturating_add(ops.len()))
-      .is_some_and(|words| {
-        words
-          .iter()
-          .zip(ops)
-          .all(|(word, op)| (*word & 0xff) as u8 == *op as u8)
-      })
-  }
-
-  fn is_single_argument_method_call(
-    code: &[u32],
-    ip: usize,
-    ops: &[Op],
-  ) -> bool {
-    let Some(words) = code.get(ip..ip.saturating_add(ops.len())) else {
-      return false;
-    };
-    if !words
-      .iter()
-      .zip(ops)
-      .all(|(word, op)| (*word & 0xff) as u8 == *op as u8)
-      || decode_risc_aux16(words[10]) != 1
-    {
-      return false;
-    }
-
-    let receiver_register = decode_rd(words[0]);
-    let callee_register = decode_rd(words[3]);
-    let argument_register = decode_rd(words[6]);
-    let key_register = decode_rd(words[4]);
-    decode_rd(words[1]) == receiver_register
-      && decode_rd(words[2]) == receiver_register
-      && decode_rd(words[5]) == callee_register
-      && decode_rs(words[5]) == key_register
-      && decode_rd(words[7]) == 2
-      && decode_rs(words[7]) == argument_register
-      && decode_rd(words[8]) == 1
-      && decode_rs(words[8]) == receiver_register
-      && decode_rd(words[9]) == 0
-      && decode_rs(words[9]) == callee_register
-      && decode_rd(words[11]) == receiver_register
-      && decode_rs(words[11]) == 0
-      && decode_risc_aux16(words[2]) == decode_risc_aux16(words[1])
-      && decode_risc_aux16(words[3]) == decode_risc_aux16(words[1])
-  }
-
-  fn is_numeric_property_add(
-    code: &[u32],
-    ip: usize,
-    ops: &[Op],
-  ) -> bool {
-    let Some(words) = code.get(ip..ip.saturating_add(ops.len())) else {
-      return false;
-    };
-    if !words
-      .iter()
-      .zip(ops)
-      .all(|(word, op)| (*word & 0xff) as u8 == *op as u8)
-    {
-      return false;
-    }
-
-    let accumulator_register = decode_rd(words[0]);
-    let property_register = decode_rd(words[1]);
-    let key_register = decode_rd(words[2]);
-    let accumulator_slot = decode_risc_aux16(words[0]);
-    let temporary_slot = decode_risc_aux16(words[5]);
-    decode_rd(words[3]) == property_register
-      && decode_rs(words[3]) == key_register
-      && decode_rd(words[4]) == accumulator_register
-      && decode_rs(words[4]) == property_register
-      && decode_rd(words[5]) == accumulator_register
-      && decode_rd(words[6]) == property_register
-      && decode_rd(words[7]) == property_register
-      && decode_rd(words[8]) == property_register
-      && decode_risc_aux16(words[6]) == accumulator_slot
-      && decode_risc_aux16(words[7]) == temporary_slot
-      && decode_risc_aux16(words[8]) == accumulator_slot
-  }
-
-  fn is_numeric_compare(
-    code: &[u32],
-    ip: usize,
-    ops: &[Op],
-  ) -> bool {
-    let Some(words) = code.get(ip..ip.saturating_add(ops.len())) else {
-      return false;
-    };
-    if !words
-      .iter()
-      .zip(ops)
-      .all(|(word, op)| (*word & 0xff) as u8 == *op as u8)
-    {
-      return false;
-    }
-    let (_, left, right, _) = decode_compare_jump(words[2]);
-    left == decode_rd(words[0]) && right == decode_rd(words[1])
-  }
-
-  fn is_numeric_increment(
-    code: &[u32],
-    ip: usize,
-    ops: &[Op],
-  ) -> bool {
-    let Some(words) = code.get(ip..ip.saturating_add(ops.len())) else {
-      return false;
-    };
-    if !words
-      .iter()
-      .zip(ops)
-      .all(|(word, op)| (*word & 0xff) as u8 == *op as u8)
-    {
-      return false;
-    }
-    let source = decode_rd(words[0]);
-    let constant = decode_rd(words[3]);
-    let result = decode_rd(words[4]);
-    let target_slot = decode_risc_aux16(words[0]);
-    let temporary_slot = decode_risc_aux16(words[6]);
-    decode_rd(words[1]) == source
-      && decode_rs(words[1]) == source
-      && decode_rd(words[2]) == source
-      && decode_rs(words[2]) == source
-      && decode_rs(words[4]) == source
-      && decode_rd(words[5]) == result
-      && decode_rs(words[5]) == constant
-      && decode_rd(words[6]) == result
-      && decode_rd(words[7]) == result
-      && decode_rd(words[8]) == result
-      && decode_rd(words[9]) == result
-      && decode_risc_aux16(words[7]) == target_slot
-      && decode_risc_aux16(words[8]) == temporary_slot
-      && decode_risc_aux16(words[9]) == target_slot
-  }
-
-  fn is_numeric_add_local(
-    code: &[u32],
-    ip: usize,
-    ops: &[Op],
-  ) -> bool {
-    let Some(words) = code.get(ip..ip.saturating_add(ops.len())) else {
-      return false;
-    };
-    matches_ops(code, ip, ops)
-      && decode_rd(words[2]) == decode_rd(words[0])
-      && decode_rs(words[2]) == decode_rd(words[1])
-      && decode_rd(words[3]) == decode_rd(words[0])
-  }
-
-  const COMPARE: &[Op] = &[Op::LoadLocal, Op::Const, Op::CompareJump];
-  const METHOD_CALL: &[Op] = &[
-    Op::LoadLocal,
-    Op::StoreLocal,
-    Op::LoadLocal,
-    Op::LoadLocal,
-    Op::Const,
-    Op::GetProperty,
-    Op::LoadLocal,
-    Op::Move,
-    Op::Move,
-    Op::Move,
-    Op::CallBuiltin,
-    Op::Move,
-  ];
-  const PROPERTY_ADD: &[Op] = &[
-    Op::LoadLocal,
-    Op::LoadLocal,
-    Op::Const,
-    Op::GetProperty,
-    Op::Add,
-    Op::StoreLocal,
-    Op::LoadLocal,
-    Op::LoadLocal,
-    Op::StoreLocal,
-  ];
-  const INCREMENT: &[Op] = &[
-    Op::LoadLocal,
-    Op::Neg,
-    Op::Neg,
-    Op::Const,
-    Op::Move,
-    Op::Add,
-    Op::StoreLocal,
-    Op::LoadLocal,
-    Op::LoadLocal,
-    Op::StoreLocal,
-  ];
-  const ADD_LOCAL: &[Op] = &[Op::LoadLocal, Op::LoadLocal, Op::Add, Op::StoreLocal];
-
-  let mut regions = Vec::new();
-  let sites = (0..code.len())
-    .map(|ip| {
-      if native_regions_enabled
-        && let Some(region) = crate::vm::region::OwnMethodBinaryLoopRegion::decode(chunk, ip)
-        && let Some(id) = crate::vm::region::RegionId::from_index(regions.len())
-      {
-        regions.push(crate::vm::region::NativeRegion::OwnMethodBinaryLoop(region));
-        SiteAction::Region(id)
-      } else if native_regions_enabled
-        && let Some(region) = crate::vm::region::OwnMethodReadLoopRegion::decode(chunk, ip)
-        && let Some(id) = crate::vm::region::RegionId::from_index(regions.len())
-      {
-        regions.push(crate::vm::region::NativeRegion::OwnMethodReadLoop(region));
-        SiteAction::Region(id)
-      } else if native_regions_enabled
-        && let Some(region) = crate::vm::region::OwnMethodEffectLoopRegion::decode(chunk, ip)
-        && let Some(id) = crate::vm::region::RegionId::from_index(regions.len())
-      {
-        regions.push(crate::vm::region::NativeRegion::OwnMethodEffectLoop(region));
-        SiteAction::Region(id)
-      } else if native_regions_enabled
-        && let Some(region) = crate::vm::region::OwnMethodNumericLoopRegion::decode(chunk, ip)
-        && let Some(id) = crate::vm::region::RegionId::from_index(regions.len())
-      {
-        regions.push(crate::vm::region::NativeRegion::OwnMethodNumericLoop(
-          region,
-        ));
-        SiteAction::Region(id)
-      } else if native_regions_enabled
-        && let Some(region) = crate::vm::region::DenseMaskedReadRegion::decode(chunk, ip)
-        && let Some(id) = crate::vm::region::RegionId::from_index(regions.len())
-      {
-        regions.push(crate::vm::region::NativeRegion::DenseMaskedRead(region));
-        SiteAction::Region(id)
-      } else if native_regions_enabled
-        && let Some(region) =
-          crate::vm::region::NumericLoopRegion::decode_numeric_add_call(chunk, ip)
-        && let Some(id) = crate::vm::region::RegionId::from_index(regions.len())
-      {
-        regions.push(crate::vm::region::NativeRegion::NumericLoop(region));
-        SiteAction::Region(id)
-      } else if native_regions_enabled
-        && let Some(region) = crate::vm::region::NumericLoopRegion::decode_call(chunk, ip)
-        && let Some(id) = crate::vm::region::RegionId::from_index(regions.len())
-      {
-        regions.push(crate::vm::region::NativeRegion::NumericLoop(region));
-        SiteAction::Region(id)
-      } else if native_regions_enabled
-        && let Some(region) = crate::vm::region::NumericLoopRegion::decode_property(chunk, ip)
-        && let Some(id) = crate::vm::region::RegionId::from_index(regions.len())
-      {
-        regions.push(crate::vm::region::NativeRegion::NumericLoop(region));
-        SiteAction::Region(id)
-      } else if native_regions_enabled
-        && let Some(region) = crate::vm::region::NumericLoopRegion::decode_accumulator(chunk, ip)
-        && let Some(id) = crate::vm::region::RegionId::from_index(regions.len())
-      {
-        regions.push(crate::vm::region::NativeRegion::NumericLoop(region));
-        SiteAction::Region(id)
-      } else if native_regions_enabled
-        && let Some(region) = crate::vm::region::DenseArrayPushRegion::decode(chunk, ip)
-        && let Some(id) = crate::vm::region::RegionId::from_index(regions.len())
-      {
-        regions.push(crate::vm::region::NativeRegion::DenseArrayPush(region));
-        SiteAction::Region(id)
-      } else if is_numeric_compare(code, ip, COMPARE) {
-        SiteAction::Legacy(QuickenedKind::NumericCompareBranch)
-      } else if is_single_argument_method_call(code, ip, METHOD_CALL) {
-        SiteAction::Legacy(QuickenedKind::SingleArgumentMethodCall)
-      } else if is_numeric_property_add(code, ip, PROPERTY_ADD) {
-        SiteAction::Legacy(QuickenedKind::NumericPropertyAdd)
-      } else if is_numeric_increment(code, ip, INCREMENT) {
-        SiteAction::Legacy(QuickenedKind::NumericIncrement)
-      } else if is_numeric_add_local(code, ip, ADD_LOCAL) {
-        SiteAction::Legacy(QuickenedKind::NumericAddLocal)
-      } else {
-        SiteAction::Interpret
-      }
-    })
-    .collect();
-  (sites, regions)
-}
+use patterns::build_quickened_sites;
 
 /// Grow a locals vector so that `slot` is a valid index.
 #[inline(always)]

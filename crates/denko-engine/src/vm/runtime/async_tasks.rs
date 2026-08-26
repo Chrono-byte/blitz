@@ -19,7 +19,22 @@ use crate::vm::state::*;
 use std::cell::RefCell;
 use std::future::Future;
 use std::rc::Rc;
-use std::sync::Arc;
+
+struct AsyncExecution {
+  vm: Vm,
+  risc_state: RiscExecutionState,
+}
+
+struct AsyncRunner {
+  execution: Option<AsyncExecution>,
+  result_promise: Rc<RefCell<PromiseState>>,
+}
+
+enum AsyncResume {
+  Start,
+  Fulfill(Value),
+  Reject(Value),
+}
 
 impl Vm {
   /// Keep a weakly referenced object alive until the current job completes.
@@ -332,104 +347,234 @@ impl Vm {
       );
     }
 
-    let proto = Rc::clone(proto);
-    let env = Rc::clone(env);
-    let promise_for_job = Rc::clone(&promise);
-    let caller_chunk = Arc::clone(&self.execution.active.chunk);
-    let caller_ip = self.execution.active.ip;
-    let caller_locals = self.execution.active.locals.clone();
-    let caller_this = self.execution.active.this_value.clone();
-    let caller_env = self.execution.active.closure_env.clone();
-    let caller_lexical_env = Rc::clone(&self.execution.active.lexical_env);
-    let caller_slots = self.execution.active.slots.clone();
-    let caller_frame_len = self.execution.call_stack.len();
-    let caller_handlers = std::mem::take(&mut self.exceptions.handlers);
+    let mut child = self.fork_execution();
+    if let Err(error) = child.push_call_frame(proto, env, call_args, this_arg, callee.clone()) {
+      let reason = child
+        .exceptions
+        .last_uncaught
+        .take()
+        .unwrap_or_else(|| Value::String(error.to_string().into()));
+      reject_pending_promise(self, &promise, reason);
+      return Ok(self.promise_value(promise));
+    }
+    let risc_state = RiscExecutionState::new(
+      child.execution.active.this_value.clone(),
+      child.execution.active.chunk.risc_spill_count as usize,
+    );
+    let runner = Rc::new(RefCell::new(AsyncRunner {
+      execution: Some(AsyncExecution {
+        vm: child,
+        risc_state,
+      }),
+      result_promise: Rc::clone(&promise),
+    }));
+    Self::resume_async_runner(self, &runner, AsyncResume::Start);
+    Ok(self.promise_value(promise))
+  }
 
-    self.exceptions.last_uncaught = None;
-    let exec_result = (|| {
-      self.push_call_frame(&proto, &env, call_args, this_arg, callee.clone())?;
-      self
-        .run_risc_loop(false)
-        .and_then(|value| self.execute_return(value))
-    })();
-    self.maybe_collect_garbage_prototype();
+  fn resume_async_runner(
+    host: &mut Vm,
+    runner: &Rc<RefCell<AsyncRunner>>,
+    resume: AsyncResume,
+  ) {
+    let Some(mut execution) = runner.borrow_mut().execution.take() else {
+      return;
+    };
 
-    self.execution.active.chunk = caller_chunk;
-    self.execution.active.ip = caller_ip;
-    self.execution.active.locals = caller_locals;
-    self.execution.active.this_value = caller_this;
-    self.execution.active.closure_env = caller_env;
-    self.execution.active.lexical_env = caller_lexical_env;
-    self.execution.active.slots = caller_slots;
-    self
-      .execution
-      .call_stack
-      .truncate(caller_frame_len);
-    self.exceptions.handlers = caller_handlers;
-
-    self.run_microtasks_if_needed()?;
-    self.maybe_collect_garbage_prototype();
-    match exec_result {
-      Ok(result) => {
-        if crate::trace::enabled() {
-          eprintln!(
-            "[trace] invoke_async_closure queue_resolve promise={:p}",
-            Rc::as_ptr(&promise_for_job)
-          );
+    let run_result = match resume {
+      AsyncResume::Start => execution
+        .vm
+        .run_risc_state(&mut execution.risc_state, false),
+      AsyncResume::Fulfill(value) => {
+        if execution.risc_state.pending_operation.is_some() {
+          execution
+            .risc_state
+            .settle_pending_operation(AwaitSettlement::Fulfilled(value));
+        } else {
+          execution.risc_state.resume_with(value);
         }
-        let mut result_cell = Some(result);
-        self.queue_microtask(move |vm| {
-          if crate::trace::enabled() {
-            eprintln!(
-              "[trace] invoke_async_closure run_resolve promise={:p}",
-              Rc::as_ptr(&promise_for_job)
-            );
-          }
-          let value = result_cell
-            .take()
-            .expect("result_cell must be Some");
-          if crate::trace::enabled() {
-            crate::trace::value_string("[trace] invoke_async_closure resolve_value", &value);
-          }
-          if let Err(err) = resolve_promise_with_value(vm, &promise_for_job, value) {
-            if crate::trace::enabled() {
-              eprintln!("[trace] invoke_async_closure resolve_error: {}", err);
-            }
-            return Err(err);
-          }
-          Ok(())
-        });
+        execution
+          .vm
+          .run_risc_state(&mut execution.risc_state, false)
       }
-      Err(err) => {
-        if crate::trace::enabled() {
-          eprintln!(
-            "[trace] invoke_async_closure queue_reject promise={:p}",
-            Rc::as_ptr(&promise_for_job)
+      AsyncResume::Reject(reason) => {
+        if execution.risc_state.pending_operation.is_some() {
+          execution
+            .risc_state
+            .settle_pending_operation(AwaitSettlement::Rejected(reason));
+          execution
+            .vm
+            .run_risc_state(&mut execution.risc_state, false)
+        } else {
+          match execution.vm.throw_value(reason) {
+            Ok(()) => execution
+              .vm
+              .run_risc_state(&mut execution.risc_state, false),
+            Err(error) => Err(error),
+          }
+        }
+      }
+    };
+
+    host
+      .jobs
+      .microtasks
+      .append(&mut execution.vm.jobs.microtasks);
+    host
+      .jobs
+      .dynamic_imports
+      .append(&mut execution.vm.jobs.dynamic_imports);
+
+    match run_result {
+      Ok(RiscRunOutcome::Await(value)) => {
+        runner.borrow_mut().execution = Some(execution);
+        if let Err(error) = Self::queue_async_resume(host, runner, value) {
+          let result_promise = Rc::clone(&runner.borrow().result_promise);
+          reject_pending_promise(
+            host,
+            &result_promise,
+            Value::String(error.to_string().into()),
+          );
+          if let Some(mut execution) = runner.borrow_mut().execution.take() {
+            execution
+              .vm
+              .discard_suspended_risc_activation(&mut execution.risc_state);
+          }
+        }
+      }
+      Ok(RiscRunOutcome::Return(value)) => {
+        execution
+          .vm
+          .discard_suspended_risc_activation(&mut execution.risc_state);
+        let result_promise = Rc::clone(&runner.borrow().result_promise);
+        if let Err(error) = resolve_promise_with_value(host, &result_promise, value) {
+          reject_pending_promise(
+            host,
+            &result_promise,
+            Value::String(error.to_string().into()),
           );
         }
-        let reason = self
+      }
+      Ok(RiscRunOutcome::Initialized) => {
+        Self::reject_invalid_async_outcome(host, runner, &mut execution, "generator boundary");
+      }
+      Ok(RiscRunOutcome::Yield(_) | RiscRunOutcome::YieldStar(_)) => {
+        Self::reject_invalid_async_outcome(host, runner, &mut execution, "yield boundary");
+      }
+      Err(error) => {
+        let reason = execution
+          .vm
           .exceptions
           .last_uncaught
           .take()
-          .unwrap_or_else(|| Value::String(format!("{}", err).into()));
-        let mut reason_cell = Some(reason);
-        self.queue_microtask(move |vm| {
-          if crate::trace::enabled() {
-            eprintln!(
-              "[trace] invoke_async_closure run_reject promise={:p}",
-              Rc::as_ptr(&promise_for_job)
-            );
-          }
-          let reason = reason_cell
-            .take()
-            .expect("reason_cell must be Some");
-          reject_pending_promise(vm, &promise_for_job, reason);
+          .unwrap_or_else(|| Value::String(error.to_string().into()));
+        execution
+          .vm
+          .discard_suspended_risc_activation(&mut execution.risc_state);
+        let result_promise = Rc::clone(&runner.borrow().result_promise);
+        reject_pending_promise(host, &result_promise, reason);
+      }
+    }
+  }
+
+  fn reject_invalid_async_outcome(
+    host: &mut Vm,
+    runner: &Rc<RefCell<AsyncRunner>>,
+    execution: &mut AsyncExecution,
+    boundary: &str,
+  ) {
+    execution
+      .vm
+      .discard_suspended_risc_activation(&mut execution.risc_state);
+    let result_promise = Rc::clone(&runner.borrow().result_promise);
+    reject_pending_promise(
+      host,
+      &result_promise,
+      Value::String(format!("invalid {boundary} in async function").into()),
+    );
+  }
+
+  fn queue_async_resume(
+    host: &mut Vm,
+    runner: &Rc<RefCell<AsyncRunner>>,
+    awaited: Value,
+  ) -> Result<(), crate::errors::RuntimeError> {
+    let promise = crate::gc::track_promise(Rc::new(RefCell::new(PromiseState::Pending {
+      on_fulfilled: Vec::new(),
+      on_rejected: Vec::new(),
+    })));
+    resolve_promise_with_value(host, &promise, awaited)?;
+
+    let fulfilled_runner = Rc::clone(runner);
+    let on_fulfilled = Value::Builtin(Rc::new(move |vm, args| {
+      let offset = usize::from(args.len() > 1);
+      let value = args
+        .get(offset)
+        .cloned()
+        .unwrap_or(Value::Undefined);
+      Self::resume_async_runner(vm, &fulfilled_runner, AsyncResume::Fulfill(value));
+      Ok(Value::Undefined)
+    }));
+    let rejected_runner = Rc::clone(runner);
+    let on_rejected = Value::Builtin(Rc::new(move |vm, args| {
+      let offset = usize::from(args.len() > 1);
+      let reason = args
+        .get(offset)
+        .cloned()
+        .unwrap_or(Value::Undefined);
+      Self::resume_async_runner(vm, &rejected_runner, AsyncResume::Reject(reason));
+      Ok(Value::Undefined)
+    }));
+
+    enum PromiseReaction {
+      Pending,
+      Fulfilled(Value),
+      Rejected(Value),
+    }
+
+    let reaction = {
+      let mut state = promise.borrow_mut();
+      match &mut *state {
+        PromiseState::Pending {
+          on_fulfilled: fulfilled,
+          on_rejected: rejected,
+        } => {
+          fulfilled.push(on_fulfilled.clone());
+          rejected.push(on_rejected.clone());
+          PromiseReaction::Pending
+        }
+        PromiseState::Fulfilled(value) => PromiseReaction::Fulfilled(value.clone()),
+        PromiseState::Rejected { reason, handled } => {
+          *handled = true;
+          PromiseReaction::Rejected(reason.clone())
+        }
+      }
+    };
+
+    match reaction {
+      PromiseReaction::Pending => {}
+      PromiseReaction::Fulfilled(value) => {
+        host.queue_microtask(move |vm| {
+          vm.call_value_with_this(
+            &on_fulfilled,
+            &Value::Undefined,
+            std::slice::from_ref(&value),
+          )?;
+          Ok(())
+        });
+      }
+      PromiseReaction::Rejected(reason) => {
+        host.queue_microtask(move |vm| {
+          vm.call_value_with_this(
+            &on_rejected,
+            &Value::Undefined,
+            std::slice::from_ref(&reason),
+          )?;
           Ok(())
         });
       }
     }
-
-    Ok(self.promise_value(promise))
+    Ok(())
   }
 
   /// Run a blocking closure on the background runtime and wait for the result synchronously.

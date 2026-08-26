@@ -76,6 +76,41 @@ fn dynamic_import_reuses_the_realm_module_registry() {
 }
 
 #[test]
+fn dynamic_import_defers_construction_and_evaluation_to_its_job() {
+  let globals = Rc::new(RefCell::new(ObjectData::new()));
+  let mut vm = Vm::new(globals);
+  vm.module_loader_handle()
+    .borrow_mut()
+    .register_virtual_module(VirtualModule::javascript(
+      "test:deferred-dynamic-import",
+      crate::js!(
+        module,
+        "globalThis.dynamicImportEvaluated = true; export const value = 1;"
+      ),
+      SourceType::mjs(),
+      None,
+    ))
+    .expect("dynamic dependency registration succeeds");
+
+  let promise = crate::runtime_utils::dynamic_import_value(
+    &mut vm,
+    &[Value::String(
+      "test:deferred-dynamic-import".to_string().into(),
+    )],
+  )
+  .expect("dynamic import returns its promise");
+  assert!(matches!(promise, Value::Promise(..)));
+  assert_eq!(vm.get_global("dynamicImportEvaluated"), None);
+
+  vm.flush_microtasks()
+    .expect("dynamic import job completes");
+  assert_eq!(
+    vm.get_global("dynamicImportEvaluated"),
+    Some(Value::Bool(true))
+  );
+}
+
+#[test]
 fn generated_bytecode_virtual_modules_are_loaded_and_run() {
   let session = crate::parser::Parser::parse_source(crate::js!("globalThis.bytecodeResult = 7;"))
     .expect("bytecode source parses");

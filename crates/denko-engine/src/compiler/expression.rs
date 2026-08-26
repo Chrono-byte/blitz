@@ -1732,8 +1732,8 @@ impl super::Compiler {
             }
             self.emit_constant(Value::Number(1.0), LINE);
             match u.operator {
-              oast::UpdateOperator::Increment => self.emit(Op::Add, LINE),
-              oast::UpdateOperator::Decrement => self.emit(Op::Sub, LINE),
+              oast::UpdateOperator::Increment => self.emit(Op::Increment, LINE),
+              oast::UpdateOperator::Decrement => self.emit(Op::Decrement, LINE),
             }
             if u.prefix {
               self.emit(Op::Copy, LINE);
@@ -1755,8 +1755,8 @@ impl super::Compiler {
             }
             self.emit_constant(Value::Number(1.0), LINE);
             match u.operator {
-              oast::UpdateOperator::Increment => self.emit(Op::Add, LINE),
-              oast::UpdateOperator::Decrement => self.emit(Op::Sub, LINE),
+              oast::UpdateOperator::Increment => self.emit(Op::Increment, LINE),
+              oast::UpdateOperator::Decrement => self.emit(Op::Decrement, LINE),
             }
             self.emit_reference_set_current_value(object_slot, key_slot)?;
             if !u.prefix {
@@ -1778,8 +1778,8 @@ impl super::Compiler {
             }
             self.emit_constant(Value::Number(1.0), LINE);
             match u.operator {
-              oast::UpdateOperator::Increment => self.emit(Op::Add, LINE),
-              oast::UpdateOperator::Decrement => self.emit(Op::Sub, LINE),
+              oast::UpdateOperator::Increment => self.emit(Op::Increment, LINE),
+              oast::UpdateOperator::Decrement => self.emit(Op::Decrement, LINE),
             }
             self.emit_reference_set_current_value(object_slot, key_slot)?;
             if !u.prefix {

@@ -93,6 +93,8 @@ impl FrontendOp {
   pub(crate) const StoreSpill: Self = Self::Bytecode(BytecodeOp::StoreSpill);
   pub(crate) const BitNot: Self = Self::Bytecode(BytecodeOp::BitNot);
   pub(crate) const GetAsyncIterator: Self = Self::Bytecode(BytecodeOp::GetAsyncIterator);
+  pub(crate) const Increment: Self = Self::Bytecode(BytecodeOp::Increment);
+  pub(crate) const Decrement: Self = Self::Bytecode(BytecodeOp::Decrement);
 
   pub(crate) fn bytecode(self) -> Option<BytecodeOp> {
     match self {

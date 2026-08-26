@@ -6,9 +6,32 @@ use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value}
 use crate::vm::Vm;
 use crate::vm::runtime::property::{object_identity, values_equal};
 use num_bigint::BigInt as BigIntValue;
-use num_traits::{FromPrimitive, ToPrimitive};
+use num_traits::FromPrimitive;
 use std::cell::RefCell;
+use std::cmp::Ordering;
 use std::rc::Rc;
+
+fn compare_bigint_number(
+  integer: &BigIntValue,
+  number: f64,
+) -> Option<Ordering> {
+  if number.is_nan() {
+    return None;
+  }
+  if number == f64::INFINITY {
+    return Some(Ordering::Less);
+  }
+  if number == f64::NEG_INFINITY {
+    return Some(Ordering::Greater);
+  }
+
+  let truncated = BigIntValue::from_f64(number.trunc())?;
+  match integer.cmp(&truncated) {
+    Ordering::Equal if number.fract() > 0.0 => Some(Ordering::Less),
+    Ordering::Equal if number.fract() < 0.0 => Some(Ordering::Greater),
+    ordering => Some(ordering),
+  }
+}
 
 /// Convert a runtime value with ECMAScript `ToInt32` semantics.
 ///
@@ -209,8 +232,8 @@ impl PartialOrd for Value {
           a_num.partial_cmp(b)
         }
       }
-      (Value::BigInt(a), Value::Number(b)) => a.to_f64().and_then(|x| x.partial_cmp(b)),
-      (Value::Number(a), Value::BigInt(b)) => b.to_f64().and_then(|x| a.partial_cmp(&x)),
+      (Value::BigInt(a), Value::Number(b)) => compare_bigint_number(a, *b),
+      (Value::Number(a), Value::BigInt(b)) => compare_bigint_number(b, *a).map(Ordering::reverse),
       (Value::BigInt(a), Value::String(b)) => {
         parse_js_bigint_string(b).and_then(|bb| a.partial_cmp(&bb))
       }
@@ -673,6 +696,8 @@ impl Vm {
         | Value::Closure { .. }
         | Value::Builtin(_)
         | Value::BuiltinObject(_, _)
+        | Value::Proxy(_)
+        | Value::Promise(..)
     ) && matches!(
       y,
       Value::String(_) | Value::Number(_) | Value::BigInt(_) | Value::Symbol(_, _) | Value::Bool(_)
@@ -687,6 +712,8 @@ impl Vm {
         | Value::Closure { .. }
         | Value::Builtin(_)
         | Value::BuiltinObject(_, _)
+        | Value::Proxy(_)
+        | Value::Promise(..)
     ) && matches!(
       x,
       Value::String(_) | Value::Number(_) | Value::BigInt(_) | Value::Symbol(_, _) | Value::Bool(_)
@@ -698,16 +725,25 @@ impl Vm {
     Ok(false)
   }
 
-  /// ECMAScript Abstract Relational Comparison with left-to-right
-  /// `ToPrimitive` evaluation. An unordered comparison (for example one
-  /// involving `NaN`) produces `false`.
+  /// ECMAScript Abstract Relational Comparison. `left_first` controls the
+  /// observable `ToPrimitive` order without changing which operands are
+  /// compared as `left < right`.
   pub fn abstract_relational_comparison(
     &mut self,
     left: &Value,
     right: &Value,
+    left_first: bool,
   ) -> Result<Option<bool>, RuntimeError> {
-    let left = self.to_primitive(left, Some("number"))?;
-    let right = self.to_primitive(right, Some("number"))?;
+    let (left, right) = if left_first {
+      (
+        self.to_primitive(left, Some("number"))?,
+        self.to_primitive(right, Some("number"))?,
+      )
+    } else {
+      let right = self.to_primitive(right, Some("number"))?;
+      let left = self.to_primitive(left, Some("number"))?;
+      (left, right)
+    };
 
     if let (Value::String(left), Value::String(right)) = (&left, &right) {
       return Ok(Some(left.cmp(right).is_lt()));

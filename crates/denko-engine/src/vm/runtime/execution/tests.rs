@@ -7183,9 +7183,9 @@ mod test {
           } catch (error) {
             caught = error === "rejected";
           }
+          globalThis.result = returnCount + "," + caught;
         }
         run();
-        globalThis.result = returnCount + "," + caught;
       "#
     ));
 
@@ -7221,15 +7221,61 @@ mod test {
             seen = value;
             break;
           }
+          globalThis.result = nextCount + "," + returnCount + "," + seen;
         }
         run();
-        globalThis.result = nextCount + "," + returnCount + "," + seen;
       "#
     ));
 
     assert_eq!(
       vm.get_global("result"),
       Some(Value::String("1,1,42".to_string().into()))
+    );
+  }
+
+  #[test]
+  fn for_await_suspends_and_observes_iterator_result_getters_once() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        let phase = "";
+        let doneReads = 0;
+        let valueReads = 0;
+        let calls = 0;
+        const asyncIterable = {
+          [Symbol.asyncIterator]() { return this; },
+          next() {
+            calls += 1;
+            if (calls === 1) {
+              return Promise.resolve({
+                get done() { doneReads += 1; return false; },
+                get value() { valueReads += 1; return 7; }
+              });
+            }
+            return Promise.resolve({
+              get done() { doneReads += 1; return true; },
+              get value() { valueReads += 1; return 99; }
+            });
+          }
+        };
+        async function run() {
+          phase += "a";
+          for await (const value of asyncIterable) phase += value;
+          phase += "b";
+          globalThis.asyncIteratorResult = phase + "," + doneReads + "," + valueReads;
+        }
+        run();
+        phase += "c";
+        globalThis.asyncIteratorImmediate = phase;
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("asyncIteratorImmediate"),
+      Some(Value::String("ac".to_string().into()))
+    );
+    assert_eq!(
+      vm.get_global("asyncIteratorResult"),
+      Some(Value::String("ac7b,2,1".to_string().into()))
     );
   }
 

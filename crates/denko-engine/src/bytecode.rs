@@ -1186,10 +1186,14 @@ pub enum Op {
   BitNot,
   /// GetAsyncIterator: acquire an async iterator record for rd.
   GetAsyncIterator,
+  /// Increment: apply ToNumeric and add the matching numeric unit.
+  Increment,
+  /// Decrement: apply ToNumeric and subtract the matching numeric unit.
+  Decrement,
 }
 
 /// Total number of opcode variants.
-pub const OP_COUNT: usize = Op::GetAsyncIterator as usize + 1;
+pub const OP_COUNT: usize = Op::Decrement as usize + 1;
 
 impl Op {
   /// Converts a byte to an Op if valid, returns None otherwise
@@ -1295,6 +1299,8 @@ impl Op {
       Op::StoreSpill => "StoreSpill",
       Op::BitNot => "BitNot",
       Op::GetAsyncIterator => "GetAsyncIterator",
+      Op::Increment => "Increment",
+      Op::Decrement => "Decrement",
     }
   }
 
@@ -1408,6 +1414,8 @@ impl TryFrom<u8> for Op {
       77 => Ok(StoreSpill),
       78 => Ok(BitNot),
       79 => Ok(GetAsyncIterator),
+      80 => Ok(Increment),
+      81 => Ok(Decrement),
       _ => Err(()),
     }
   }
@@ -1465,8 +1473,8 @@ mod tests {
 
   #[test]
   fn op_round_trip() {
-    assert_eq!(OP_COUNT, Op::GetAsyncIterator as usize + 1);
-    for i in 0u8..=Op::GetAsyncIterator as u8 {
+    assert_eq!(OP_COUNT, Op::Decrement as usize + 1);
+    for i in 0u8..=Op::Decrement as u8 {
       let Ok(op) = Op::try_from(i) else {
         assert!((50..=53).contains(&i), "unexpected opcode gap at {i}");
         continue;
