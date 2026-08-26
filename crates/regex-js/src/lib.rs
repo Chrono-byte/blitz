@@ -12,6 +12,8 @@
 mod analysis;
 mod ast;
 mod canonical;
+#[allow(dead_code, reason = "compiled execution lands in the next barrier")]
+mod compiler;
 mod error;
 mod flags;
 #[allow(

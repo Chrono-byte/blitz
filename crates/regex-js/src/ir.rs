@@ -32,6 +32,7 @@ pub(crate) enum IrRejection {
   Lookahead,
   WordBoundary,
   Backreference,
+  NullableRepeat,
   ProgramTooLarge,
 }
 
