@@ -1,0 +1,290 @@
+// SPDX-License-Identifier: MPL-2.0
+
+use super::*;
+use oxc_syntax::number::NumberBase;
+
+impl Compiler {
+  pub(super) fn validate_literal_early_errors(
+    &self,
+    expr: &oast::Expression,
+  ) -> Result<(), crate::errors::CompilerError> {
+    match expr {
+      oast::Expression::NumericLiteral(n) if self.strict_context => {
+        let raw = n.raw.as_ref().map_or_else(
+          || n.span.source_text(self.source_text.as_str()),
+          |raw| raw.as_str(),
+        );
+        let leading_zero = {
+          let mut bytes = raw.bytes();
+          matches!(
+            (bytes.next(), bytes.next()),
+            (Some(b'0'), Some(b'0'..=b'9'))
+          )
+        };
+        if matches!(n.base, NumberBase::Octal) && leading_zero {
+          return Err(crate::errors::CompilerError::from(
+            "SyntaxError: legacy octal numeric literal in strict mode",
+          ));
+        }
+        if matches!(n.base, NumberBase::Decimal | NumberBase::Float) && leading_zero {
+          return Err(crate::errors::CompilerError::from(
+            "SyntaxError: leading zero numeric literal in strict mode",
+          ));
+        }
+      }
+      oast::Expression::StringLiteral(s) if self.strict_context => {
+        let raw = s.span.source_text(self.source_text.as_str());
+        let bytes = raw.as_bytes();
+        for idx in 0..bytes.len().saturating_sub(1) {
+          if bytes[idx] == b'\\' && matches!(bytes[idx + 1], b'0'..=b'7') {
+            return Err(crate::errors::CompilerError::from(
+              "SyntaxError: legacy octal escape sequence in strict mode",
+            ));
+          }
+        }
+      }
+      _ => {}
+    }
+    Ok(())
+  }
+
+  pub(super) fn alloc_temp_local(
+    &mut self,
+    prefix: &str,
+  ) -> usize {
+    let function_scope = self.current_function_scope_index();
+    self.add_local_in_scope(
+      function_scope,
+      format!("\0{}_{}", prefix, self.locals.len()),
+      None,
+      false,
+    )
+  }
+
+  pub(super) fn alloc_reusable_temp_local(
+    &mut self,
+    name: &str,
+  ) -> usize {
+    let name = format!("\0reusable_{name}");
+    self
+      .locals
+      .iter()
+      .position(|local| local == &name)
+      .unwrap_or_else(|| self.add_local_with_mirror(name, None, false))
+  }
+
+  pub(super) fn emit_super_property_get_static(
+    &mut self,
+    property: &str,
+    preserve_receiver: bool,
+  ) -> Result<(), crate::errors::CompilerError> {
+    if !self.allow_super {
+      return Err(crate::errors::CompilerError::from(
+        "SyntaxError: super used outside of a method",
+      ));
+    }
+    self.emit(Op::GetThis, LINE);
+    self.emit(Op::Copy, LINE);
+    self.emit_constant(Value::String(property.to_string().into()), LINE);
+    self.emit(Op::GetSuperProperty, LINE);
+    if !preserve_receiver {
+      self.emit(Op::Exchange, LINE);
+      self.emit(Op::Discard, LINE);
+    }
+    Ok(())
+  }
+
+  pub(super) fn emit_super_property_get_computed(
+    &mut self,
+    key_expr: &oast::Expression,
+    preserve_receiver: bool,
+  ) -> Result<(), crate::errors::CompilerError> {
+    if !self.allow_super {
+      return Err(crate::errors::CompilerError::from(
+        "SyntaxError: super used outside of a method",
+      ));
+    }
+    self.emit(Op::GetThis, LINE);
+    self.emit(Op::Copy, LINE);
+    self.compile_expr_oast(key_expr)?;
+    self.emit(Op::GetSuperProperty, LINE);
+    if !preserve_receiver {
+      self.emit(Op::Exchange, LINE);
+      self.emit(Op::Discard, LINE);
+    }
+    Ok(())
+  }
+
+  pub(super) fn emit_super_property_set_static(
+    &mut self,
+    property: &str,
+    value_expr: &oast::Expression,
+  ) -> Result<(), crate::errors::CompilerError> {
+    if !self.allow_super {
+      return Err(crate::errors::CompilerError::from(
+        "SyntaxError: super used outside of a method",
+      ));
+    }
+    self.emit(Op::GetThis, LINE);
+    self.emit(Op::Copy, LINE);
+    self.emit_constant(Value::String(property.to_string().into()), LINE);
+    self.compile_expr_oast(value_expr)?;
+    self.emit(Op::SetSuperProperty, LINE);
+    self.emit(Op::Exchange, LINE);
+    self.emit(Op::Discard, LINE);
+    Ok(())
+  }
+
+  pub(super) fn emit_super_property_set_computed(
+    &mut self,
+    key_expr: &oast::Expression,
+    value_expr: &oast::Expression,
+  ) -> Result<(), crate::errors::CompilerError> {
+    if !self.allow_super {
+      return Err(crate::errors::CompilerError::from(
+        "SyntaxError: super used outside of a method",
+      ));
+    }
+    self.emit(Op::GetThis, LINE);
+    self.emit(Op::Copy, LINE);
+    self.compile_expr_oast(key_expr)?;
+    self.compile_expr_oast(value_expr)?;
+    self.emit(Op::SetSuperProperty, LINE);
+    self.emit(Op::Exchange, LINE);
+    self.emit(Op::Discard, LINE);
+    Ok(())
+  }
+
+  pub(super) fn compile_static_member_reference(
+    &mut self,
+    m: &oast::StaticMemberExpression<'_>,
+  ) -> Result<(usize, usize), crate::errors::CompilerError> {
+    self.compile_expr_oast(&m.object)?;
+    let object_slot = self.alloc_temp_local("ref_obj");
+    self.emit(Op::StoreLocal, LINE);
+    self.emit_byte(
+      u8::try_from(object_slot).expect("object_slot fits in u8"),
+      LINE,
+    );
+
+    self.emit_constant(Value::String(m.property.name.to_string().into()), LINE);
+    let key_slot = self.alloc_temp_local("ref_key");
+    self.emit(Op::StoreLocal, LINE);
+    self.emit_byte(u8::try_from(key_slot).expect("key_slot fits in u8"), LINE);
+    Ok((object_slot, key_slot))
+  }
+
+  pub(super) fn compile_computed_member_reference(
+    &mut self,
+    m: &oast::ComputedMemberExpression<'_>,
+  ) -> Result<(usize, usize), crate::errors::CompilerError> {
+    self.compile_expr_oast(&m.object)?;
+    let object_slot = self.alloc_temp_local("ref_obj");
+    self.emit(Op::StoreLocal, LINE);
+    self.emit_byte(self.slot_to_u8(object_slot)?, LINE);
+
+    self.compile_expr_oast(&m.expression)?;
+    let key_slot = self.alloc_temp_local("ref_key");
+    self.emit(Op::StoreLocal, LINE);
+    self.emit_byte(self.slot_to_u8(key_slot)?, LINE);
+    Ok((object_slot, key_slot))
+  }
+
+  pub(super) fn emit_reference_get(
+    &mut self,
+    object_slot: usize,
+    key_slot: usize,
+  ) -> Result<(), crate::errors::CompilerError> {
+    self.emit(Op::LoadLocal, LINE);
+    self.emit_byte(self.slot_to_u8(object_slot)?, LINE);
+    self.emit(Op::LoadLocal, LINE);
+    self.emit_byte(self.slot_to_u8(key_slot)?, LINE);
+    self.emit(Op::GetProperty, LINE);
+    Ok(())
+  }
+
+  pub(super) fn emit_reference_set_current_value(
+    &mut self,
+    object_slot: usize,
+    key_slot: usize,
+  ) -> Result<(), crate::errors::CompilerError> {
+    let value_slot = self.alloc_temp_local("ref_value");
+    self.emit(Op::StoreLocal, LINE);
+    self.emit_byte(
+      u8::try_from(value_slot).expect("value_slot fits in u8"),
+      LINE,
+    );
+    self.emit(Op::LoadLocal, LINE);
+    self.emit_byte(
+      u8::try_from(object_slot).expect("object_slot fits in u8"),
+      LINE,
+    );
+    self.emit(Op::LoadLocal, LINE);
+    self.emit_byte(u8::try_from(key_slot).expect("key_slot fits in u8"), LINE);
+    self.emit(Op::LoadLocal, LINE);
+    self.emit_byte(
+      u8::try_from(value_slot).expect("value_slot fits in u8"),
+      LINE,
+    );
+    self.emit(Op::SetProperty, LINE);
+    Ok(())
+  }
+
+  pub(super) fn try_emit_compare_jump_if_false(
+    &mut self,
+    expr: &oast::Expression,
+  ) -> Result<Option<usize>, crate::errors::CompilerError> {
+    use oxc_ast::ast::Expression as OExpr;
+    let OExpr::BinaryExpression(binary) = expr else {
+      return Ok(None);
+    };
+
+    // CompareJump cond_type values:
+    // 0=Eq, 1=Neq, 2=Lt, 3=Lte, 4=Gt, 5=Gte, 6=StrictEq, 7=StrictNeq
+    let cond_type = match binary.operator {
+      oast::BinaryOperator::Equality => 0_i32,
+      oast::BinaryOperator::Inequality => 1_i32,
+      oast::BinaryOperator::LessThan => 2_i32,
+      oast::BinaryOperator::LessEqualThan => 3_i32,
+      oast::BinaryOperator::GreaterThan => 4_i32,
+      oast::BinaryOperator::GreaterEqualThan => 5_i32,
+      oast::BinaryOperator::StrictEquality => 6_i32,
+      oast::BinaryOperator::StrictInequality => 7_i32,
+      _ => return Ok(None),
+    };
+
+    self.compile_expr_oast(&binary.left)?;
+    self.compile_expr_oast(&binary.right)?;
+    // Payload layout for CompareJump:
+    // - payload byte 0: cond_type (3 bits, rest unused)
+    // - payload bytes 1..2: relative jump offset placeholder (patched later)
+    self.emit_with_payload(Op::CompareJump, cond_type as u32, LINE);
+
+    // Return the instruction index containing the compare+jump payload so
+    // callers can patch the branch offset while preserving cond_type.
+    let patch_addr = self.current_ip().saturating_sub(1);
+
+    Ok(Some(patch_addr))
+  }
+
+  pub(super) fn emit_compound_assignment_op(
+    &mut self,
+    op: oast::AssignmentOperator,
+  ) {
+    match op {
+      oast::AssignmentOperator::Addition => self.emit(Op::Add, LINE),
+      oast::AssignmentOperator::Subtraction => self.emit(Op::Sub, LINE),
+      oast::AssignmentOperator::Multiplication => self.emit(Op::Mul, LINE),
+      oast::AssignmentOperator::Division => self.emit(Op::Div, LINE),
+      oast::AssignmentOperator::Remainder => self.emit(Op::Mod, LINE),
+      oast::AssignmentOperator::Exponential => self.emit(Op::Pow, LINE),
+      oast::AssignmentOperator::BitwiseAnd => self.emit(Op::BitAnd, LINE),
+      oast::AssignmentOperator::BitwiseOR => self.emit(Op::BitOr, LINE),
+      oast::AssignmentOperator::BitwiseXOR => self.emit(Op::BitXor, LINE),
+      oast::AssignmentOperator::ShiftLeft => self.emit(Op::Shl, LINE),
+      oast::AssignmentOperator::ShiftRight => self.emit(Op::Shr, LINE),
+      oast::AssignmentOperator::ShiftRightZeroFill => self.emit(Op::Ushr, LINE),
+      _ => {}
+    }
+  }
+}
