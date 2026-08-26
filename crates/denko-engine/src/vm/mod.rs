@@ -14,6 +14,7 @@
 //! // construct a VM and run bytecode
 //! ```
 
+mod interrupt;
 /// VM-owned profiling and future native compilation metadata.
 mod jit;
 mod region;
@@ -21,5 +22,6 @@ mod region;
 pub mod runtime;
 pub mod state;
 
+pub use interrupt::{InterruptRequestError, VmInterruptHandle};
 pub use runtime::same_value;
 pub use state::{HostRoot, Vm};

@@ -43,6 +43,76 @@ mod test {
   use super::*;
 
   #[test]
+  fn host_interrupt_is_not_a_catchable_javascript_exception() {
+    let session = Parser::parse_source(
+      "globalThis.interrupt_caught = false; try { globalThis.interrupt_started = true; } catch (_) { globalThis.interrupt_caught = true; }",
+    )
+    .expect("parse ok");
+    let chunk = compiler::compile_session(&session).expect("compile ok");
+    let globals = test_globals();
+    let mut vm = Vm::new(globals);
+    vm.interrupt_handle()
+      .request_interrupt()
+      .expect("live VM");
+
+    let error = vm
+      .run(chunk)
+      .expect_err("interrupt should terminate execution");
+    assert!(error.is_execution_interrupted());
+    assert_eq!(vm.get_global("interrupt_started"), None);
+    assert_eq!(vm.get_global("interrupt_caught"), None);
+  }
+
+  #[test]
+  fn asynchronous_interrupt_stops_portable_execution() {
+    let session = Parser::parse_source(
+      "let interrupt_total = 0; for (let i = 0; i < 10000000; i += 1) interrupt_total += i; globalThis.interrupt_completed = true;",
+    )
+    .expect("parse ok");
+    let chunk = compiler::compile_session(&session).expect("compile ok");
+    let globals = test_globals();
+    let mut vm = Vm::new(globals);
+    vm.caches.optimized_execution_enabled = false;
+    let interrupt = vm.interrupt_handle();
+    let requester = std::thread::spawn(move || {
+      std::thread::sleep(std::time::Duration::from_millis(1));
+      interrupt.request_interrupt().expect("live VM")
+    });
+
+    let error = vm
+      .run(chunk)
+      .expect_err("interrupt should terminate execution");
+    requester.join().expect("interrupt requester");
+    assert!(error.is_execution_interrupted());
+    assert_eq!(vm.get_global("interrupt_completed"), None);
+  }
+
+  #[cfg(all(unix, target_arch = "x86_64"))]
+  #[test]
+  fn asynchronous_interrupt_stops_a_hot_native_numeric_loop() {
+    let session = Parser::parse_source(
+      "function add(left, right) { return left + right; } let total = 0; for (let i = 0; i < 100000000; i += 1) total = add(total, 1); globalThis.native_interrupt_completed = true;",
+    )
+    .expect("parse ok");
+    let chunk = compiler::compile_session(&session).expect("compile ok");
+    let globals = test_globals();
+    let mut vm = Vm::new(globals);
+    let interrupt = vm.interrupt_handle();
+    let requester = std::thread::spawn(move || {
+      std::thread::sleep(std::time::Duration::from_millis(5));
+      interrupt.request_interrupt().expect("live VM")
+    });
+
+    let error = vm
+      .run(chunk)
+      .expect_err("interrupt should terminate native execution");
+    requester.join().expect("interrupt requester");
+    assert!(error.is_execution_interrupted());
+    assert!(vm.profiling.jit_stats.native_loop_iterations > 0);
+    assert_eq!(vm.get_global("native_interrupt_completed"), None);
+  }
+
+  #[test]
   fn ordinary_function_call_enters_baseline_and_returns() {
     let (mut vm, _) = run_script("function answer() { return 42; }");
     let function = vm.get_global("answer").expect("answer function");

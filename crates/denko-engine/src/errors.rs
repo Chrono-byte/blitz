@@ -99,6 +99,18 @@ pub struct RuntimeError {
   pub message: String,
 }
 
+impl RuntimeError {
+  /// Construct the host-control error returned after an interrupt request.
+  pub fn execution_interrupted() -> Self {
+    Self::from("execution interrupted")
+  }
+
+  /// Return whether this error represents host-requested execution termination.
+  pub fn is_execution_interrupted(&self) -> bool {
+    self.message == "execution interrupted"
+  }
+}
+
 #[derive(Debug, Error)]
 #[error("Module loader error: {message}")]
 /// Errors emitted by the module loader when resolving modules.

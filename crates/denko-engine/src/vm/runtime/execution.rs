@@ -216,6 +216,8 @@ impl Vm {
       registers[7] = exception;
     }
 
+    self.poll_execution_interrupt()?;
+
     loop {
       // Portable RISC remains unchanged; the VM quickens recognized sites once
       // per chunk and only invokes the matching guarded operation here.
@@ -236,6 +238,7 @@ impl Vm {
         gc_poll_countdown = gc_poll_countdown.saturating_sub(cost);
         if gc_poll_countdown == 0 {
           gc_poll_countdown = GC_POLL_INTERVAL;
+          self.poll_execution_interrupt()?;
         }
         continue;
       }
@@ -257,6 +260,7 @@ impl Vm {
         gc_poll_countdown = gc_poll_countdown.saturating_sub(3);
         if gc_poll_countdown == 0 {
           gc_poll_countdown = GC_POLL_INTERVAL;
+          self.poll_execution_interrupt()?;
         }
         continue;
       }
@@ -279,6 +283,7 @@ impl Vm {
         gc_poll_countdown = gc_poll_countdown.saturating_sub(12);
         if gc_poll_countdown == 0 {
           gc_poll_countdown = GC_POLL_INTERVAL;
+          self.poll_execution_interrupt()?;
         }
         continue;
       }
@@ -300,6 +305,7 @@ impl Vm {
         gc_poll_countdown = gc_poll_countdown.saturating_sub(9);
         if gc_poll_countdown == 0 {
           gc_poll_countdown = GC_POLL_INTERVAL;
+          self.poll_execution_interrupt()?;
         }
         continue;
       }
@@ -322,6 +328,7 @@ impl Vm {
         gc_poll_countdown = gc_poll_countdown.saturating_sub(10);
         if gc_poll_countdown == 0 {
           gc_poll_countdown = GC_POLL_INTERVAL;
+          self.poll_execution_interrupt()?;
         }
         continue;
       }
@@ -339,6 +346,7 @@ impl Vm {
         gc_poll_countdown = gc_poll_countdown.saturating_sub(4);
         if gc_poll_countdown == 0 {
           gc_poll_countdown = GC_POLL_INTERVAL;
+          self.poll_execution_interrupt()?;
         }
         continue;
       }
@@ -1292,6 +1300,7 @@ impl Vm {
       gc_poll_countdown -= 1;
       if gc_poll_countdown == 0 {
         gc_poll_countdown = GC_POLL_INTERVAL;
+        self.poll_execution_interrupt()?;
         if gc::allocation_pressure() >= gc_allocation_pressure_threshold() {
           let temp_root_base = self.roots.temporary.len();
           self
@@ -2344,6 +2353,7 @@ impl Vm {
       .profiling
       .jit
       .run_numeric_region(&mut prepared)
+      .map_err(RuntimeError::from)?
     {
       return Ok(false);
     }
@@ -2537,6 +2547,7 @@ impl Vm {
       .profiling
       .jit
       .run_numeric_region(&mut prepared)
+      .map_err(RuntimeError::from)?
     {
       return Ok(false);
     }
@@ -2729,6 +2740,7 @@ impl Vm {
       .profiling
       .jit
       .run_numeric_region(&mut prepared)
+      .map_err(RuntimeError::from)?
     {
       return Ok(false);
     }
@@ -2938,6 +2950,7 @@ impl Vm {
       .profiling
       .jit
       .run_numeric_region(&mut prepared)
+      .map_err(RuntimeError::from)?
     {
       return Ok(false);
     }
@@ -3028,8 +3041,6 @@ impl Vm {
     region: crate::vm::region::NumericLoopRegion,
     registers: &mut [Value; 16],
   ) -> Result<bool, RuntimeError> {
-    const MAX_QUANTA_PER_ACTIVATION: u8 = 64;
-
     if self.execution.active.ip != region.entry_pc
       || self.execution.active.arguments.object.is_some()
       || self
@@ -3189,29 +3200,20 @@ impl Vm {
       iterations: 0,
       shape: numeric_shape,
     };
-    let quantum_limit = u32::from(region.program.cost().max_iterations);
-    let mut total_iterations = 0_u64;
-    for _ in 0..MAX_QUANTA_PER_ACTIVATION {
-      prepared.iterations = 0;
-      if !self
-        .profiling
-        .jit
-        .run_numeric_region(&mut prepared)
-      {
-        return Ok(false);
-      }
-      if prepared.iterations > quantum_limit {
-        return Err(RuntimeError::from(
-          "native numeric loop exceeded its batch bound",
-        ));
-      }
-      total_iterations = total_iterations.saturating_add(u64::from(prepared.iterations));
-      if prepared.iterations < quantum_limit
-        || prepared.index.partial_cmp(&prepared.limit) != Some(std::cmp::Ordering::Less)
-      {
-        break;
-      }
-    }
+    let execution = self
+      .profiling
+      .jit
+      .execute_numeric_region(
+        &mut prepared,
+        self.interrupts.native_poll(),
+        crate::vm::jit::NUMERIC_ACTIVATION_LIMIT,
+      )
+      .map_err(RuntimeError::from)?;
+    let outcome = match execution {
+      crate::vm::jit::NumericRegionExecution::Unavailable => return Ok(false),
+      crate::vm::jit::NumericRegionExecution::Executed(outcome) => outcome,
+    };
+    let total_iterations = u64::from(outcome.iterations);
     if total_iterations > 0 {
       ensure_slot(&mut self.execution.active.locals, region.temporary_slot);
       *self.execution.active.locals[region.temporary_slot].borrow_mut() =
@@ -3266,6 +3268,14 @@ impl Vm {
       .jit_stats
       .native_loop_iterations
       .saturating_add(total_iterations);
+    if let crate::vm::jit::NumericRegionExit::Interrupted {
+      observed_generation,
+    } = outcome.exit
+    {
+      self.interrupts.acknowledge(observed_generation);
+      return Err(RuntimeError::execution_interrupted());
+    }
+    self.poll_execution_interrupt()?;
     Ok(true)
   }
   /// Execute `LoadLocal, Const, CompareJump` with numeric guards in one dispatch.

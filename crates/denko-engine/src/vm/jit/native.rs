@@ -48,6 +48,37 @@ pub(crate) enum NumericLoopAddend {
   MultiplyConstant,
 }
 
+pub(crate) const NUMERIC_EXIT_COMPLETED: u32 = 0;
+pub(crate) const NUMERIC_EXIT_ACTIVATION_LIMIT: u32 = 1;
+pub(crate) const NUMERIC_EXIT_INTERRUPTED: u32 = 2;
+
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+pub(crate) struct NativeNumericLoopFrame {
+  pub(crate) index: f64,
+  pub(crate) limit: f64,
+  pub(crate) accumulator: f64,
+  pub(crate) step: f64,
+  pub(crate) addend: f64,
+  pub(crate) iteration_budget: u32,
+  pub(crate) iterations: u32,
+  pub(crate) exit_code: u32,
+  pub(crate) requested_generation: *const std::sync::atomic::AtomicU64,
+  pub(crate) acknowledged_generation: u64,
+  pub(crate) observed_generation: u64,
+}
+
+const _: () = {
+  assert!(std::mem::offset_of!(NativeNumericLoopFrame, index) == 0);
+  assert!(std::mem::offset_of!(NativeNumericLoopFrame, iteration_budget) == 40);
+  assert!(std::mem::offset_of!(NativeNumericLoopFrame, iterations) == 44);
+  assert!(std::mem::offset_of!(NativeNumericLoopFrame, exit_code) == 48);
+  assert!(std::mem::offset_of!(NativeNumericLoopFrame, requested_generation) == 56);
+  assert!(std::mem::offset_of!(NativeNumericLoopFrame, acknowledged_generation) == 64);
+  assert!(std::mem::offset_of!(NativeNumericLoopFrame, observed_generation) == 72);
+  assert!(std::mem::size_of::<NativeNumericLoopFrame>() == 80);
+};
+
 pub(crate) type JitExitCode = u32;
 pub(crate) const JIT_EXIT_RETURN: JitExitCode = 0;
 pub(crate) const JIT_EXIT_INTERPRETER: JitExitCode = 1;
@@ -354,16 +385,31 @@ impl NativeCode {
       0xF2, 0x0F, 0x10, 0x57, 0x10, // movsd xmm2, [rdi+16]  accumulator
       0xF2, 0x0F, 0x10, 0x5F, 0x18, // movsd xmm3, [rdi+24]  step
       0xF2, 0x0F, 0x10, 0x67, 0x20, // movsd xmm4, [rdi+32]  leaf value
+      0x44, 0x8B, 0x47, 0x28, // mov r8d, [rdi+40]       iteration budget
+      0x48, 0x8B, 0x77, 0x38, // mov rsi, [rdi+56]      interrupt generation
+      0x4C, 0x8B, 0x4F, 0x40, // mov r9, [rdi+64]       acknowledged generation
+      0x4D, 0x89, 0xCA, // mov r10, r9             observed generation
       0x31, 0xC0, // xor eax, eax             iterations
     ];
+
+    // A VM-owned Arc keeps the aligned AtomicU64 alive for this synchronous
+    // call. On x86-64, the aligned load below supplies the acquire-side
+    // hardware ordering paired with the producer's Release increment.
+    let entry_poll = bytes.len();
+    bytes.extend_from_slice(&[0x4C, 0x8B, 0x16]); // mov r10, [rsi]
+    bytes.extend_from_slice(&[0x4D, 0x39, 0xCA]); // cmp r10, r9
+    bytes.extend_from_slice(&[0x0F, 0x85]); // jne interrupted
+    let entry_interrupt = bytes.len();
+    bytes.extend_from_slice(&[0; 4]);
+
     let loop_start = bytes.len();
     bytes.extend_from_slice(&[0x66, 0x0F, 0x2E, 0xC1]); // ucomisd xmm0, xmm1
-    bytes.push(0x7A); // jp exit, unordered means index < limit is false
+    bytes.extend_from_slice(&[0x0F, 0x8A]); // jp completed, unordered means index < limit is false
     let unordered_exit = bytes.len();
-    bytes.push(0);
-    bytes.push(0x73); // jae exit
+    bytes.extend_from_slice(&[0; 4]);
+    bytes.extend_from_slice(&[0x0F, 0x83]); // jae completed
     let completed_exit = bytes.len();
-    bytes.push(0);
+    bytes.extend_from_slice(&[0; 4]);
     match addend {
       NumericLoopAddend::Constant => {
         bytes.extend_from_slice(&[0xF2, 0x0F, 0x58, 0xD4]); // addsd xmm2, xmm4
@@ -381,26 +427,86 @@ impl NativeCode {
     bytes.extend_from_slice(&[
       0xF2, 0x0F, 0x58, 0xC3, // addsd xmm0, xmm3
       0xFF, 0xC0, // inc eax
-      0x83, 0xF8, 0x40, // cmp eax, 64
-      0x72, // jb loop
+      0xA8, 0x3F, // test al, 63
+      0x75, // jne budget check
     ]);
-    let backedge = bytes.len();
+    let skip_poll = bytes.len();
     bytes.push(0);
+    bytes.extend_from_slice(&[0x4C, 0x8B, 0x16]); // mov r10, [rsi]
+    bytes.extend_from_slice(&[0x4D, 0x39, 0xCA]); // cmp r10, r9
+    bytes.extend_from_slice(&[0x0F, 0x85]); // jne interrupted
+    let loop_interrupt = bytes.len();
+    bytes.extend_from_slice(&[0; 4]);
+    bytes.extend_from_slice(&[0x44, 0x39, 0xC0]); // cmp eax, r8d
+    bytes.extend_from_slice(&[0x0F, 0x82]); // jb loop
+    let backedge = bytes.len();
+    bytes.extend_from_slice(&[0; 4]);
+
+    bytes.extend_from_slice(&[0xB9]); // mov ecx, activation limit
+    bytes.extend_from_slice(&NUMERIC_EXIT_ACTIVATION_LIMIT.to_le_bytes());
+    bytes.push(0xE9); // jmp exit
+    let budget_exit = bytes.len();
+    bytes.extend_from_slice(&[0; 4]);
+
+    let completed = bytes.len();
+    bytes.extend_from_slice(&[0x31, 0xC9]); // xor ecx, ecx
+    bytes.push(0xE9); // jmp exit
+    let completed_jump = bytes.len();
+    bytes.extend_from_slice(&[0; 4]);
+
+    let interrupted = bytes.len();
+    bytes.extend_from_slice(&[0xB9]); // mov ecx, interrupted
+    bytes.extend_from_slice(&NUMERIC_EXIT_INTERRUPTED.to_le_bytes());
+
     let exit = bytes.len();
     bytes.extend_from_slice(&[
       0xF2, 0x0F, 0x11, 0x07, // movsd [rdi], xmm0
       0xF2, 0x0F, 0x11, 0x57, 0x10, // movsd [rdi+16], xmm2
-      0x89, 0x47, 0x28, // mov [rdi+40], eax
+      0x89, 0x47, 0x2C, // mov [rdi+44], eax      iterations
+      0x89, 0x4F, 0x30, // mov [rdi+48], ecx      exit code
+      0x4C, 0x89, 0x57, 0x48, // mov [rdi+72], r10      observed generation
       0xC3,
     ]);
-    let relative = |from: usize, to: usize| -> Result<u8, String> {
-      i8::try_from(to as isize - (from + 1) as isize)
-        .map(|offset| offset as u8)
+    let relative32 = |_from: usize, instruction_end: usize, to: usize| -> Result<[u8; 4], String> {
+      i32::try_from(to as isize - instruction_end as isize)
+        .map(i32::to_le_bytes)
         .map_err(|_| "numeric loop branch is out of range".to_string())
     };
-    bytes[unordered_exit] = relative(unordered_exit, exit)?;
-    bytes[completed_exit] = relative(completed_exit, exit)?;
-    bytes[backedge] = relative(backedge, loop_start)?;
+    bytes[entry_interrupt..entry_interrupt + 4].copy_from_slice(&relative32(
+      entry_interrupt,
+      entry_interrupt + 4,
+      interrupted,
+    )?);
+    bytes[unordered_exit..unordered_exit + 4].copy_from_slice(&relative32(
+      unordered_exit,
+      unordered_exit + 4,
+      completed,
+    )?);
+    bytes[completed_exit..completed_exit + 4].copy_from_slice(&relative32(
+      completed_exit,
+      completed_exit + 4,
+      completed,
+    )?);
+    bytes[skip_poll] = i8::try_from(loop_start as isize - (skip_poll + 1) as isize)
+      .map(|offset| offset as u8)
+      .map_err(|_| "numeric loop poll branch is out of range".to_string())?;
+    bytes[loop_interrupt..loop_interrupt + 4].copy_from_slice(&relative32(
+      loop_interrupt,
+      loop_interrupt + 4,
+      interrupted,
+    )?);
+    bytes[backedge..backedge + 4].copy_from_slice(&relative32(backedge, backedge + 4, loop_start)?);
+    bytes[budget_exit..budget_exit + 4].copy_from_slice(&relative32(
+      budget_exit,
+      budget_exit + 4,
+      exit,
+    )?);
+    bytes[completed_jump..completed_jump + 4].copy_from_slice(&relative32(
+      completed_jump,
+      completed_jump + 4,
+      exit,
+    )?);
+    debug_assert!(entry_poll < loop_start);
     Self::from_bytes(&bytes, &[])
   }
 
@@ -776,9 +882,9 @@ impl NativeCode {
   #[cfg(all(unix, target_arch = "x86_64"))]
   pub(crate) unsafe fn call_numeric_loop_frame(
     &self,
-    frame: *mut crate::vm::region::PreparedNumericRegion,
+    frame: *mut NativeNumericLoopFrame,
   ) {
-    let entry: unsafe extern "C" fn(*mut crate::vm::region::PreparedNumericRegion) =
+    let entry: unsafe extern "C" fn(*mut NativeNumericLoopFrame) =
       unsafe { std::mem::transmute(self.ptr.as_ptr()) };
     unsafe { entry(frame) };
   }
@@ -823,9 +929,12 @@ impl Drop for NativeCode {
 
 #[cfg(all(test, unix, target_arch = "x86_64"))]
 mod tests {
-  use super::{JIT_EXIT_RETURN, JitFrame, NativeCode, NumericLoopAddend};
+  use super::{
+    JIT_EXIT_RETURN, JitFrame, NUMERIC_EXIT_ACTIVATION_LIMIT, NUMERIC_EXIT_COMPLETED,
+    NUMERIC_EXIT_INTERRUPTED, NativeCode, NativeNumericLoopFrame, NumericLoopAddend,
+  };
   use crate::value::Value;
-  use crate::vm::region::{NumericRegionShape, PreparedNumericRegion};
+  use std::sync::atomic::AtomicU64;
 
   #[test]
   fn patches_a_direct_jump_between_native_blocks() {
@@ -915,24 +1024,25 @@ mod tests {
   #[test]
   fn executes_a_bounded_numeric_call_loop_batch() {
     let code = NativeCode::numeric_loop(NumericLoopAddend::Constant).expect("native allocation");
-    let mut frame = PreparedNumericRegion {
+    let generation = AtomicU64::new(0);
+    let mut frame = NativeNumericLoopFrame {
       index: 0.0,
       limit: 100.0,
       accumulator: 0.0,
       step: 1.0,
       addend: 42.0,
+      iteration_budget: 4_096,
       iterations: 0,
-      shape: NumericRegionShape::AddPrepared,
+      exit_code: u32::MAX,
+      requested_generation: &generation,
+      acknowledged_generation: 0,
+      observed_generation: 0,
     };
-    unsafe { code.call_numeric_loop_frame(&mut frame) };
-    assert_eq!(frame.index, 64.0);
-    assert_eq!(frame.accumulator, 2_688.0);
-    assert_eq!(frame.iterations, 64);
-
     unsafe { code.call_numeric_loop_frame(&mut frame) };
     assert_eq!(frame.index, 100.0);
     assert_eq!(frame.accumulator, 4_200.0);
-    assert_eq!(frame.iterations, 36);
+    assert_eq!(frame.iterations, 100);
+    assert_eq!(frame.exit_code, NUMERIC_EXIT_COMPLETED);
   }
 
   #[test]
@@ -971,18 +1081,80 @@ mod tests {
   #[test]
   fn executes_a_bounded_numeric_index_loop_batch() {
     let code = NativeCode::numeric_loop(NumericLoopAddend::Index).expect("native allocation");
-    let mut frame = PreparedNumericRegion {
+    let generation = AtomicU64::new(0);
+    let mut frame = NativeNumericLoopFrame {
+      index: 0.0,
+      limit: f64::INFINITY,
+      accumulator: 0.0,
+      step: 1.0,
+      addend: 0.0,
+      iteration_budget: 4_096,
+      iterations: 0,
+      exit_code: u32::MAX,
+      requested_generation: &generation,
+      acknowledged_generation: 0,
+      observed_generation: 0,
+    };
+    unsafe { code.call_numeric_loop_frame(&mut frame) };
+    assert_eq!(frame.index, 4_096.0);
+    assert_eq!(frame.iterations, 4_096);
+    assert_eq!(frame.exit_code, NUMERIC_EXIT_ACTIVATION_LIMIT);
+  }
+
+  #[test]
+  fn numeric_loop_observes_a_pending_interrupt_before_work() {
+    let code = NativeCode::numeric_loop(NumericLoopAddend::Constant).expect("native allocation");
+    let generation = AtomicU64::new(1);
+    let mut frame = NativeNumericLoopFrame {
       index: 0.0,
       limit: 100.0,
       accumulator: 0.0,
       step: 1.0,
-      addend: 0.0,
+      addend: 1.0,
+      iteration_budget: 4_096,
       iterations: 0,
-      shape: NumericRegionShape::AddIndex,
+      exit_code: u32::MAX,
+      requested_generation: &generation,
+      acknowledged_generation: 0,
+      observed_generation: 0,
     };
     unsafe { code.call_numeric_loop_frame(&mut frame) };
-    assert_eq!(frame.index, 64.0);
-    assert_eq!(frame.accumulator, 2_016.0);
-    assert_eq!(frame.iterations, 64);
+    assert_eq!(frame.iterations, 0);
+    assert_eq!(frame.exit_code, NUMERIC_EXIT_INTERRUPTED);
+    assert_eq!(frame.observed_generation, 1);
+  }
+
+  #[test]
+  fn numeric_loop_polls_an_asynchronous_interrupt_every_64_iterations() {
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+
+    let code = NativeCode::numeric_loop(NumericLoopAddend::Constant).expect("native allocation");
+    let generation = Arc::new(AtomicU64::new(0));
+    let requester = Arc::clone(&generation);
+    let thread = std::thread::spawn(move || {
+      std::thread::sleep(std::time::Duration::from_millis(1));
+      requester.store(1, Ordering::Release);
+    });
+    let mut frame = NativeNumericLoopFrame {
+      index: 0.0,
+      limit: f64::INFINITY,
+      accumulator: 0.0,
+      step: 1.0,
+      addend: 1.0,
+      iteration_budget: u32::MAX,
+      iterations: 0,
+      exit_code: u32::MAX,
+      requested_generation: Arc::as_ptr(&generation),
+      acknowledged_generation: 0,
+      observed_generation: 0,
+    };
+    unsafe { code.call_numeric_loop_frame(&mut frame) };
+    thread.join().expect("interrupt requester");
+
+    assert_eq!(frame.exit_code, NUMERIC_EXIT_INTERRUPTED);
+    assert!(frame.iterations > 0);
+    assert_eq!(frame.iterations % 64, 0);
+    assert_eq!(frame.observed_generation, 1);
   }
 }

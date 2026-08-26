@@ -156,6 +156,7 @@ pub struct Vm {
   pub(super) caches: CacheState,
   pub(super) profiling: ProfilingState,
   pub(super) roots: RootState,
+  pub(super) interrupts: crate::vm::interrupt::VmInterruptState,
   /// Keeps this VM represented in the thread-local prototype heap lifetime.
   ///
   /// This is deliberately last so it is dropped after every Value-holding

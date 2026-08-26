@@ -622,6 +622,27 @@ enum NumericRegionCode {
   Unavailable,
 }
 
+pub(crate) const NUMERIC_ACTIVATION_LIMIT: u32 = 4_096;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum NumericRegionExit {
+  Completed,
+  ActivationLimit,
+  Interrupted { observed_generation: u64 },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct NumericRegionOutcome {
+  pub(crate) exit: NumericRegionExit,
+  pub(crate) iterations: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum NumericRegionExecution {
+  Unavailable,
+  Executed(NumericRegionOutcome),
+}
+
 impl JitRuntime {
   pub(crate) fn allocate_version(&mut self) -> CodeVersionId {
     self.next_version = self.next_version.saturating_add(1);
@@ -964,7 +985,29 @@ impl JitRuntime {
   pub(crate) fn run_numeric_region(
     &mut self,
     prepared: &mut crate::vm::region::PreparedNumericRegion,
-  ) -> bool {
+  ) -> Result<bool, String> {
+    static NO_INTERRUPT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    self
+      .execute_numeric_region(
+        prepared,
+        crate::vm::interrupt::NativeInterruptPoll {
+          requested_generation: &NO_INTERRUPT,
+          acknowledged_generation: 0,
+        },
+        u32::from(64_u8),
+      )
+      .map(|execution| matches!(execution, NumericRegionExecution::Executed(_)))
+  }
+
+  pub(crate) fn execute_numeric_region(
+    &mut self,
+    prepared: &mut crate::vm::region::PreparedNumericRegion,
+    poll: crate::vm::interrupt::NativeInterruptPoll,
+    iteration_budget: u32,
+  ) -> Result<NumericRegionExecution, String> {
+    if iteration_budget == 0 || !iteration_budget.is_multiple_of(64) {
+      return Err("native numeric loop budget must be a nonzero multiple of 64".to_string());
+    }
     let addend = match prepared.shape {
       crate::vm::region::NumericRegionShape::AddIndex => native::NumericLoopAddend::Index,
       crate::vm::region::NumericRegionShape::AddPrepared => native::NumericLoopAddend::Constant,
@@ -983,10 +1026,44 @@ impl JitRuntime {
       };
     }
     let NumericRegionCode::Ready(code) = slot else {
-      return false;
+      return Ok(NumericRegionExecution::Unavailable);
     };
-    unsafe { code.call_numeric_loop_frame(prepared) };
-    true
+    let mut frame = native::NativeNumericLoopFrame {
+      index: prepared.index,
+      limit: prepared.limit,
+      accumulator: prepared.accumulator,
+      step: prepared.step,
+      addend: prepared.addend,
+      iteration_budget,
+      iterations: 0,
+      exit_code: u32::MAX,
+      requested_generation: poll.requested_generation,
+      acknowledged_generation: poll.acknowledged_generation,
+      observed_generation: poll.acknowledged_generation,
+    };
+    unsafe { code.call_numeric_loop_frame(&mut frame) };
+    if frame.iterations > iteration_budget {
+      return Err("native numeric loop exceeded its activation bound".to_string());
+    }
+    prepared.index = frame.index;
+    prepared.accumulator = frame.accumulator;
+    prepared.iterations = frame.iterations;
+    let exit = match frame.exit_code {
+      native::NUMERIC_EXIT_COMPLETED => NumericRegionExit::Completed,
+      native::NUMERIC_EXIT_ACTIVATION_LIMIT => NumericRegionExit::ActivationLimit,
+      native::NUMERIC_EXIT_INTERRUPTED => NumericRegionExit::Interrupted {
+        observed_generation: frame.observed_generation,
+      },
+      code => {
+        return Err(format!(
+          "native numeric loop returned invalid exit code {code}"
+        ));
+      }
+    };
+    Ok(NumericRegionExecution::Executed(NumericRegionOutcome {
+      exit,
+      iterations: frame.iterations,
+    }))
   }
 
   pub(crate) fn run_dense_array_push_region(
@@ -1524,7 +1601,18 @@ mod tests {
       iterations: 0,
       shape,
     };
-    assert!(!runtime.run_numeric_region(&mut prepared));
+    let generation = std::sync::atomic::AtomicU64::new(0);
+    let result = runtime
+      .execute_numeric_region(
+        &mut prepared,
+        crate::vm::interrupt::NativeInterruptPoll {
+          requested_generation: &generation,
+          acknowledged_generation: 0,
+        },
+        NUMERIC_ACTIVATION_LIMIT,
+      )
+      .expect("valid unavailable result");
+    assert_eq!(result, NumericRegionExecution::Unavailable);
     assert_eq!(prepared.index, 2.0);
     assert_eq!(prepared.accumulator, 7.0);
     assert_eq!(prepared.iterations, 0);

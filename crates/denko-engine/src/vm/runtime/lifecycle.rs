@@ -143,6 +143,7 @@ impl Vm {
         kept_alive: Vec::new(),
         host: Rc::new(RefCell::new(HostRootStore::new())),
       },
+      interrupts: crate::vm::interrupt::VmInterruptState::new(),
       _gc_registration: gc_registration,
     };
     vm.populate_realm_intrinsics(intrinsics);
@@ -250,6 +251,7 @@ impl Vm {
         kept_alive: Vec::new(),
         host: Rc::clone(&self.roots.host),
       },
+      interrupts: self.interrupts.fork(),
       _gc_registration: gc_registration,
     }
   }
@@ -394,6 +396,19 @@ impl Vm {
   /// Return the current `this` value.
   pub fn this_value(&self) -> Value {
     self.execution.active.this_value.clone()
+  }
+
+  /// Create a thread-safe handle that can request termination of this VM.
+  pub fn interrupt_handle(&self) -> crate::vm::VmInterruptHandle {
+    self.interrupts.handle()
+  }
+
+  pub(super) fn poll_execution_interrupt(&mut self) -> Result<(), RuntimeError> {
+    if self.interrupts.poll_and_acknowledge() {
+      Err(RuntimeError::execution_interrupted())
+    } else {
+      Ok(())
+    }
   }
 
   /// Return whether the current host builtin call includes `this` at `args[0]`.
