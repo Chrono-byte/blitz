@@ -10,6 +10,12 @@ use super::NumericBinaryOp;
 use crate::bytecode::{Chunk, Op, decode_rd, decode_risc_aux16, decode_rs};
 use std::hash::{Hash, Hasher};
 
+#[allow(
+  dead_code,
+  reason = "the verified CFG is an inert migration layer until typed CFG lowering lands"
+)]
+mod cfg;
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct ValueId(u32);
 
