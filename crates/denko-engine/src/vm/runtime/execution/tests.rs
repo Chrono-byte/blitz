@@ -205,6 +205,11 @@ mod test {
     assert!(native_calls > 0);
     assert!(vm.profiling.jit_stats.native_loop_entries > 0);
     assert!(vm.profiling.jit_stats.native_loop_iterations > 0);
+    assert!(
+      vm.profiling.jit_stats.native_loop_entries < 16,
+      "numeric loop rebuilt VM region state {} times",
+      vm.profiling.jit_stats.native_loop_entries
+    );
   }
 
   #[cfg(all(unix, target_arch = "x86_64"))]

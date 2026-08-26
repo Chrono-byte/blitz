@@ -3028,6 +3028,8 @@ impl Vm {
     region: crate::vm::region::NumericLoopRegion,
     registers: &mut [Value; 16],
   ) -> Result<bool, RuntimeError> {
+    const MAX_QUANTA_PER_ACTIVATION: u8 = 64;
+
     if self.execution.active.ip != region.entry_pc
       || self.execution.active.arguments.object.is_some()
       || self
@@ -3187,19 +3189,30 @@ impl Vm {
       iterations: 0,
       shape: numeric_shape,
     };
-    if !self
-      .profiling
-      .jit
-      .run_numeric_region(&mut prepared)
-    {
-      return Ok(false);
+    let quantum_limit = u32::from(region.program.cost().max_iterations);
+    let mut total_iterations = 0_u64;
+    for _ in 0..MAX_QUANTA_PER_ACTIVATION {
+      prepared.iterations = 0;
+      if !self
+        .profiling
+        .jit
+        .run_numeric_region(&mut prepared)
+      {
+        return Ok(false);
+      }
+      if prepared.iterations > quantum_limit {
+        return Err(RuntimeError::from(
+          "native numeric loop exceeded its batch bound",
+        ));
+      }
+      total_iterations = total_iterations.saturating_add(u64::from(prepared.iterations));
+      if prepared.iterations < quantum_limit
+        || prepared.index.partial_cmp(&prepared.limit) != Some(std::cmp::Ordering::Less)
+      {
+        break;
+      }
     }
-    if prepared.iterations > u32::from(region.program.cost().max_iterations) {
-      return Err(RuntimeError::from(
-        "native numeric loop exceeded its batch bound",
-      ));
-    }
-    if prepared.iterations > 0 {
+    if total_iterations > 0 {
       ensure_slot(&mut self.execution.active.locals, region.temporary_slot);
       *self.execution.active.locals[region.temporary_slot].borrow_mut() =
         Value::Number(prepared.index);
@@ -3252,7 +3265,7 @@ impl Vm {
       .profiling
       .jit_stats
       .native_loop_iterations
-      .saturating_add(prepared.iterations as u64);
+      .saturating_add(total_iterations);
     Ok(true)
   }
   /// Execute `LoadLocal, Const, CompareJump` with numeric guards in one dispatch.
