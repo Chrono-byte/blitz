@@ -5,12 +5,32 @@
 //! indexing. Observable `RegExp` state such as `lastIndex` belongs to the host
 //! engine and is deliberately not stored in [`Regex`].
 
+#[allow(
+  dead_code,
+  reason = "inert compiler layer; execution lands in the next barrier"
+)]
+mod analysis;
 mod ast;
 mod canonical;
 mod error;
 mod flags;
+#[allow(
+  dead_code,
+  reason = "inert compiler layer; execution lands in the next barrier"
+)]
+mod ir;
 mod matcher;
 mod parser;
+#[allow(
+  dead_code,
+  reason = "inert compiler layer; execution lands in the next barrier"
+)]
+mod program;
+#[allow(
+  dead_code,
+  reason = "inert compiler layer; execution lands in the next barrier"
+)]
+mod verify;
 
 pub use error::{Error, ErrorKind};
 pub use flags::Flags;
