@@ -42,6 +42,7 @@ pub use matcher::{Capture, Match, MatchError};
 
 use ast::Node;
 use js_string::{JsString, JsStringBuilder};
+use std::sync::Arc;
 
 /// A parsed ECMAScript regular expression.
 #[derive(Clone, Debug)]
@@ -51,7 +52,7 @@ pub struct Regex {
   body: Node,
   capture_count: usize,
   capture_names: Vec<Option<JsString>>,
-  program: Option<program::VerifiedProgram>,
+  program: Option<Arc<program::VerifiedProgram>>,
 }
 
 impl Regex {
@@ -72,7 +73,8 @@ impl Regex {
     let parsed = parser::parse(source, flags)?;
     let program = ir::IrNode::from_ast(&parsed.body)
       .ok()
-      .and_then(|ir| compiler::compile(&ir).ok());
+      .and_then(|ir| compiler::compile(&ir, parsed.capture_count).ok())
+      .map(Arc::new);
     Ok(Self {
       source: source.clone(),
       flags,
@@ -162,7 +164,6 @@ impl Regex {
   ) -> Result<Option<Match>, MatchError> {
     if let Some(program) = &self.program {
       executor::find(program, input, start, self.flags)
-        .map(|matched| matched.map(matcher::Match::captureless))
     } else {
       matcher::find(self, input, start)
     }

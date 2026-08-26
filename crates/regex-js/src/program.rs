@@ -3,6 +3,7 @@
 
 use crate::analysis::Analysis;
 use crate::ast::CharacterClass;
+use crate::ir::CaptureId;
 
 const MAX_PROGRAM_INSTRUCTIONS: usize = 1_000_000;
 const MAX_PROGRAM_CLASSES: usize = 1_000_000;
@@ -37,6 +38,29 @@ impl ClassId {
   }
 }
 
+macro_rules! index_id {
+  ($name:ident) => {
+    #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+    pub(crate) struct $name(u32);
+
+    impl $name {
+      pub(crate) fn from_index(index: usize) -> Result<Self, ProgramError> {
+        u32::try_from(index)
+          .map(Self)
+          .map_err(|_| ProgramError::TooLarge)
+      }
+
+      pub(crate) const fn index(self) -> usize {
+        self.0 as usize
+      }
+    }
+  };
+}
+
+index_id!(AssertionId);
+index_id!(CaptureSetId);
+index_id!(ProgressId);
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Instruction {
   Literal {
@@ -48,6 +72,33 @@ pub(crate) enum Instruction {
   },
   AssertStart,
   AssertEnd,
+  AssertWordBoundary {
+    expected: bool,
+  },
+  AssertLookahead {
+    assertion: AssertionId,
+    positive: bool,
+  },
+  CaptureStart {
+    capture: CaptureId,
+  },
+  CaptureEnd {
+    capture: CaptureId,
+  },
+  ClearCaptures {
+    captures: CaptureSetId,
+  },
+  Backreference {
+    capture: CaptureId,
+  },
+  MarkProgress {
+    progress: ProgressId,
+  },
+  ContinueProgress {
+    progress: ProgressId,
+    changed: ProgramCounter,
+    unchanged: ProgramCounter,
+  },
   Split {
     preferred: ProgramCounter,
     deferred: ProgramCounter,
@@ -71,6 +122,10 @@ pub(crate) enum EntryStrategy {
 pub(crate) struct Program {
   pub(crate) instructions: Box<[Instruction]>,
   pub(crate) classes: Box<[CharacterClass]>,
+  pub(crate) assertions: Box<[VerifiedProgram]>,
+  pub(crate) capture_sets: Box<[Box<[CaptureId]>]>,
+  pub(crate) capture_count: usize,
+  pub(crate) progress_count: usize,
   pub(crate) entry: ProgramCounter,
   pub(crate) strategy: EntryStrategy,
   pub(crate) analysis: Analysis,
@@ -86,6 +141,22 @@ impl VerifiedProgram {
 
   pub(crate) fn classes(&self) -> &[CharacterClass] {
     &self.0.classes
+  }
+
+  pub(crate) fn assertions(&self) -> &[VerifiedProgram] {
+    &self.0.assertions
+  }
+
+  pub(crate) fn capture_sets(&self) -> &[Box<[CaptureId]>] {
+    &self.0.capture_sets
+  }
+
+  pub(crate) const fn capture_count(&self) -> usize {
+    self.0.capture_count
+  }
+
+  pub(crate) const fn progress_count(&self) -> usize {
+    self.0.progress_count
   }
 
   pub(crate) const fn entry(&self) -> ProgramCounter {

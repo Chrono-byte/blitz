@@ -82,6 +82,20 @@ impl Match {
     }
   }
 
+  pub(crate) fn from_captures(
+    range: Range<usize>,
+    captures: Vec<Option<Range<usize>>>,
+  ) -> Self {
+    let mut values = Vec::with_capacity(captures.len() + 1);
+    values.push(Some(Capture { range }));
+    values.extend(
+      captures
+        .into_iter()
+        .map(|range| range.map(|range| Capture { range })),
+    );
+    Self { captures: values }
+  }
+
   /// Return the complete match's UTF-16 range.
   #[must_use]
   pub fn range(&self) -> Range<usize> {
@@ -454,7 +468,7 @@ const fn is_word(symbol: u32) -> bool {
     || symbol == b'_' as u32
 }
 
-fn is_word_character(
+pub(crate) fn is_word_character(
   symbol: u32,
   flags: Flags,
 ) -> bool {

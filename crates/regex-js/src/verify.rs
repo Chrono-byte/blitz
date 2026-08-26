@@ -37,12 +37,53 @@ impl VerifiedProgram {
         Instruction::Literal { .. }
         | Instruction::Dot
         | Instruction::AssertStart
-        | Instruction::AssertEnd => queue.push_back(fallthrough()?),
+        | Instruction::AssertEnd
+        | Instruction::AssertWordBoundary { .. } => queue.push_back(fallthrough()?),
         Instruction::Class { class } => {
           if class.index() >= program.classes.len() {
             return Err(ProgramError::InvalidProgram);
           }
           queue.push_back(fallthrough()?);
+        }
+        Instruction::AssertLookahead { assertion, .. } => {
+          let Some(assertion) = program.assertions.get(assertion.index()) else {
+            return Err(ProgramError::InvalidProgram);
+          };
+          if assertion.capture_count() != program.capture_count {
+            return Err(ProgramError::InvalidProgram);
+          }
+          queue.push_back(fallthrough()?);
+        }
+        Instruction::CaptureStart { capture }
+        | Instruction::CaptureEnd { capture }
+        | Instruction::Backreference { capture } => {
+          if capture.index() >= program.capture_count {
+            return Err(ProgramError::InvalidProgram);
+          }
+          queue.push_back(fallthrough()?);
+        }
+        Instruction::ClearCaptures { captures } => {
+          if captures.index() >= program.capture_sets.len() {
+            return Err(ProgramError::InvalidProgram);
+          }
+          queue.push_back(fallthrough()?);
+        }
+        Instruction::MarkProgress { progress } => {
+          if progress.index() >= program.progress_count {
+            return Err(ProgramError::InvalidProgram);
+          }
+          queue.push_back(fallthrough()?);
+        }
+        Instruction::ContinueProgress {
+          progress,
+          changed,
+          unchanged,
+        } => {
+          if progress.index() >= program.progress_count {
+            return Err(ProgramError::InvalidProgram);
+          }
+          queue.push_back(*changed);
+          queue.push_back(*unchanged);
         }
         Instruction::Split {
           preferred,
@@ -57,6 +98,17 @@ impl VerifiedProgram {
     }
     if accepts == 0 {
       return Err(ProgramError::InvalidProgram);
+    }
+    for captures in &program.capture_sets {
+      let mut previous = None;
+      for capture in captures {
+        if capture.index() >= program.capture_count
+          || previous.is_some_and(|previous| previous >= capture.index())
+        {
+          return Err(ProgramError::InvalidProgram);
+        }
+        previous = Some(capture.index());
+      }
     }
     Ok(Self(program))
   }
@@ -102,6 +154,10 @@ mod tests {
         Instruction::Accept,
       ]),
       classes: Box::new([]),
+      assertions: Box::new([]),
+      capture_sets: Box::new([]),
+      capture_count: 0,
+      progress_count: 0,
       entry: ProgramCounter::from_index(0).expect("entry"),
       strategy: EntryStrategy::SingleLiteral {
         symbol: u32::from(b'a'),
@@ -111,6 +167,8 @@ mod tests {
         minimum_width: 1,
         capture_free: true,
         nfa_eligible: true,
+        has_assertion: false,
+        has_backreference: false,
       },
     }
   }

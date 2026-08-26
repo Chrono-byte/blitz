@@ -238,15 +238,62 @@ fn compiled_capture_free_programs_match_the_legacy_executor() {
 }
 
 #[test]
-fn unsupported_capture_semantics_stay_on_the_legacy_executor() {
+fn captures_and_backreferences_use_the_compiled_executor() {
   let expression = regex("(a)\\1", "");
-  assert!(!expression.uses_compiled_program());
+  assert!(expression.uses_compiled_program());
   assert_eq!(
     expression
       .find_str("zaa", 0)
       .map(|matched| matched.range()),
     Some(1..3)
   );
+}
+
+#[test]
+fn compiled_stateful_programs_match_the_legacy_executor() {
+  let patterns = [
+    "(a)(b)?",
+    "(a|ab)c",
+    "(ab|a)b",
+    r"(?=(a+))a*b\1",
+    "(?!a(b))...",
+    r"\bword\b",
+    r"\Boo\B",
+    "(?:)*",
+    "(a?)*",
+    "(?:|a)*",
+    "(a|(b))*",
+    "(a|)*?",
+    "(?!(a))b",
+    r"((?:a)*)\1",
+  ];
+  let cases = [
+    ("", ""),
+    ("a", ""),
+    ("aa", ""),
+    ("ab", ""),
+    ("abc", ""),
+    ("aaabaaa", ""),
+    (" word ", ""),
+    ("book", ""),
+    ("😀aa", "u"),
+    ("ſoo", "iu"),
+  ];
+
+  for pattern in patterns {
+    for (subject, flags) in cases {
+      let expression = regex(pattern, flags);
+      assert!(expression.uses_compiled_program(), "{pattern:?}/{flags}");
+      let input = Input::new(subject);
+      for start in 0..=input.len().saturating_add(1) {
+        assert_eq!(
+          expression.try_find(&input, start),
+          expression.try_find_legacy(&input, start),
+          "pattern={pattern:?} flags={flags:?} subject={subject:?} start={start}"
+        );
+      }
+    }
+  }
 }
 
 #[test]

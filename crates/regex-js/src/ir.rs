@@ -3,6 +3,21 @@
 
 use crate::ast::{Assertion, CharacterClass, Node};
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct CaptureId(u32);
+
+impl CaptureId {
+  pub(crate) fn from_index(index: usize) -> Result<Self, IrRejection> {
+    u32::try_from(index)
+      .map(Self)
+      .map_err(|_| IrRejection::ProgramTooLarge)
+  }
+
+  pub(crate) const fn index(self) -> usize {
+    self.0 as usize
+  }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum IrNode {
   Empty,
@@ -10,7 +25,13 @@ pub(crate) enum IrNode {
   Dot,
   Class(CharacterClass),
   Assert(IrAssertion),
+  Backreference(CaptureId),
   Sequence(Box<[Self]>),
+  Alternative(Box<[Self]>),
+  Capture {
+    capture: CaptureId,
+    body: Box<Self>,
+  },
   Repeat {
     body: Box<Self>,
     min: usize,
@@ -19,20 +40,16 @@ pub(crate) enum IrNode {
   },
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub(crate) enum IrAssertion {
   Start,
   End,
+  WordBoundary(bool),
+  Lookahead { positive: bool, body: Box<IrNode> },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum IrRejection {
-  CapturingGroup,
-  Alternative,
-  Lookahead,
-  WordBoundary,
-  Backreference,
-  NullableRepeat,
   ProgramTooLarge,
 }
 
@@ -45,23 +62,27 @@ impl IrNode {
       Node::Class(class) => Ok(Self::Class(class.clone())),
       Node::Assertion(Assertion::Start) => Ok(Self::Assert(IrAssertion::Start)),
       Node::Assertion(Assertion::End) => Ok(Self::Assert(IrAssertion::End)),
-      Node::Assertion(Assertion::WordBoundary(_)) => Err(IrRejection::WordBoundary),
-      Node::Assertion(Assertion::Lookahead { .. }) => Err(IrRejection::Lookahead),
-      Node::Backreference(_) => Err(IrRejection::Backreference),
-      Node::Sequence(nodes) => nodes
-        .iter()
-        .map(Self::from_ast)
-        .collect::<Result<Vec<_>, _>>()
-        .map(Vec::into_boxed_slice)
-        .map(Self::Sequence),
-      Node::Alternative(_) => Err(IrRejection::Alternative),
-      Node::Group { index, body } => {
-        if index.is_some() {
-          Err(IrRejection::CapturingGroup)
-        } else {
-          Self::from_ast(body)
-        }
+      Node::Assertion(Assertion::WordBoundary(expected)) => {
+        Ok(Self::Assert(IrAssertion::WordBoundary(*expected)))
       }
+      Node::Assertion(Assertion::Lookahead { positive, body }) => {
+        Ok(Self::Assert(IrAssertion::Lookahead {
+          positive: *positive,
+          body: Box::new(Self::from_ast(body)?),
+        }))
+      }
+      Node::Backreference(index) => Ok(Self::Backreference(CaptureId::from_index(*index - 1)?)),
+      Node::Sequence(nodes) => lower_nodes(nodes).map(Self::Sequence),
+      Node::Alternative(nodes) => lower_nodes(nodes).map(Self::Alternative),
+      Node::Group { index, body } => index.map_or_else(
+        || Self::from_ast(body),
+        |index| {
+          Ok(Self::Capture {
+            capture: CaptureId::from_index(index - 1)?,
+            body: Box::new(Self::from_ast(body)?),
+          })
+        },
+      ),
       Node::Quantifier {
         body,
         min,
@@ -75,4 +96,12 @@ impl IrNode {
       }),
     }
   }
+}
+
+fn lower_nodes(nodes: &[Node]) -> Result<Box<[IrNode]>, IrRejection> {
+  nodes
+    .iter()
+    .map(IrNode::from_ast)
+    .collect::<Result<Vec<_>, _>>()
+    .map(Vec::into_boxed_slice)
 }
