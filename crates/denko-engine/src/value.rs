@@ -69,9 +69,6 @@ use std::sync::{Arc, OnceLock};
 use num_bigint::BigInt as BigIntValue;
 use num_traits::Zero;
 
-pub(crate) mod bind;
-pub(crate) mod heap;
-pub(crate) mod scope;
 pub(crate) mod tagged;
 
 /// Shared, reference-counted, mutable handle to a `Value`.

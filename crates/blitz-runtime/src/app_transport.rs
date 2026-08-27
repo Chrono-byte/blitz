@@ -102,18 +102,12 @@ pub(crate) struct AppServerResource {
   state: Arc<Mutex<TransportState>>,
   closed: Notify,
   local_addr: SocketAddr,
-  rpc_path: String,
 }
 
 impl AppServerResource {
   /// Return the actual OS-selected listener address.
   pub(crate) const fn local_addr(&self) -> SocketAddr {
     self.local_addr
-  }
-
-  /// Return the exact path accepted by this resource.
-  pub(crate) fn rpc_path(&self) -> &str {
-    &self.rpc_path
   }
 
   /// Wait until release has fully stopped the listener and forwarder.
@@ -161,11 +155,6 @@ impl AppServerResource {
   /// Owned close operation suitable for a background runtime future.
   pub(crate) async fn close_owned(self: Arc<Self>) {
     self.close().await;
-  }
-
-  /// Owned shutdown wait suitable for a background runtime future.
-  pub(crate) async fn await_shutdown_owned(self: Arc<Self>) {
-    self.await_shutdown().await;
   }
 }
 
@@ -219,7 +208,6 @@ pub(crate) async fn open_app_server(
     })),
     closed: Notify::new(),
     local_addr,
-    rpc_path: options.rpc_path,
   })
 }
 
@@ -243,7 +231,6 @@ mod tests {
       .await
       .expect("application listener binds");
     let address = resource.local_addr();
-    assert_eq!(resource.rpc_path(), "/rpc");
 
     let (_first, _second) = tokio::join!(resource.close(), resource.close());
     resource.await_shutdown().await;

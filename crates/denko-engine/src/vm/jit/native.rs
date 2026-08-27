@@ -253,6 +253,7 @@ pub(crate) unsafe extern "C" fn denko_jit_set_next_block(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg(test)]
 pub(crate) struct PatchSite {
   offset: u32,
 }
@@ -264,11 +265,13 @@ pub(crate) struct NativeCode {
 }
 
 impl NativeCode {
+  #[cfg(test)]
   pub(crate) fn entry_address(&self) -> *const u8 {
     self.ptr.as_ptr()
   }
 
   #[cfg(all(unix, target_arch = "x86_64"))]
+  #[cfg(test)]
   pub(crate) fn patchable_jump() -> Result<(Self, PatchSite), String> {
     // movabs rax, target; jmp rax
     let mut bytes = vec![0x48, 0xB8];
@@ -281,6 +284,7 @@ impl NativeCode {
   }
 
   #[cfg(all(unix, target_arch = "x86_64"))]
+  #[cfg(test)]
   pub(crate) fn patch_jump(
     &mut self,
     site: PatchSite,
@@ -609,6 +613,7 @@ impl NativeCode {
   }
 
   #[cfg(all(unix, target_arch = "x86_64"))]
+  #[cfg(test)]
   pub(crate) fn return_u64(value: u64) -> Result<Self, String> {
     // mov rax, imm64; ret
     let mut bytes = [0u8; 11];
@@ -738,6 +743,7 @@ impl NativeCode {
   }
 
   #[cfg(all(unix, target_arch = "x86_64"))]
+  #[cfg(test)]
   pub(crate) fn next_block(vm_pc: u32) -> Result<Self, String> {
     let mut bytes = vec![0x48, 0x83, 0xEC, 0x08, 0xBE];
     bytes.extend_from_slice(&vm_pc.to_le_bytes());
@@ -845,6 +851,7 @@ impl NativeCode {
   }
 
   #[cfg(not(all(unix, target_arch = "x86_64")))]
+  #[cfg(test)]
   pub(crate) fn return_u64(_value: u64) -> Result<Self, String> {
     Err("minimal native backend requires Unix x86-64".to_string())
   }
@@ -910,6 +917,7 @@ impl NativeCode {
   }
 
   #[cfg(all(unix, target_arch = "x86_64"))]
+  #[cfg(test)]
   pub(crate) unsafe fn call_u64(&self) -> u64 {
     // SAFETY: callers must only invoke code produced by return_u64.
     let entry: unsafe extern "C" fn() -> u64 = unsafe { std::mem::transmute(self.ptr.as_ptr()) };

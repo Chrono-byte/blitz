@@ -10,22 +10,10 @@ use super::NumericBinaryOp;
 use crate::bytecode::{Chunk, Op, decode_rd, decode_risc_aux16, decode_rs};
 use std::hash::{Hash, Hasher};
 
-#[allow(
-  dead_code,
-  reason = "the verified CFG is an inert migration layer until typed CFG lowering lands"
-)]
-mod cfg;
-
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct ValueId(u32);
 
 impl ValueId {
-  fn from_index(index: usize) -> Result<Self, IrError> {
-    u32::try_from(index)
-      .map(Self)
-      .map_err(|_| IrError::TooManyValues)
-  }
-
   fn index(self) -> usize {
     self.0 as usize
   }
@@ -245,14 +233,12 @@ impl VerifiedTypedFunction {
     Ok(Self(function))
   }
 
-  pub(crate) fn values(&self) -> &[TypedValue] {
-    &self.0.values
-  }
-
+  #[cfg(test)]
   pub(crate) fn return_value(&self) -> ValueId {
     self.0.return_value
   }
 
+  #[cfg(test)]
   pub(crate) fn exits(&self) -> &[ExitState] {
     &self.0.exits
   }
@@ -289,7 +275,6 @@ impl VerifiedTypedFunction {
 pub(crate) enum IrError {
   UnsupportedBody,
   TooManyParameters,
-  TooManyValues,
   InvalidSsa,
 }
 
@@ -362,10 +347,5 @@ mod tests {
   fn compiler_snapshot_is_send_and_static() {
     fn assert_send_static<T: Send + 'static>() {}
     assert_send_static::<CompilerChunk>();
-  }
-
-  #[test]
-  fn value_ids_fail_when_the_ir_limit_is_exceeded() {
-    assert_eq!(ValueId::from_index(usize::MAX), Err(IrError::TooManyValues));
   }
 }

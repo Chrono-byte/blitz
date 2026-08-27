@@ -3,50 +3,6 @@
 use super::*;
 
 impl Vm {
-  #[allow(
-    dead_code,
-    reason = "explicit baseline controller used by tier integration"
-  )]
-  pub(in crate::vm::runtime) fn install_baseline_for_function(
-    &mut self,
-    function_value: &Value,
-  ) -> Result<(), RuntimeError> {
-    let Value::Closure { proto, .. } = function_value else {
-      return Err(RuntimeError::from("baseline target is not a closure"));
-    };
-    let chunk = std::sync::Arc::clone(&proto.chunk);
-    let function = self.function_id_for_chunk(&chunk);
-    let version = self
-      .profiling
-      .jit
-      .install_const_prefix(function, &chunk, proto.arity)
-      .map_err(RuntimeError::from)?;
-    self
-      .profiling
-      .functions
-      .entry(function)
-      .or_default()
-      .baseline = crate::vm::jit::BaselineState::Ready(version);
-    Ok(())
-  }
-
-  #[allow(dead_code, reason = "compatibility helper for active root execution")]
-  pub(super) fn install_baseline_const_return(&mut self) -> Result<(), RuntimeError> {
-    let function = self.active_function_id();
-    let version = self
-      .profiling
-      .jit
-      .install_const_prefix(function, &self.execution.active.chunk, 0)
-      .map_err(RuntimeError::from)?;
-    self
-      .profiling
-      .functions
-      .entry(function)
-      .or_default()
-      .baseline = crate::vm::jit::BaselineState::Ready(version);
-    Ok(())
-  }
-
   pub(super) fn try_direct_baseline_call(
     &mut self,
     call_site: usize,
@@ -61,15 +17,10 @@ impl Vm {
       .get(call_site)
       .and_then(Clone::clone)
       .filter(|entry| Rc::ptr_eq(&entry.expected_proto, proto));
-    if let Some(entry) = cached
-      && entry.target.is_valid()
-    {
+    if let Some(entry) = cached {
       let result = entry
         .target
-        .call(crate::vm::jit::DirectCallInputs {
-          receiver: this_value,
-          arguments,
-        });
+        .call(crate::vm::jit::DirectCallInputs { arguments });
       if matches!(
         entry.target.leaf(),
         crate::vm::jit::DirectLeaf::NumericBinary(_)
@@ -116,10 +67,7 @@ impl Vm {
           target: target.clone(),
         });
       }
-      let result = target.call(crate::vm::jit::DirectCallInputs {
-        receiver: this_value,
-        arguments,
-      });
+      let result = target.call(crate::vm::jit::DirectCallInputs { arguments });
       self
         .profiling
         .jit
@@ -167,10 +115,7 @@ impl Vm {
         });
       }
       let result = target
-        .call(crate::vm::jit::DirectCallInputs {
-          receiver: this_value,
-          arguments,
-        })
+        .call(crate::vm::jit::DirectCallInputs { arguments })
         .map_err(RuntimeError::from)?;
       self.profiling.jit_stats.baseline_entries = self
         .profiling
@@ -235,7 +180,6 @@ impl Vm {
         .get(call_site)
         .and_then(Option::as_ref)
         .filter(|entry| Rc::ptr_eq(&entry.expected_proto, proto))
-        .filter(|entry| entry.target.is_valid())
         .filter(|entry| {
           matches!(
             entry.target.leaf(),
@@ -247,10 +191,7 @@ impl Vm {
       };
       entry
         .target
-        .call(crate::vm::jit::DirectCallInputs {
-          receiver: &Value::Undefined,
-          arguments,
-        })
+        .call(crate::vm::jit::DirectCallInputs { arguments })
     };
     self
       .profiling

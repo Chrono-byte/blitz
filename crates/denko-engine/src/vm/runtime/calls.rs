@@ -887,7 +887,6 @@ impl Vm {
     self.execution.active.ip = 0;
     self.execution.active.closure_env = Some(Rc::clone(closure_env));
     self.execution.active.slots = Some(SlotMetadata {
-      types: proto.slot_types.clone(),
       names: proto.slot_names.clone(),
       immutable: proto.slot_immutable.clone(),
       sloppy_immutable_silent: proto.slot_sloppy_immutable_silent.clone(),

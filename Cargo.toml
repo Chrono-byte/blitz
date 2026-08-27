@@ -42,7 +42,6 @@ oxc_semantic = "0.141.0"
 oxc_span = "0.141.0"
 oxc_str = "0.141.0"
 oxc_syntax = "0.141.0"
-regex = "1"
 regex-js = { path = "crates/regex-js" }
 rustyline = "18"
 serde = { version = "1.0", features = ["derive"] }

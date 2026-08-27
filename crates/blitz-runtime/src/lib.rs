@@ -3,7 +3,6 @@
 
 pub mod app;
 /// Private host-side transport primitives used by the `blitz:app` adapter.
-#[allow(dead_code)]
 pub(crate) mod app_transport;
 pub mod effect_assets;
 pub mod host;

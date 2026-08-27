@@ -142,7 +142,6 @@ impl Vm {
     }
     self.execution.active.lexical_env = root_env;
     self.execution.active.slots = Some(SlotMetadata {
-      types: slot_types,
       names: slot_names,
       immutable: slot_immutable,
       sloppy_immutable_silent: slot_sloppy_immutable_silent,

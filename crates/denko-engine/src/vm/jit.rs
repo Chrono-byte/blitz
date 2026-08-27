@@ -3,8 +3,6 @@
 //!
 //! The interpreter and future JIT share these stable, VM-PC keyed identities and
 //! feedback records. Generated machine code must never be the owner of feedback.
-#![allow(dead_code, reason = "staged JIT metadata is consumed incrementally")]
-
 use crate::value::Value;
 pub(crate) mod artifact;
 pub(crate) mod ir;
@@ -13,19 +11,12 @@ mod worker;
 
 use crate::bytecode::{Chunk, Constant, Op};
 use native::NativeCode;
-use std::cell::Cell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use worker::{
-  CompilationKey, CompileCompletion, CompileRequest, CompileTicket, CompilerWorker,
-  RejectionReason, SnapshotStamp, SpecializationKey,
+  CompilationKey, CompileCompletion, CompileRequest, CompileTicket, CompilerWorker, SnapshotStamp,
+  SpecializationKey,
 };
-
-#[derive(Clone, Copy, Debug)]
-enum BaselineOp {
-  SetNumberResult(f64),
-  Return,
-}
 
 struct BaselineCompiler<'a> {
   chunk: &'a Chunk,
@@ -70,32 +61,6 @@ impl<'a> BaselineCompiler<'a> {
       ));
     }
     Err("unsupported direct leaf load".to_string())
-  }
-
-  fn compile_const_return(self) -> Result<NativeCode, String> {
-    let Some([const_word, return_word]) = self.chunk.code.get(..2) else {
-      return Err("baseline expects Const; Return prefix".to_string());
-    };
-    if (*const_word & 0xff) as u8 != Op::Const as u8
-      || (*return_word & 0xff) as u8 != Op::Return as u8
-      || ((*const_word >> 8) & 0xf) != ((*return_word >> 8) & 0xf)
-    {
-      return Err("baseline expects Const rN; Return rN".to_string());
-    }
-    let constant_index = ((*const_word >> 16) & 0xffff) as usize;
-    let Constant::Number(value) = self
-      .chunk
-      .constants
-      .get(constant_index)
-      .ok_or_else(|| "constant index out of bounds".to_string())?
-    else {
-      return Err("baseline constant return currently supports numbers only".to_string());
-    };
-    let ops = [BaselineOp::SetNumberResult(*value), BaselineOp::Return];
-    match ops {
-      [BaselineOp::SetNumberResult(value), BaselineOp::Return] => NativeCode::return_number(value),
-      _ => unreachable!(),
-    }
   }
 
   fn compile_const_prefix(self) -> Result<NativeCode, String> {
@@ -319,8 +284,6 @@ pub(crate) struct CodeVersionId(u64);
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum JitCodeState {
   Valid,
-  Invalidated,
-  Retired,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -420,26 +383,17 @@ fn discover_blocks(chunk: &Chunk) -> Result<Vec<CompiledBlock>, String> {
   Ok(blocks)
 }
 
-#[derive(Clone, Debug, Default)]
-pub(crate) struct PcMap {
-  pub(crate) entries: Vec<(usize, VmPc)>,
-}
-
 #[derive(Debug)]
 pub(crate) struct NativeBlock {
-  pub(crate) start_pc: VmPc,
-  pub(crate) end_pc: VmPc,
   code: NativeCode,
+  #[cfg(test)]
   direct_exit: Option<native::PatchSite>,
 }
 
 #[derive(Debug)]
 pub(crate) struct JitCode {
-  pub(crate) function: FunctionId,
   pub(crate) version: CodeVersionId,
   pub(crate) state: JitCodeState,
-  pub(crate) cfg_blocks: Vec<CompiledBlock>,
-  pub(crate) pc_map: PcMap,
   pub(crate) preferred_entry: VmPc,
   native_blocks: HashMap<VmPc, NativeBlock>,
   direct_call: Option<DirectCallTarget>,
@@ -448,7 +402,6 @@ pub(crate) struct JitCode {
 #[derive(Clone, Debug)]
 pub(crate) struct DirectCallTarget {
   code: Rc<NativeCode>,
-  valid: Rc<Cell<bool>>,
   leaf: DirectLeaf,
   contract: DirectCallContract,
 }
@@ -468,12 +421,6 @@ pub(crate) enum NumericBinaryOp {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum DirectReceiverUse {
-  Unused,
-  RequiresJsThis,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DirectArgumentUse {
   None,
   Parameter(u16),
@@ -482,20 +429,14 @@ pub(crate) enum DirectArgumentUse {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct DirectCallContract {
-  pub(crate) receiver: DirectReceiverUse,
   pub(crate) arguments: DirectArgumentUse,
 }
 
 pub(crate) struct DirectCallInputs<'a> {
-  pub(crate) receiver: &'a Value,
   pub(crate) arguments: &'a [Value],
 }
 
 impl DirectCallTarget {
-  pub(crate) fn is_valid(&self) -> bool {
-    self.valid.get()
-  }
-
   pub(crate) fn leaf(&self) -> DirectLeaf {
     self.leaf
   }
@@ -508,16 +449,6 @@ impl DirectCallTarget {
     &self,
     inputs: DirectCallInputs<'_>,
   ) -> Result<Value, String> {
-    if !self.is_valid() {
-      return Err("direct call target was invalidated".to_string());
-    }
-    match self.contract.receiver {
-      DirectReceiverUse::Unused => {}
-      DirectReceiverUse::RequiresJsThis => {
-        return Err("direct call target requires an unsupported receiver ABI".to_string());
-      }
-    }
-    let _receiver = inputs.receiver;
     let arguments = inputs.arguments;
     if matches!(self.leaf, DirectLeaf::NumericBinary(_)) {
       let compact_arguments = [
@@ -577,7 +508,6 @@ enum CompilationState {
   },
   Rejected {
     stamp: SnapshotStamp,
-    reason: RejectionReason,
   },
 }
 
@@ -649,28 +579,6 @@ impl JitRuntime {
     CodeVersionId(self.next_version)
   }
 
-  pub(crate) fn install_placeholder(
-    &mut self,
-    function: FunctionId,
-  ) -> CodeVersionId {
-    let version = self.allocate_version();
-    self
-      .code
-      .entry(function)
-      .or_default()
-      .push(JitCode {
-        function,
-        version,
-        state: JitCodeState::Valid,
-        cfg_blocks: Vec::new(),
-        pc_map: PcMap::default(),
-        preferred_entry: 0,
-        native_blocks: HashMap::new(),
-        direct_call: None,
-      });
-    version
-  }
-
   pub(crate) fn install_const_prefix(
     &mut self,
     function: FunctionId,
@@ -684,9 +592,7 @@ impl JitRuntime {
       .ok()
       .map(|(code, leaf)| DirectCallTarget {
         code: Rc::new(code),
-        valid: Rc::new(Cell::new(true)),
         contract: DirectCallContract {
-          receiver: DirectReceiverUse::Unused,
           arguments: match leaf {
             DirectLeaf::Number(_) => DirectArgumentUse::None,
             DirectLeaf::Parameter(slot) => DirectArgumentUse::Parameter(slot),
@@ -701,9 +607,8 @@ impl JitRuntime {
         native_blocks.insert(
           block.start_pc,
           NativeBlock {
-            start_pc: block.start_pc,
-            end_pc: block.end_pc,
             code,
+            #[cfg(test)]
             direct_exit: None,
           },
         );
@@ -711,11 +616,9 @@ impl JitRuntime {
     }
     if let std::collections::hash_map::Entry::Vacant(entry) = native_blocks.entry(0) {
       let code = compiler.compile_const_prefix()?;
-      let end_pc = blocks.first().map_or(0, |block| block.end_pc);
       entry.insert(NativeBlock {
-        start_pc: 0,
-        end_pc,
         code,
+        #[cfg(test)]
         direct_exit: None,
       });
     }
@@ -725,13 +628,8 @@ impl JitRuntime {
       .entry(function)
       .or_default()
       .push(JitCode {
-        function,
         version,
         state: JitCodeState::Valid,
-        cfg_blocks: blocks,
-        pc_map: PcMap {
-          entries: vec![(0, 0)],
-        },
         preferred_entry: 0,
         native_blocks,
         direct_call,
@@ -813,13 +711,10 @@ impl JitRuntime {
       .as_ref()
       .is_some_and(|worker| worker.submit(request).is_ok());
     if !submitted {
-      self.optimizing.states.insert(
-        key,
-        CompilationState::Rejected {
-          stamp,
-          reason: RejectionReason::WorkerUnavailable,
-        },
-      );
+      self
+        .optimizing
+        .states
+        .insert(key, CompilationState::Rejected { stamp });
       self.disable_optimizing_worker();
     }
     Ok(None)
@@ -889,12 +784,10 @@ impl JitRuntime {
             let version = self.allocate_version();
             let target = DirectCallTarget {
               code: Rc::new(code),
-              valid: Rc::new(Cell::new(true)),
               leaf: match key.specialization {
                 SpecializationKey::NumericBinary(operation) => DirectLeaf::NumericBinary(operation),
               },
               contract: DirectCallContract {
-                receiver: DirectReceiverUse::Unused,
                 arguments: DirectArgumentUse::NumericPair,
               },
             };
@@ -903,11 +796,8 @@ impl JitRuntime {
               .entry(key.function)
               .or_default()
               .push(JitCode {
-                function: key.function,
                 version,
                 state: JitCodeState::Valid,
-                cfg_blocks: Vec::new(),
-                pc_map: PcMap::default(),
                 preferred_entry: 0,
                 native_blocks: HashMap::new(),
                 direct_call: Some(target),
@@ -919,13 +809,10 @@ impl JitRuntime {
             self.optimizing.compile_installs = self.optimizing.compile_installs.saturating_add(1);
           }
           Err(()) => {
-            self.optimizing.states.insert(
-              key,
-              CompilationState::Rejected {
-                stamp,
-                reason: RejectionReason::InvalidArtifact,
-              },
-            );
+            self
+              .optimizing
+              .states
+              .insert(key, CompilationState::Rejected { stamp });
             self.optimizing.compile_rejections = self
               .optimizing
               .compile_rejections
@@ -933,11 +820,11 @@ impl JitRuntime {
           }
         }
       }
-      CompileCompletion::Rejected { reason, .. } => {
+      CompileCompletion::Rejected { .. } => {
         self
           .optimizing
           .states
-          .insert(key, CompilationState::Rejected { stamp, reason });
+          .insert(key, CompilationState::Rejected { stamp });
         self.optimizing.compile_rejections = self
           .optimizing
           .compile_rejections
@@ -953,10 +840,7 @@ impl JitRuntime {
     self.optimizing.worker.take();
     for state in self.optimizing.states.values_mut() {
       if let CompilationState::Pending { stamp, .. } = *state {
-        *state = CompilationState::Rejected {
-          stamp,
-          reason: RejectionReason::WorkerUnavailable,
-        };
+        *state = CompilationState::Rejected { stamp };
       }
     }
   }
@@ -1129,6 +1013,7 @@ impl JitRuntime {
   }
 
   #[cfg(all(unix, target_arch = "x86_64"))]
+  #[cfg(test)]
   pub(crate) fn link_direct(
     &mut self,
     function: FunctionId,
@@ -1160,23 +1045,6 @@ impl JitRuntime {
       .ok_or_else(|| "native block has no patchable exit".to_string())?;
     source.code.patch_jump(site, target)
   }
-
-  pub(crate) fn invalidate(
-    &mut self,
-    function: FunctionId,
-    version: CodeVersionId,
-  ) {
-    if let Some(code) = self.code.get_mut(&function)
-      && let Some(version) = code
-        .iter_mut()
-        .find(|code| code.version == version)
-    {
-      version.state = JitCodeState::Invalidated;
-      if let Some(target) = &version.direct_call {
-        target.valid.set(false);
-      }
-    }
-  }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1187,53 +1055,6 @@ pub(crate) enum BaselineState {
   Compiling,
   Ready(CodeVersionId),
   Disabled,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum ValueKind {
-  #[default]
-  Unknown,
-  Undefined,
-  Null,
-  Boolean,
-  Number,
-  String,
-  Object,
-  Other,
-}
-
-impl ValueKind {
-  pub(crate) fn of(value: &Value) -> Self {
-    match value {
-      Value::Undefined => Self::Undefined,
-      Value::Null => Self::Null,
-      Value::Bool(_) => Self::Boolean,
-      Value::Number(_) => Self::Number,
-      Value::String(_) => Self::String,
-      value if value.is_object() => Self::Object,
-      _ => Self::Other,
-    }
-  }
-}
-
-#[derive(Clone, Debug, Default)]
-pub(crate) struct BinaryOpFeedback {
-  pub(crate) lhs: ValueKind,
-  pub(crate) rhs: ValueKind,
-  pub(crate) result: ValueKind,
-  pub(crate) observations: u32,
-}
-
-#[derive(Clone, Debug, Default)]
-pub(crate) struct BranchFeedback {
-  pub(crate) taken: u64,
-  pub(crate) not_taken: u64,
-}
-
-#[derive(Clone, Debug, Default)]
-pub(crate) struct FeedbackVector {
-  pub(crate) binary_ops: HashMap<VmPc, BinaryOpFeedback>,
-  pub(crate) branches: HashMap<VmPc, BranchFeedback>,
 }
 
 #[cfg(test)]
@@ -1327,18 +1148,13 @@ mod tests {
     runtime.code.insert(
       function,
       vec![JitCode {
-        function,
         version,
         state: JitCodeState::Valid,
-        cfg_blocks: Vec::new(),
-        pc_map: PcMap::default(),
         preferred_entry: 0,
         native_blocks: HashMap::from([
           (
             0,
             NativeBlock {
-              start_pc: 0,
-              end_pc: 1,
               code: source_code,
               direct_exit: Some(site),
             },
@@ -1346,8 +1162,6 @@ mod tests {
           (
             1,
             NativeBlock {
-              start_pc: 1,
-              end_pc: 2,
               code: NativeCode::return_number(42.0).expect("target"),
               direct_exit: None,
             },
@@ -1384,18 +1198,13 @@ mod tests {
     runtime.code.insert(
       function,
       vec![JitCode {
-        function,
         version: CodeVersionId(1),
         state: JitCodeState::Valid,
-        cfg_blocks: Vec::new(),
-        pc_map: PcMap::default(),
         preferred_entry: 0,
         native_blocks: HashMap::from([
           (
             0,
             NativeBlock {
-              start_pc: 0,
-              end_pc: 1,
               code: NativeCode::next_block(1).expect("block zero"),
               direct_exit: None,
             },
@@ -1403,8 +1212,6 @@ mod tests {
           (
             1,
             NativeBlock {
-              start_pc: 1,
-              end_pc: 2,
               code: NativeCode::return_number(42.0).expect("block one"),
               direct_exit: None,
             },
@@ -1458,32 +1265,6 @@ mod tests {
         },
       ]
     );
-  }
-
-  #[test]
-  fn compiles_actual_risc_const_return() {
-    let mut chunk = Chunk::new(Arc::new(String::new()));
-    chunk.constants.push(Constant::Number(42.0));
-    chunk.write_instr(Op::Const as u32, 0);
-    chunk.write_instr(Op::Return as u32, 0);
-    let code = BaselineCompiler { chunk: &chunk }
-      .compile_const_return()
-      .expect("baseline compile");
-    let mut result = Value::Undefined;
-    let mut frame = JitFrame {
-      vm: std::ptr::null_mut(),
-      function_id: 0,
-      vm_pc: 0,
-      registers: std::ptr::null_mut(),
-      register_count: 0,
-      result: &mut result,
-      arguments: std::ptr::null(),
-      argument_count: 0,
-      locals: std::ptr::null_mut(),
-      local_count: 0,
-    };
-    assert_eq!(unsafe { code.call_frame(&mut frame) }, 0);
-    assert!(matches!(result, Value::Number(value) if value == 42.0));
   }
 
   #[test]
@@ -1624,7 +1405,6 @@ pub(crate) struct FunctionProfile {
   pub(crate) calls: u64,
   pub(crate) parameter_count: usize,
   pub(crate) loop_counts: HashMap<VmPc, u64>,
-  pub(crate) feedback: FeedbackVector,
   pub(crate) baseline: BaselineState,
 }
 

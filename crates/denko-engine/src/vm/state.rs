@@ -32,7 +32,6 @@ use crate::environment::EnvironmentRecord;
 use crate::gc;
 use crate::module::ModuleLoader;
 use crate::realm::Realm;
-use crate::typecheck::Type;
 use crate::value::{ObjectData, SharedValue, Value};
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
@@ -175,9 +174,6 @@ pub(crate) struct RealmState {
 
 #[derive(Clone)]
 pub(crate) struct SlotMetadata {
-  /// TypeScript annotations carried for diagnostics; erased by JS execution.
-  #[allow(dead_code)]
-  pub(crate) types: Vec<Option<Type>>,
   pub(crate) names: Vec<Option<String>>,
   pub(crate) immutable: Vec<bool>,
   pub(crate) sloppy_immutable_silent: Vec<bool>,
@@ -313,10 +309,6 @@ pub(super) struct ProfilingState {
   /// Avoid feedback-map traffic after a chunk has requested compilation.
   pub(super) last_hot_chunk: usize,
   pub(super) hot_chunks: std::collections::HashSet<usize>,
-  #[allow(
-    dead_code,
-    reason = "native code lifecycle is introduced before emission"
-  )]
   pub(super) jit: crate::vm::jit::JitRuntime,
   pub(super) jit_stats: crate::vm::jit::JitStats,
 }

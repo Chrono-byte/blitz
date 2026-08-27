@@ -112,22 +112,6 @@ mod test {
     assert_eq!(vm.get_global("native_interrupt_completed"), None);
   }
 
-  #[test]
-  fn ordinary_function_call_enters_baseline_and_returns() {
-    let (mut vm, _) = run_script("function answer() { return 42; }");
-    let function = vm.get_global("answer").expect("answer function");
-    vm.install_baseline_for_function(&function)
-      .expect("install baseline");
-    let result = vm
-      .call_value_with_this(&function, &Value::Undefined, &[])
-      .expect("call answer");
-
-    assert!(matches!(result, Value::Number(value) if value == 42.0));
-    assert_eq!(vm.profiling.jit_stats.baseline_entries, 1);
-    assert_eq!(vm.profiling.jit_stats.baseline_returns, 1);
-    assert_eq!(vm.profiling.jit_stats.interpreter_resumes, 0);
-  }
-
   #[cfg(all(unix, target_arch = "x86_64"))]
   #[test]
   fn hot_function_is_automatically_compiled_and_entered() {
@@ -715,24 +699,6 @@ mod test {
       vm.get_global("changed_target_result"),
       Some(Value::Number(2.0))
     );
-  }
-
-  #[test]
-  fn ordinary_function_call_resumes_interpreter_after_native_prefix() {
-    let (mut vm, _) = run_script("function negative() { return -42; }");
-    let function = vm
-      .get_global("negative")
-      .expect("negative function");
-    vm.install_baseline_for_function(&function)
-      .expect("install baseline");
-    let result = vm
-      .call_value_with_this(&function, &Value::Undefined, &[])
-      .expect("call negative");
-
-    assert!(matches!(result, Value::Number(value) if value == -42.0));
-    assert_eq!(vm.profiling.jit_stats.baseline_entries, 1);
-    assert_eq!(vm.profiling.jit_stats.baseline_returns, 0);
-    assert_eq!(vm.profiling.jit_stats.interpreter_resumes, 1);
   }
 
   #[test]

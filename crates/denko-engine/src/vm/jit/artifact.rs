@@ -20,12 +20,6 @@ pub(crate) enum TargetIsa {
 pub(crate) struct CodeOffset(u32);
 
 impl CodeOffset {
-  fn from_index(index: usize) -> Result<Self, ArtifactError> {
-    u32::try_from(index)
-      .map(Self)
-      .map_err(|_| ArtifactError::TooLarge)
-  }
-
   pub(super) fn index(self) -> usize {
     self.0 as usize
   }

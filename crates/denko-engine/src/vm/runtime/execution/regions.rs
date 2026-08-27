@@ -1038,11 +1038,6 @@ impl Vm {
     let Some(direct) = direct else {
       return Ok(false);
     };
-    if !direct.target.is_valid()
-      || direct.target.contract().receiver != crate::vm::jit::DirectReceiverUse::Unused
-    {
-      return Ok(false);
-    }
     let addend = match (direct.target.leaf(), direct.target.contract().arguments) {
       (crate::vm::jit::DirectLeaf::Number(value), crate::vm::jit::DirectArgumentUse::None) => value,
       (
@@ -1278,7 +1273,7 @@ impl Vm {
           .get(call_site)
           .and_then(Clone::clone)
           .filter(|entry| Rc::ptr_eq(&entry.expected_proto, &proto));
-        let Some(direct) = direct.filter(|entry| entry.target.is_valid()) else {
+        let Some(direct) = direct else {
           return Ok(false);
         };
         match (direct.target.leaf(), arguments) {

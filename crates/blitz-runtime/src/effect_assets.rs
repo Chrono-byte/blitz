@@ -36,7 +36,6 @@ include!(concat!(
   "/assets/effect/3.16.7/embedded.rs"
 ));
 
-#[allow(dead_code, missing_docs)]
 mod generated_stdlib {
   include!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -44,13 +43,51 @@ mod generated_stdlib {
   ));
 }
 
-use generated_stdlib::EMBEDDED_BLITZ_STDLIB_MODULES;
+use generated_stdlib::{
+  BLITZ_STDLIB_EFFECT_VERSION, BLITZ_STDLIB_HOST_ABI_VERSION, BLITZ_STDLIB_RUNTIME_ABI_VERSION,
+  EMBEDDED_BLITZ_STDLIB_MODULES, EmbeddedBlitzStdlibModule,
+};
 use serde::Deserialize;
 use std::collections::HashMap;
 
 /// The declarations intentionally supported by the first facade milestone.
 pub const BLITZ_MATCH_SUPPORTED_EXPORTS: &[&str] =
   &["value", "type", "valueTags", "typeTags", "exhaustive"];
+
+const _: () =
+  assert!(BLITZ_STDLIB_RUNTIME_ABI_VERSION == crate::runtime_graph::RUNTIME_ABI_VERSION);
+const _: () =
+  assert!(BLITZ_STDLIB_HOST_ABI_VERSION == crate::runtime_graph::HOST_BRIDGE_ABI_VERSION);
+const _: () =
+  assert!(BLITZ_STDLIB_EFFECT_VERSION.len() == crate::runtime_graph::EFFECT_VERSION.len());
+
+fn validate_stdlib_module(module: &EmbeddedBlitzStdlibModule) {
+  assert!(!module.source.is_empty());
+  assert_eq!(module.source_sha256.len(), 64);
+  assert_eq!(
+    module.declaration.is_some(),
+    module.declaration_sha256.is_some()
+  );
+  assert!(
+    module
+      .declaration_sha256
+      .is_none_or(|sha256| sha256.len() == 64)
+  );
+  assert!(
+    module
+      .dependencies
+      .iter()
+      .all(|dependency| !dependency.is_empty())
+  );
+  assert!(module.host_primitives.iter().all(|primitive| {
+    !primitive.name.is_empty()
+      && primitive.abi_version > 0
+      && primitive
+        .methods
+        .iter()
+        .all(|method| !method.is_empty())
+  }));
+}
 
 /// Look up declarations without registering bundled JavaScript as source.
 #[must_use]
@@ -62,7 +99,10 @@ pub fn declaration_source(specifier: &str) -> Option<&'static str> {
     .or_else(|| {
       EMBEDDED_BLITZ_STDLIB_MODULES
         .iter()
-        .find(|module| module.specifier == specifier)
+        .find(|module| {
+          validate_stdlib_module(module);
+          module.specifier == specifier
+        })
         .and_then(|module| module.declaration)
     })
 }
@@ -84,6 +124,7 @@ pub fn public_declaration_sources() -> Vec<(String, String)> {
       EMBEDDED_BLITZ_STDLIB_MODULES
         .iter()
         .filter_map(|module| {
+          validate_stdlib_module(module);
           (module.visibility == "public")
             .then_some(module.declaration)
             .flatten()

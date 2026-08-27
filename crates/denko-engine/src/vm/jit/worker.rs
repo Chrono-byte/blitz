@@ -82,13 +82,6 @@ pub(super) enum RejectionReason {
   UnsupportedBody,
   InvalidIr,
   UnsupportedTarget,
-  InvalidArtifact,
-  WorkerUnavailable,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum CompilerFailure {
-  Panicked,
 }
 
 #[derive(Debug)]
@@ -103,24 +96,12 @@ pub(super) enum CompileCompletion {
     ticket: CompileTicket,
     key: CompilationKey,
     stamp: SnapshotStamp,
-    reason: RejectionReason,
   },
   Failed {
     ticket: CompileTicket,
     key: CompilationKey,
     stamp: SnapshotStamp,
-    error: CompilerFailure,
   },
-}
-
-impl CompileCompletion {
-  pub(super) fn ticket(&self) -> CompileTicket {
-    match self {
-      Self::Compiled { ticket, .. }
-      | Self::Rejected { ticket, .. }
-      | Self::Failed { ticket, .. } => *ticket,
-    }
-  }
 }
 
 enum WorkerCommand {
@@ -188,13 +169,8 @@ fn worker_main(
     let ticket = request.ticket;
     let key = request.key;
     let stamp = request.stamp;
-    let completion =
-      catch_unwind(AssertUnwindSafe(|| compile(request))).unwrap_or(CompileCompletion::Failed {
-        ticket,
-        key,
-        stamp,
-        error: CompilerFailure::Panicked,
-      });
+    let completion = catch_unwind(AssertUnwindSafe(|| compile(request)))
+      .unwrap_or(CompileCompletion::Failed { ticket, key, stamp });
     if completions.send(completion).is_err() {
       break;
     }
@@ -222,11 +198,10 @@ fn compile(request: CompileRequest) -> CompileCompletion {
       stamp: request.stamp,
       artifact,
     },
-    Err(reason) => CompileCompletion::Rejected {
+    Err(_) => CompileCompletion::Rejected {
       ticket: request.ticket,
       key: request.key,
       stamp: request.stamp,
-      reason,
     },
   }
 }
@@ -234,9 +209,7 @@ fn compile(request: CompileRequest) -> CompileCompletion {
 fn map_ir_error(error: IrError) -> RejectionReason {
   match error {
     IrError::UnsupportedBody => RejectionReason::UnsupportedBody,
-    IrError::TooManyParameters | IrError::TooManyValues | IrError::InvalidSsa => {
-      RejectionReason::InvalidIr
-    }
+    IrError::TooManyParameters | IrError::InvalidSsa => RejectionReason::InvalidIr,
   }
 }
 
