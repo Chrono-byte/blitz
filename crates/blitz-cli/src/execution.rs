@@ -3,6 +3,7 @@
 use crate::args::ExecutionArgs;
 #[cfg(test)]
 use denko::compiler;
+#[cfg(test)]
 use denko::parser::Parser as JsParser;
 use denko::test262_support;
 use denko::value::Value;
@@ -54,18 +55,41 @@ pub(crate) fn run(
   }
 
   if let Some(source) = execution.eval {
-    let mut session = blitz_runtime::session::HostedSession::with_globals(globals, runtime_options);
-    session.preload(&execution.preloads)?;
-    let value = session.evaluate_repl(&source)?;
+    let outcome =
+      blitz_runtime::application::HostedApplication::with_globals(globals, runtime_options).run(
+        blitz_runtime::application::ApplicationRequest {
+          entry: blitz_runtime::application::ApplicationEntry::Eval { source },
+          preloads: execution.preloads,
+        },
+      )?;
     if execution.print {
-      print_completion(&value);
+      print_completion(
+        outcome
+          .completion
+          .as_ref()
+          .unwrap_or(&Value::Undefined),
+      );
     }
-    return Ok(session.run()?.code);
+    return Ok(outcome.exit.code);
   }
 
   let Some(path) = execution.file else {
     return crate::repl::run(runtime_options, &execution.preloads);
   };
+
+  if !execution.test262_harness {
+    let outcome =
+      blitz_runtime::application::HostedApplication::with_globals(globals, runtime_options).run(
+        blitz_runtime::application::ApplicationRequest {
+          entry: blitz_runtime::application::ApplicationEntry::File {
+            path,
+            force_module: execution.module,
+          },
+          preloads: execution.preloads,
+        },
+      )?;
+    return Ok(outcome.exit.code);
+  }
 
   let mut session = blitz_runtime::session::HostedSession::with_globals(globals, runtime_options);
   session.preload(&execution.preloads)?;
@@ -73,19 +97,12 @@ pub(crate) fn run(
   let source = std::fs::read_to_string(&path).map_err(|error| {
     denko::errors::RuntimeError::from(format!("Failed to read {}: {error}", path.display()))
   })?;
-  let entry_directory = path
-    .parent()
-    .filter(|parent| !parent.as_os_str().is_empty())
-    .unwrap_or_else(|| Path::new("."));
-  let entry_project = blitz_runtime::project::ProjectContext::discover(entry_directory)?;
-  let package_type = entry_project
-    .package
-    .as_ref()
-    .and_then(|package| package.package_type);
-  if should_load_as_module(&path, &source, execution.module, package_type) {
-    session.evaluate_module(&path)?;
+  let entry =
+    blitz_runtime::project_loader::ProjectLoader::resolve_entry(&path, &source, execution.module)?;
+  if entry.format == blitz_runtime::project_loader::ModuleFormat::Esm {
+    session.evaluate_module(&entry.path)?;
   } else {
-    session.evaluate_script(&source, &path)?;
+    session.evaluate_script(&source, &entry.path)?;
 
     if execution.test262_harness && session.vm_mut().get_global("$DONE").is_some() {
       wait_for_test262_completion(session.vm_mut(), &async_done_state)?;
@@ -340,40 +357,6 @@ fn evaluate_inline(
   vm.run(chunk).map_err(Into::into)
 }
 
-fn should_load_as_module(
-  path: &Path,
-  source: &str,
-  explicit_module: bool,
-  package_type: Option<blitz_runtime::project::PackageType>,
-) -> bool {
-  if explicit_module || JsParser::source_type_for_path(path, false).is_module() {
-    return true;
-  }
-
-  if package_type == Some(blitz_runtime::project::PackageType::Module)
-    && path
-      .extension()
-      .and_then(|extension| extension.to_str())
-      .is_some_and(|extension| matches!(extension, "js" | "jsx"))
-  {
-    return true;
-  }
-
-  is_typescript_path(path)
-    && JsParser::extract_imports_from_source_with_type(
-      source,
-      JsParser::source_type_for_path(path, true),
-    )
-    .is_ok_and(|imports| !imports.is_empty())
-}
-
-fn is_typescript_path(path: &Path) -> bool {
-  path
-    .extension()
-    .and_then(|extension| extension.to_str())
-    .is_some_and(|extension| matches!(extension, "ts" | "tsx" | "mts" | "cts"))
-}
-
 fn standard_globals() -> Rc<RefCell<denko::value::ObjectData>> {
   let globals = Rc::new(RefCell::new(denko::value::ObjectData::new()));
   let global_this = Value::Object(Rc::clone(&globals));
@@ -547,56 +530,5 @@ mod tests {
     assert!(
       matches!(vm.get_global("result"), Some(Value::Number(number)) if (number - 42.0).abs() < f64::EPSILON)
     );
-  }
-
-  #[test]
-  fn explicit_module_extensions_use_the_module_loader() {
-    assert!(should_load_as_module(
-      Path::new("entry.mjs"),
-      "",
-      false,
-      None
-    ));
-    assert!(should_load_as_module(
-      Path::new("entry.mts"),
-      "",
-      false,
-      None
-    ));
-    assert!(!should_load_as_module(
-      Path::new("entry.js"),
-      "",
-      false,
-      None
-    ));
-    assert!(!should_load_as_module(
-      Path::new("entry.cjs"),
-      "",
-      false,
-      None
-    ));
-    assert!(should_load_as_module(Path::new("entry.js"), "", true, None));
-    assert!(should_load_as_module(
-      Path::new("entry.js"),
-      "",
-      false,
-      Some(blitz_runtime::project::PackageType::Module)
-    ));
-  }
-
-  #[test]
-  fn typescript_imports_use_the_module_loader() {
-    assert!(should_load_as_module(
-      Path::new("entry.ts"),
-      "import * as Ref from \"effect/Ref\"; Ref.make(0);",
-      false,
-      None,
-    ));
-    assert!(!should_load_as_module(
-      Path::new("entry.ts"),
-      "const answer: number = 42;",
-      false,
-      None,
-    ));
   }
 }

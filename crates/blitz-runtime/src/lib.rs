@@ -4,11 +4,13 @@
 pub mod app;
 /// Private host-side transport primitives used by the `blitz:app` adapter.
 pub(crate) mod app_transport;
+pub mod application;
 pub mod effect_assets;
 pub mod host;
 pub mod modules;
 pub mod net;
 pub mod project;
+pub mod project_loader;
 pub mod rpc;
 pub mod runtime_graph;
 pub mod session;
