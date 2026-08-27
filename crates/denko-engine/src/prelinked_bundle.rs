@@ -3,9 +3,10 @@
 //!
 //! This format is deliberately separate from [`crate::bytecode_bundle`]. It
 //! carries graph/linking metadata as well as the complete chunk tree. Version
-//! 3 stores source text once per module instead of repeating it in every nested
-//! chunk. Its decoder bounds every length before allocating and retains read
-//! compatibility with version 2 bundles.
+//! Version 3 stores source text once per module instead of repeating it in every
+//! nested chunk, version 4 stores function lengths, and version 5 widens
+//! captured local indices. Its decoder bounds every length before allocating
+//! and retains read compatibility with version 2 bundles.
 //! Decoded graphs are passed through [`PrelinkedModuleGraph::validate`] before
 //! they are returned.
 
@@ -24,7 +25,7 @@ use std::sync::Arc;
 use thiserror::Error;
 
 /// Current version of the prelinked graph wire envelope.
-pub const PRELINKED_GRAPH_WIRE_VERSION: u16 = 4;
+pub const PRELINKED_GRAPH_WIRE_VERSION: u16 = 5;
 
 const SOURCE_TEXT_WIRE_VERSION: u16 = 2;
 
@@ -453,7 +454,7 @@ fn encode_function(
   writer.vector_len(function.upvalues.len(), MAX_VECTOR_ITEMS, "upvalue count")?;
   for upvalue in &function.upvalues {
     writer.bool(upvalue.is_local);
-    writer.u8(upvalue.index);
+    writer.u16(upvalue.index);
     writer.option_string(upvalue.mirror_global_name.as_deref(), StringKind::Name)?;
     writer.bool(upvalue.immutable);
     writer.bool(upvalue.sloppy_immutable_silent);
@@ -505,9 +506,15 @@ fn decode_function(
   let upvalue_count = reader.vector_len(MAX_VECTOR_ITEMS, "upvalue count")?;
   let mut upvalues = Vec::with_capacity(upvalue_count);
   for _ in 0..upvalue_count {
+    let is_local = reader.bool()?;
+    let index = if reader.wire_version >= 5 {
+      reader.u16()?
+    } else {
+      u16::from(reader.u8()?)
+    };
     upvalues.push(UpvalueSpec {
-      is_local: reader.bool()?,
-      index: reader.u8()?,
+      is_local,
+      index,
       mirror_global_name: reader.option_string(StringKind::Name)?,
       immutable: reader.bool()?,
       sloppy_immutable_silent: reader.bool()?,

@@ -516,7 +516,15 @@ impl RiscBuilder {
           let rd = destination_register(destination, 0);
           emit(
             &mut lowered,
-            encode_risc_aux16(instruction.op, rd, arg as u16),
+            encode_risc_aux16(
+              instruction.op,
+              rd,
+              if matches!(instruction.op, Op::LoadLocal) {
+                instruction.operand_u16()
+              } else {
+                arg as u16
+              },
+            ),
             line,
           );
           store_location(&mut lowered, destination, rd, line);
@@ -539,6 +547,8 @@ impl RiscBuilder {
               instruction.op,
               source,
               if matches!(instruction.op, Op::SetGlobal) {
+                instruction.operand_u16()
+              } else if matches!(instruction.op, Op::StoreLocal) {
                 instruction.operand_u16()
               } else {
                 arg as u16
@@ -813,7 +823,7 @@ impl RiscBuilder {
         Op::CloneLocalCell | Op::ResetLocalCell => {
           emit(
             &mut lowered,
-            encode_risc_aux16(instruction.op, 0, arg as u16),
+            encode_risc_aux16(instruction.op, 0, instruction.operand_u16()),
             line,
           );
         }

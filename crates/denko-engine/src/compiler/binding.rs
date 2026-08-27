@@ -52,7 +52,7 @@ impl super::Compiler {
     self.emit(Op::Call, LINE);
     self.emit_byte(1, LINE);
     self.emit(Op::StoreLocal, LINE);
-    self.emit_byte(self.slot_to_u8(reference_slot)?, LINE);
+    self.emit_slot(reference_slot, LINE);
     Ok(reference_slot)
   }
 
@@ -63,7 +63,7 @@ impl super::Compiler {
   ) -> Result<(), crate::errors::CompilerError> {
     self.emit_get_builtin_name("getResolvedIdentifier");
     self.emit(Op::LoadLocal, LINE);
-    self.emit_byte(self.slot_to_u8(reference_slot)?, LINE);
+    self.emit_slot(reference_slot, LINE);
     self.emit_constant(Value::String(name.into()), LINE);
     self.emit(Op::Call, LINE);
     self.emit_byte(2, LINE);
@@ -77,13 +77,13 @@ impl super::Compiler {
   ) -> Result<(), crate::errors::CompilerError> {
     let value_slot = self.alloc_reusable_temp_local("with_identifier_value");
     self.emit(Op::StoreLocal, LINE);
-    self.emit_byte(self.slot_to_u8(value_slot)?, LINE);
+    self.emit_slot(value_slot, LINE);
     self.emit_get_builtin_name("setResolvedIdentifier");
     self.emit(Op::LoadLocal, LINE);
-    self.emit_byte(self.slot_to_u8(reference_slot)?, LINE);
+    self.emit_slot(reference_slot, LINE);
     self.emit_constant(Value::String(name.into()), LINE);
     self.emit(Op::LoadLocal, LINE);
-    self.emit_byte(self.slot_to_u8(value_slot)?, LINE);
+    self.emit_slot(value_slot, LINE);
     self.emit(Op::Call, LINE);
     self.emit_byte(3, LINE);
     Ok(())
@@ -102,7 +102,7 @@ impl super::Compiler {
           let receiver_slot = self.alloc_temp_local("destructuring_super_receiver");
           self.emit(Op::GetThis, LINE);
           self.emit(Op::StoreLocal, LINE);
-          self.emit_byte(self.slot_to_u8(receiver_slot)?, LINE);
+          self.emit_slot(receiver_slot, LINE);
           return Ok(Some(PreparedAssignmentTarget::SuperStatic {
             receiver_slot,
             property: Value::String(member.property.name.to_string().into()),
@@ -111,7 +111,7 @@ impl super::Compiler {
         self.compile_expr_oast(&member.object)?;
         let object_slot = self.alloc_temp_local("destructuring_target_object");
         self.emit(Op::StoreLocal, LINE);
-        self.emit_byte(self.slot_to_u8(object_slot)?, LINE);
+        self.emit_slot(object_slot, LINE);
         Ok(Some(PreparedAssignmentTarget::StaticMember {
           object_slot,
           property: Value::String(member.property.name.to_string().into()),
@@ -122,11 +122,11 @@ impl super::Compiler {
           let receiver_slot = self.alloc_temp_local("destructuring_super_receiver");
           self.emit(Op::GetThis, LINE);
           self.emit(Op::StoreLocal, LINE);
-          self.emit_byte(self.slot_to_u8(receiver_slot)?, LINE);
+          self.emit_slot(receiver_slot, LINE);
           self.compile_expr_oast(&member.expression)?;
           let key_slot = self.alloc_temp_local("destructuring_super_key");
           self.emit(Op::StoreLocal, LINE);
-          self.emit_byte(self.slot_to_u8(key_slot)?, LINE);
+          self.emit_slot(key_slot, LINE);
           return Ok(Some(PreparedAssignmentTarget::SuperComputed {
             receiver_slot,
             key_slot,
@@ -135,11 +135,11 @@ impl super::Compiler {
         self.compile_expr_oast(&member.object)?;
         let object_slot = self.alloc_temp_local("destructuring_target_object");
         self.emit(Op::StoreLocal, LINE);
-        self.emit_byte(self.slot_to_u8(object_slot)?, LINE);
+        self.emit_slot(object_slot, LINE);
         self.compile_expr_oast(&member.expression)?;
         let key_slot = self.alloc_temp_local("destructuring_target_key");
         self.emit(Op::StoreLocal, LINE);
-        self.emit_byte(self.slot_to_u8(key_slot)?, LINE);
+        self.emit_slot(key_slot, LINE);
         Ok(Some(PreparedAssignmentTarget::ComputedMember {
           object_slot,
           key_slot,
@@ -165,7 +165,7 @@ impl super::Compiler {
           let receiver_slot = self.alloc_temp_local("destructuring_super_receiver");
           self.emit(Op::GetThis, LINE);
           self.emit(Op::StoreLocal, LINE);
-          self.emit_byte(self.slot_to_u8(receiver_slot)?, LINE);
+          self.emit_slot(receiver_slot, LINE);
           return Ok(Some(PreparedAssignmentTarget::SuperStatic {
             receiver_slot,
             property: Value::String(member.property.name.to_string().into()),
@@ -174,7 +174,7 @@ impl super::Compiler {
         self.compile_expr_oast(&member.object)?;
         let object_slot = self.alloc_temp_local("destructuring_target_object");
         self.emit(Op::StoreLocal, LINE);
-        self.emit_byte(self.slot_to_u8(object_slot)?, LINE);
+        self.emit_slot(object_slot, LINE);
         Ok(Some(PreparedAssignmentTarget::StaticMember {
           object_slot,
           property: Value::String(member.property.name.to_string().into()),
@@ -185,11 +185,11 @@ impl super::Compiler {
           let receiver_slot = self.alloc_temp_local("destructuring_super_receiver");
           self.emit(Op::GetThis, LINE);
           self.emit(Op::StoreLocal, LINE);
-          self.emit_byte(self.slot_to_u8(receiver_slot)?, LINE);
+          self.emit_slot(receiver_slot, LINE);
           self.compile_expr_oast(&member.expression)?;
           let key_slot = self.alloc_temp_local("destructuring_super_key");
           self.emit(Op::StoreLocal, LINE);
-          self.emit_byte(self.slot_to_u8(key_slot)?, LINE);
+          self.emit_slot(key_slot, LINE);
           return Ok(Some(PreparedAssignmentTarget::SuperComputed {
             receiver_slot,
             key_slot,
@@ -198,11 +198,11 @@ impl super::Compiler {
         self.compile_expr_oast(&member.object)?;
         let object_slot = self.alloc_temp_local("destructuring_target_object");
         self.emit(Op::StoreLocal, LINE);
-        self.emit_byte(self.slot_to_u8(object_slot)?, LINE);
+        self.emit_slot(object_slot, LINE);
         self.compile_expr_oast(&member.expression)?;
         let key_slot = self.alloc_temp_local("destructuring_target_key");
         self.emit(Op::StoreLocal, LINE);
-        self.emit_byte(self.slot_to_u8(key_slot)?, LINE);
+        self.emit_slot(key_slot, LINE);
         Ok(Some(PreparedAssignmentTarget::ComputedMember {
           object_slot,
           key_slot,
@@ -224,12 +224,12 @@ impl super::Compiler {
       } => {
         let value_slot = self.alloc_temp_local("assign_member_value");
         self.emit(Op::StoreLocal, LINE);
-        self.emit_byte(self.slot_to_u8(value_slot)?, LINE);
+        self.emit_slot(value_slot, LINE);
         self.emit(Op::LoadLocal, LINE);
-        self.emit_byte(self.slot_to_u8(*object_slot)?, LINE);
+        self.emit_slot(*object_slot, LINE);
         self.emit_constant(property.clone(), LINE);
         self.emit(Op::LoadLocal, LINE);
-        self.emit_byte(self.slot_to_u8(value_slot)?, LINE);
+        self.emit_slot(value_slot, LINE);
         self.emit(Op::SetProperty, LINE);
         self.emit(Op::Discard, LINE);
         Ok(())
@@ -240,13 +240,13 @@ impl super::Compiler {
       } => {
         let value_slot = self.alloc_temp_local("assign_member_value");
         self.emit(Op::StoreLocal, LINE);
-        self.emit_byte(self.slot_to_u8(value_slot)?, LINE);
+        self.emit_slot(value_slot, LINE);
         self.emit(Op::LoadLocal, LINE);
-        self.emit_byte(self.slot_to_u8(*object_slot)?, LINE);
+        self.emit_slot(*object_slot, LINE);
         self.emit(Op::LoadLocal, LINE);
-        self.emit_byte(self.slot_to_u8(*key_slot)?, LINE);
+        self.emit_slot(*key_slot, LINE);
         self.emit(Op::LoadLocal, LINE);
-        self.emit_byte(self.slot_to_u8(value_slot)?, LINE);
+        self.emit_slot(value_slot, LINE);
         self.emit(Op::SetProperty, LINE);
         self.emit(Op::Discard, LINE);
         Ok(())
@@ -257,12 +257,12 @@ impl super::Compiler {
       } => {
         let value_slot = self.alloc_reusable_temp_local("assign_super_value");
         self.emit(Op::StoreLocal, LINE);
-        self.emit_byte(self.slot_to_u8(value_slot)?, LINE);
+        self.emit_slot(value_slot, LINE);
         self.emit(Op::LoadLocal, LINE);
-        self.emit_byte(self.slot_to_u8(*receiver_slot)?, LINE);
+        self.emit_slot(*receiver_slot, LINE);
         self.emit_constant(property.clone(), LINE);
         self.emit(Op::LoadLocal, LINE);
-        self.emit_byte(self.slot_to_u8(value_slot)?, LINE);
+        self.emit_slot(value_slot, LINE);
         self.emit(Op::SetSuperProperty, LINE);
         self.emit(Op::Discard, LINE);
         Ok(())
@@ -273,13 +273,13 @@ impl super::Compiler {
       } => {
         let value_slot = self.alloc_reusable_temp_local("assign_super_value");
         self.emit(Op::StoreLocal, LINE);
-        self.emit_byte(self.slot_to_u8(value_slot)?, LINE);
+        self.emit_slot(value_slot, LINE);
         self.emit(Op::LoadLocal, LINE);
-        self.emit_byte(self.slot_to_u8(*receiver_slot)?, LINE);
+        self.emit_slot(*receiver_slot, LINE);
         self.emit(Op::LoadLocal, LINE);
-        self.emit_byte(self.slot_to_u8(*key_slot)?, LINE);
+        self.emit_slot(*key_slot, LINE);
         self.emit(Op::LoadLocal, LINE);
-        self.emit_byte(self.slot_to_u8(value_slot)?, LINE);
+        self.emit_slot(value_slot, LINE);
         self.emit(Op::SetSuperProperty, LINE);
         self.emit(Op::Discard, LINE);
         Ok(())
@@ -323,7 +323,7 @@ impl super::Compiler {
       PreparedPropertyKey::Constant(value) => self.emit_constant(value.clone(), LINE),
       PreparedPropertyKey::Local(slot) => {
         self.emit(Op::LoadLocal, LINE);
-        self.emit_byte(self.slot_to_u8(*slot)?, LINE);
+        self.emit_slot(*slot, LINE);
       }
     }
     Ok(())
@@ -347,9 +347,9 @@ impl super::Compiler {
     self.emit_byte(1, LINE);
     let slot = self.alloc_temp_local("destructuring_property_key");
     self.emit(Op::StoreLocal, LINE);
-    self.emit_byte(self.slot_to_u8(slot)?, LINE);
+    self.emit_slot(slot, LINE);
     self.emit(Op::LoadLocal, LINE);
-    self.emit_byte(self.slot_to_u8(slot)?, LINE);
+    self.emit_slot(slot, LINE);
     Ok(PreparedPropertyKey::Local(slot))
   }
 
@@ -359,10 +359,10 @@ impl super::Compiler {
   ) -> Result<(), crate::errors::CompilerError> {
     let source_slot = self.alloc_temp_local("object_rest_source");
     self.emit(Op::StoreLocal, LINE);
-    self.emit_byte(self.slot_to_u8(source_slot)?, LINE);
+    self.emit_slot(source_slot, LINE);
     self.emit_get_builtin_name("copyDataProperties");
     self.emit(Op::LoadLocal, LINE);
-    self.emit_byte(self.slot_to_u8(source_slot)?, LINE);
+    self.emit_slot(source_slot, LINE);
     for key in excluded {
       self.emit_prepared_property_key(key)?;
     }
@@ -403,10 +403,10 @@ impl super::Compiler {
           if Self::is_anonymous_function_definition(init) {
             let value_slot = self.alloc_reusable_temp_local("variable_initializer");
             self.emit(Op::StoreLocal, LINE);
-            self.emit_byte(self.slot_to_u8(value_slot)?, LINE);
+            self.emit_slot(value_slot, LINE);
             self.emit_get_builtin_name("setFunctionNameIfAnonymous");
             self.emit(Op::LoadLocal, LINE);
-            self.emit_byte(self.slot_to_u8(value_slot)?, LINE);
+            self.emit_slot(value_slot, LINE);
             self.emit_constant(Value::String(name.to_string().into()), LINE);
             self.emit(Op::Call, LINE);
             self.emit_byte(2, LINE);
@@ -437,7 +437,7 @@ impl super::Compiler {
           // binding.
           if self.loop_depth > 0 {
             self.emit(Op::ResetLocalCell, LINE);
-            self.emit_byte(self.slot_to_u8(slot)?, LINE);
+            self.emit_slot(slot, LINE);
           }
         }
       }
@@ -449,10 +449,10 @@ impl super::Compiler {
         {
           let value_slot = self.alloc_reusable_temp_local("variable_initializer");
           self.emit(Op::StoreLocal, LINE);
-          self.emit_byte(self.slot_to_u8(value_slot)?, LINE);
+          self.emit_slot(value_slot, LINE);
           self.emit_get_builtin_name("setFunctionNameIfAnonymous");
           self.emit(Op::LoadLocal, LINE);
-          self.emit_byte(self.slot_to_u8(value_slot)?, LINE);
+          self.emit_slot(value_slot, LINE);
           self.emit_constant(Value::String(name.into()), LINE);
           self.emit(Op::Call, LINE);
           self.emit_byte(2, LINE);
@@ -559,7 +559,7 @@ impl super::Compiler {
       self.emit(Op::Copy, LINE);
     }
     self.emit(Op::StoreLocal, LINE);
-    self.emit_byte(self.slot_to_u8(slot)?, LINE);
+    self.emit_slot(slot, LINE);
     if self.is_root && mirror_global {
       self.emit_set_global_name(name);
     }
@@ -600,20 +600,20 @@ impl super::Compiler {
     } else if let Some(slot) = self.resolve_local(name) {
       let value_slot = self.alloc_reusable_temp_local("assignment_identifier_value");
       self.emit(Op::StoreLocal, LINE);
-      self.emit_byte(self.slot_to_u8(value_slot)?, LINE);
+      self.emit_slot(value_slot, LINE);
       // PutValue cannot initialize a lexical binding. Read the existing cell
       // first so assignment during its TDZ throws instead of silently acting
       // like declaration initialization.
       self.emit(Op::LoadLocal, LINE);
-      self.emit_byte(self.slot_to_u8(slot)?, LINE);
+      self.emit_slot(slot, LINE);
       self.emit(Op::Discard, LINE);
       self.emit(Op::LoadLocal, LINE);
-      self.emit_byte(self.slot_to_u8(value_slot)?, LINE);
+      self.emit_slot(value_slot, LINE);
       self.emit(Op::StoreLocal, LINE);
-      self.emit_byte(self.slot_to_u8(slot)?, LINE);
+      self.emit_slot(slot, LINE);
       if self.local_mirrors_global(slot) {
         self.emit(Op::LoadLocal, LINE);
-        self.emit_byte(self.slot_to_u8(slot)?, LINE);
+        self.emit_slot(slot, LINE);
         self.emit_set_global_name(name);
       }
       self.emit_sync_local_module_export(name, slot)?;
@@ -640,11 +640,11 @@ impl super::Compiler {
   ) -> Result<(), crate::errors::CompilerError> {
     let value_slot = self.alloc_temp_local("assign_member_value");
     self.emit(Op::StoreLocal, LINE);
-    self.emit_byte(self.slot_to_u8(value_slot)?, LINE);
+    self.emit_slot(value_slot, LINE);
     self.compile_expr_oast(&m.object)?;
     self.emit_constant(Value::String(m.property.name.to_string().into()), LINE);
     self.emit(Op::LoadLocal, LINE);
-    self.emit_byte(self.slot_to_u8(value_slot)?, LINE);
+    self.emit_slot(value_slot, LINE);
     self.emit(Op::SetProperty, LINE);
     self.emit(Op::Discard, LINE);
     Ok(())
@@ -656,11 +656,11 @@ impl super::Compiler {
   ) -> Result<(), crate::errors::CompilerError> {
     let value_slot = self.alloc_temp_local("assign_member_value");
     self.emit(Op::StoreLocal, LINE);
-    self.emit_byte(self.slot_to_u8(value_slot)?, LINE);
+    self.emit_slot(value_slot, LINE);
     self.compile_expr_oast(&m.object)?;
     self.compile_expr_oast(&m.expression)?;
     self.emit(Op::LoadLocal, LINE);
-    self.emit_byte(self.slot_to_u8(value_slot)?, LINE);
+    self.emit_slot(value_slot, LINE);
     self.emit(Op::SetProperty, LINE);
     self.emit(Op::Discard, LINE);
     Ok(())
@@ -681,12 +681,12 @@ impl super::Compiler {
     self.emit(Op::Call, LINE);
     self.emit_byte(1, LINE);
     self.emit(Op::StoreLocal, LINE);
-    self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
+    self.emit_slot(iterator_slot, LINE);
 
     let iterator_active_slot = self.alloc_temp_local("array_destructuring_iterator_active");
     self.emit(Op::True, LINE);
     self.emit(Op::StoreLocal, LINE);
-    self.emit_byte(self.slot_to_u8(iterator_active_slot)?, LINE);
+    self.emit_slot(iterator_active_slot, LINE);
 
     // IteratorDestructuringAssignmentEvaluation closes the iterator when any
     // subsequent step completes abruptly. Keep the original completion while
@@ -714,7 +714,7 @@ impl super::Compiler {
   ) -> Result<(), crate::errors::CompilerError> {
     self.emit(if active { Op::True } else { Op::False }, LINE);
     self.emit(Op::StoreLocal, LINE);
-    self.emit_byte(self.slot_to_u8(active_slot)?, LINE);
+    self.emit_slot(active_slot, LINE);
     Ok(())
   }
 
@@ -726,19 +726,19 @@ impl super::Compiler {
     let result_slot = self.alloc_reusable_temp_local("array_destructuring_step");
     self.emit_get_builtin_name("iteratorDestructuringStep");
     self.emit(Op::LoadLocal, LINE);
-    self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
+    self.emit_slot(iterator_slot, LINE);
     self.emit(Op::Call, LINE);
     self.emit_byte(1, LINE);
     self.emit(Op::StoreLocal, LINE);
-    self.emit_byte(self.slot_to_u8(result_slot)?, LINE);
+    self.emit_slot(result_slot, LINE);
     self.emit(Op::LoadLocal, LINE);
-    self.emit_byte(self.slot_to_u8(result_slot)?, LINE);
+    self.emit_slot(result_slot, LINE);
     self.emit_constant(Value::String("1".into()), LINE);
     self.emit(Op::GetProperty, LINE);
     self.emit(Op::StoreLocal, LINE);
-    self.emit_byte(self.slot_to_u8(active_slot)?, LINE);
+    self.emit_slot(active_slot, LINE);
     self.emit(Op::LoadLocal, LINE);
-    self.emit_byte(self.slot_to_u8(result_slot)?, LINE);
+    self.emit_slot(result_slot, LINE);
     self.emit_constant(Value::String("0".into()), LINE);
     self.emit(Op::GetProperty, LINE);
     Ok(())
@@ -750,13 +750,13 @@ impl super::Compiler {
     active_slot: usize,
   ) -> Result<(), crate::errors::CompilerError> {
     self.emit(Op::LoadLocal, LINE);
-    self.emit_byte(self.slot_to_u8(active_slot)?, LINE);
+    self.emit_slot(active_slot, LINE);
     self.emit(Op::JumpIfFalse, LINE);
     let skip_close = self.current_ip();
     self.emit_byte(0, LINE);
     self.emit_byte(0, LINE);
     self.emit(Op::LoadLocal, LINE);
-    self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
+    self.emit_slot(iterator_slot, LINE);
     self.emit(Op::IteratorClose, LINE);
     self.emit(Op::Discard, LINE);
     self.patch_jump(skip_close);
@@ -786,7 +786,7 @@ impl super::Compiler {
 
     self.patch_jump(handler_jump);
     self.emit(Op::StoreLocal, LINE);
-    self.emit_byte(self.slot_to_u8(thrown_slot)?, LINE);
+    self.emit_slot(thrown_slot, LINE);
 
     // Protect the close itself so that an abrupt IteratorClose preserves the
     // completion that caused the destructuring operation to be closed.
@@ -805,7 +805,7 @@ impl super::Compiler {
     self.patch_jump(close_done_jump);
 
     self.emit(Op::LoadLocal, LINE);
-    self.emit_byte(self.slot_to_u8(thrown_slot)?, LINE);
+    self.emit_slot(thrown_slot, LINE);
     self.emit(Op::Throw, LINE);
 
     // A generator can suspend while evaluating a default initializer. A
@@ -817,7 +817,7 @@ impl super::Compiler {
     let return_cleanup_ip = self.current_ip();
     self.close_array_destructuring_iterator_if_active(iterator_slot, iterator_active_slot)?;
     self.emit(Op::LoadLocal, LINE);
-    self.emit_byte(self.slot_to_u8(return_slot)?, LINE);
+    self.emit_slot(return_slot, LINE);
     self.emit(Op::Return, LINE);
     self
       .chunk
@@ -841,9 +841,9 @@ impl super::Compiler {
       oast::AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(a) => {
         let temp_slot = self.alloc_temp_local("assign_default");
         self.emit(Op::StoreLocal, LINE);
-        self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
+        self.emit_slot(temp_slot, LINE);
         self.emit(Op::LoadLocal, LINE);
-        self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
+        self.emit_slot(temp_slot, LINE);
         self.emit(Op::Undefined, LINE);
         // Use CompareJump: cond_type 6 = StrictEq, jump if false.
         self.emit_with_payload(Op::CompareJump, 6, LINE);
@@ -852,22 +852,22 @@ impl super::Compiler {
         self.emit_byte(0, LINE);
         self.compile_expr_oast(&a.init)?;
         self.emit(Op::StoreLocal, LINE);
-        self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
+        self.emit_slot(temp_slot, LINE);
         if let Some(name) = Self::assignment_target_identifier_name(&a.binding)
           && Self::is_anonymous_function_definition(&a.init)
         {
           self.emit_get_builtin_name("setFunctionNameIfAnonymous");
           self.emit(Op::LoadLocal, LINE);
-          self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
+          self.emit_slot(temp_slot, LINE);
           self.emit_constant(Value::String(name.into()), LINE);
           self.emit(Op::Call, LINE);
           self.emit_byte(2, LINE);
           self.emit(Op::StoreLocal, LINE);
-          self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
+          self.emit_slot(temp_slot, LINE);
         }
         self.patch_jump(skip_default);
         self.emit(Op::LoadLocal, LINE);
-        self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
+        self.emit_slot(temp_slot, LINE);
         if let Some(prepared) = prepared {
           self.store_prepared_assignment_target(prepared)?;
         } else {
@@ -932,7 +932,7 @@ impl super::Compiler {
       let prepared = self.prepare_assignment_target(&rest.target)?;
       self.set_array_destructuring_iterator_active(iterator_active_slot, false)?;
       self.emit(Op::LoadLocal, LINE);
-      self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
+      self.emit_slot(iterator_slot, LINE);
       self.emit_get_builtin_name("iteratorToArray");
       self.emit(Op::Exchange, LINE);
       self.emit(Op::Call, LINE);
@@ -974,9 +974,9 @@ impl super::Compiler {
           if let Some(init) = &p.init {
             let temp_slot = self.alloc_temp_local("assign_prop_default");
             self.emit(Op::StoreLocal, LINE);
-            self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
+            self.emit_slot(temp_slot, LINE);
             self.emit(Op::LoadLocal, LINE);
-            self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
+            self.emit_slot(temp_slot, LINE);
             self.emit(Op::Undefined, LINE);
             // Use CompareJump: cond_type 6 = StrictEq, jump if false.
             self.emit_with_payload(Op::CompareJump, 6, LINE);
@@ -985,20 +985,20 @@ impl super::Compiler {
             self.emit_byte(0, LINE);
             self.compile_expr_oast(init)?;
             self.emit(Op::StoreLocal, LINE);
-            self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
+            self.emit_slot(temp_slot, LINE);
             if Self::is_anonymous_function_definition(init) {
               self.emit_get_builtin_name("setFunctionNameIfAnonymous");
               self.emit(Op::LoadLocal, LINE);
-              self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
+              self.emit_slot(temp_slot, LINE);
               self.emit_constant(Value::String(p.binding.name.to_string().into()), LINE);
               self.emit(Op::Call, LINE);
               self.emit_byte(2, LINE);
               self.emit(Op::StoreLocal, LINE);
-              self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
+              self.emit_slot(temp_slot, LINE);
             }
             self.patch_jump(skip_default);
             self.emit(Op::LoadLocal, LINE);
-            self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
+            self.emit_slot(temp_slot, LINE);
           }
           self.store_assignment_identifier(p.binding.name.as_str())?;
         }
@@ -1069,9 +1069,9 @@ impl super::Compiler {
       oast::BindingPattern::AssignmentPattern(a) => {
         let temp_slot = self.alloc_temp_local("binding_default");
         self.emit(Op::StoreLocal, LINE);
-        self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
+        self.emit_slot(temp_slot, LINE);
         self.emit(Op::LoadLocal, LINE);
-        self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
+        self.emit_slot(temp_slot, LINE);
         self.emit(Op::Undefined, LINE);
         // Use CompareJump: cond_type 6 = StrictEq, jump if false.
         self.emit_with_payload(Op::CompareJump, 6, LINE);
@@ -1080,22 +1080,22 @@ impl super::Compiler {
         self.emit_byte(0, LINE);
         self.compile_expr_oast(&a.right)?;
         self.emit(Op::StoreLocal, LINE);
-        self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
+        self.emit_slot(temp_slot, LINE);
         if let Some(name) = Self::binding_identifier_name(&a.left)
           && Self::is_anonymous_function_definition(&a.right)
         {
           self.emit_get_builtin_name("setFunctionNameIfAnonymous");
           self.emit(Op::LoadLocal, LINE);
-          self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
+          self.emit_slot(temp_slot, LINE);
           self.emit_constant(Value::String(name.into()), LINE);
           self.emit(Op::Call, LINE);
           self.emit_byte(2, LINE);
           self.emit(Op::StoreLocal, LINE);
-          self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
+          self.emit_slot(temp_slot, LINE);
         }
         self.patch_jump(skip_default);
         self.emit(Op::LoadLocal, LINE);
-        self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
+        self.emit_slot(temp_slot, LINE);
         self.compile_binding_pattern_assignment_prepared(&a.left, kind, resolved_identifier)?;
       }
       oast::BindingPattern::ArrayPattern(a) => {
@@ -1115,7 +1115,7 @@ impl super::Compiler {
         if let Some(rest) = &a.rest {
           self.set_array_destructuring_iterator_active(iterator_active_slot, false)?;
           self.emit(Op::LoadLocal, LINE);
-          self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
+          self.emit_slot(iterator_slot, LINE);
           self.emit_get_builtin_name("iteratorToArray");
           self.emit(Op::Exchange, LINE);
           self.emit(Op::Call, LINE);

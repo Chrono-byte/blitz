@@ -152,7 +152,7 @@ pub enum CaptureSource {
   /// exposed on the global object.
   Local {
     /// Slot index in the enclosing function.
-    slot: u8,
+    slot: u16,
     /// Optional global property name mirrored by this binding.
     mirror_global_name: Option<String>,
     /// Export name owned by the captured binding, if any.
@@ -418,6 +418,22 @@ impl Compiler {
     self.pending_operand_bytes += 1;
   }
 
+  /// Encode a local-frame slot in the 16-bit auxiliary field used by RISC v2.
+  pub(crate) fn emit_slot(
+    &mut self,
+    slot: usize,
+    line: u32,
+  ) {
+    let Ok(slot) = u16::try_from(slot) else {
+      self.emission_error.get_or_insert_with(|| {
+        CompilerError::from(format!("Too many local variables (max 65535, got {slot})"))
+      });
+      return;
+    };
+    self.risc.set_last_payload(u32::from(slot), line);
+    self.pending_operand_bytes = 2;
+  }
+
   /// Emits a u16 value as a 24-bit payload in a single instruction word,
   /// avoiding multi-write emissions which break the fixed-width instruction model.
   pub(crate) fn emit_u16(
@@ -464,17 +480,6 @@ impl Compiler {
     };
     let idx = u32::from(idx);
     self.emit_with_payload(Op::Const, idx, line);
-  }
-
-  /// Safely converts a slot index (usize) to u8, checking that it doesn't exceed 255.
-  /// This prevents silent truncation of local variable indices that would cause
-  /// bytecode referring to the wrong slots.
-  pub(crate) fn slot_to_u8(
-    &self,
-    slot: usize,
-  ) -> Result<u8, CompilerError> {
-    u8::try_from(slot)
-      .map_err(|_| CompilerError::from(format!("Too many local variables (max 255, got {})", slot)))
   }
 
   /// Safely converts a function index (usize) to u8, checking that it doesn't exceed 255.
@@ -1011,8 +1016,13 @@ impl Compiler {
   /// Returns a snapshot of the current visible bindings from all scopes.
   pub(crate) fn visible_bindings_snapshot(&mut self) -> HashMap<String, CaptureSource> {
     let mut bindings = HashMap::new();
+    let mut overflowing_slot = None;
     for (scope_index, scope) in self.scopes.iter().enumerate() {
       for (name, slot) in &scope.bindings {
+        let Ok(capture_slot) = u16::try_from(*slot) else {
+          overflowing_slot.get_or_insert(*slot);
+          continue;
+        };
         let module_export_name = (self.is_root
           && scope_index == 0
           && self
@@ -1023,7 +1033,7 @@ impl Compiler {
         bindings.insert(
           name.clone(),
           CaptureSource::Local {
-            slot: u8::try_from(*slot).expect("slot fits in u8"),
+            slot: capture_slot,
             mirror_global_name: if self.local_mirrors_global(*slot) {
               Some(name.clone())
             } else {
@@ -1043,6 +1053,11 @@ impl Compiler {
           },
         );
       }
+    }
+    if let Some(slot) = overflowing_slot {
+      self.emission_error.get_or_insert_with(|| {
+        CompilerError::from(format!("Too many local variables (max 65535, got {slot})"))
+      });
     }
     for (name, idx) in &self.upvalue_indices {
       let (immutable, sloppy_immutable_silent) = self
@@ -1155,7 +1170,7 @@ impl Compiler {
   ) -> Result<(), CompilerError> {
     if self.owns_local_module_export(name, slot) {
       self.emit(Op::LoadLocal, LINE);
-      self.emit_byte(self.slot_to_u8(slot)?, LINE);
+      self.emit_slot(slot, LINE);
       self.emit_set_own_module_export(name)?;
     }
     Ok(())
@@ -1205,22 +1220,16 @@ impl Compiler {
       self.emit(Op::Call, LINE);
       self.emit_byte(1, LINE);
       self.emit(Op::StoreLocal, LINE);
-      self.emit_byte(
-        u8::try_from(reference_slot).expect("with reference slot fits in u8"),
-        LINE,
-      );
+      self.emit_slot(reference_slot, LINE);
       self.emit_get_builtin_name("getResolvedIdentifier");
       self.emit(Op::LoadLocal, LINE);
-      self.emit_byte(
-        u8::try_from(reference_slot).expect("with reference slot fits in u8"),
-        LINE,
-      );
+      self.emit_slot(reference_slot, LINE);
       self.emit_constant(Value::String(name.into()), LINE);
       self.emit(Op::Call, LINE);
       self.emit_byte(2, LINE);
     } else if let Some(slot) = self.resolve_local(name) {
       self.emit(Op::LoadLocal, LINE);
-      self.emit_byte(u8::try_from(slot).expect("slot fits in u8"), LINE);
+      self.emit_slot(slot, LINE);
     } else if let Some(upvalue) = self.resolve_upvalue(name) {
       self.emit(Op::GetUpvalue, LINE);
       self.emit_byte(upvalue, LINE);
@@ -1303,7 +1312,7 @@ impl Compiler {
         ..
       } => UpvalueSpec {
         is_local: false,
-        index: upvalue,
+        index: u16::from(upvalue),
         mirror_global_name: None,
         immutable,
         sloppy_immutable_silent,
@@ -1410,7 +1419,7 @@ impl Compiler {
     self.emit(Op::Copy, LINE);
     self.emit_constant(Value::String("[[HomeObject]]".to_string().into()), LINE);
     self.emit(Op::LoadLocal, LINE);
-    self.emit_byte(u8::try_from(home_slot).expect("home_slot fits in u8"), LINE);
+    self.emit_slot(home_slot, LINE);
     self.emit(Op::SetProperty, LINE);
     self.emit(Op::Discard, LINE);
     Ok(())
@@ -1423,7 +1432,7 @@ impl Compiler {
   ) {
     if let Some(slot) = self.resolve_local(name) {
       self.emit(Op::LoadLocal, LINE);
-      self.emit_byte(u8::try_from(slot).expect("slot fits in u8"), LINE);
+      self.emit_slot(slot, LINE);
       self.emit(Op::Typeof, LINE);
     } else {
       let idx = self.global_name_index(name);
@@ -1561,7 +1570,7 @@ mod tests {
     nested.outer_bindings.insert(
       "x".to_string(),
       CaptureSource::Local {
-        slot: u8::try_from(root_slot).expect("test slot fits"),
+        slot: u16::try_from(root_slot).expect("test slot fits"),
         mirror_global_name: None,
         module_export_name: Some("x".to_string()),
         immutable: false,

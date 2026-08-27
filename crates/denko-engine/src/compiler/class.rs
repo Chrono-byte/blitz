@@ -32,7 +32,7 @@ impl Compiler {
     };
     self.emit_class_from_oast(c, Some(&name))?;
     self.emit(Op::StoreLocal, LINE);
-    self.emit_byte(self.slot_to_u8(slot)?, LINE);
+    self.emit_slot(slot, LINE);
     Ok(())
   }
 
@@ -73,13 +73,13 @@ impl Compiler {
         .ok_or_else(|| crate::errors::CompilerError::from("missing parameter slot"))?;
 
       self.emit(Op::LoadLocal, LINE);
-      self.emit_byte(self.slot_to_u8(raw_slot)?, LINE);
+      self.emit_slot(raw_slot, LINE);
 
       if let Some(init) = &param.initializer {
         self.emit(Op::StoreLocal, LINE);
-        self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
+        self.emit_slot(temp_slot, LINE);
         self.emit(Op::LoadLocal, LINE);
-        self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
+        self.emit_slot(temp_slot, LINE);
         self.emit(Op::Undefined, LINE);
         // Use CompareJump: cond_type 6 = StrictEq, jump if false.
         self.emit_with_payload(Op::CompareJump, 6, LINE);
@@ -88,10 +88,10 @@ impl Compiler {
         self.emit_byte(0, LINE);
         self.compile_expr_oast(init)?;
         self.emit(Op::StoreLocal, LINE);
-        self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
+        self.emit_slot(temp_slot, LINE);
         self.patch_jump(skip_jump);
         self.emit(Op::LoadLocal, LINE);
-        self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
+        self.emit_slot(temp_slot, LINE);
       }
 
       self.compile_binding_pattern_assignment_oast(
@@ -106,7 +106,7 @@ impl Compiler {
         .copied()
         .ok_or_else(|| crate::errors::CompilerError::from("missing rest parameter slot"))?;
       self.emit(Op::LoadLocal, LINE);
-      self.emit_byte(self.slot_to_u8(raw_slot)?, LINE);
+      self.emit_slot(raw_slot, LINE);
       self.compile_binding_pattern_assignment_oast(
         &rest.rest.argument,
         oxc_ast::ast::VariableDeclarationKind::Var,
@@ -127,7 +127,7 @@ impl Compiler {
         continue;
       };
       self.emit(Op::LoadLocal, LINE);
-      self.emit_byte(self.slot_to_u8(idx)?, LINE);
+      self.emit_slot(idx, LINE);
       self.emit(Op::Undefined, LINE);
       // Use CompareJump: cond_type 6 = StrictEq, jump if false.
       self.emit_with_payload(Op::CompareJump, 6, LINE);
@@ -136,7 +136,7 @@ impl Compiler {
       self.emit_byte(0, LINE);
       self.compile_expr_oast(init)?;
       self.emit(Op::StoreLocal, LINE);
-      self.emit_byte(self.slot_to_u8(idx)?, LINE);
+      self.emit_slot(idx, LINE);
       self.patch_jump(skip_jump);
     }
     Ok(())
@@ -183,14 +183,14 @@ impl Compiler {
   ) -> Result<(), crate::errors::CompilerError> {
     self.emit_get_builtin_name("objectDefineProperty");
     self.emit(Op::LoadLocal, LINE);
-    self.emit_byte(self.slot_to_u8(target_slot)?, LINE);
+    self.emit_slot(target_slot, LINE);
     self.emit_prepared_class_field_key(&field.key);
     self.emit_constant(Value::String("value".to_string().into()), LINE);
     if let Some(initializer) = initializer {
       let proto = self.compile_static_field_initializer(initializer)?;
       let function_index = self.chunk.add_function(proto);
       self.emit(Op::LoadLocal, LINE);
-      self.emit_byte(self.slot_to_u8(target_slot)?, LINE);
+      self.emit_slot(target_slot, LINE);
       self.emit(Op::MakeClosure, LINE);
       self.emit_byte(self.function_index_to_u8(function_index)?, LINE);
       self.emit_set_method_home_object(target_slot)?;
@@ -289,7 +289,7 @@ impl Compiler {
     };
 
     self.emit(Op::LoadLocal, LINE);
-    self.emit_byte(self.slot_to_u8(target_slot)?, LINE);
+    self.emit_slot(target_slot, LINE);
     self.emit(Op::Copy, LINE);
     self.emit_get_builtin_name("objectDefineProperty");
     self.emit(Op::Exchange, LINE);
@@ -309,8 +309,8 @@ impl Compiler {
       self.compile_expr_oast(key_expr)?;
       self.emit(Op::Copy, LINE);
       self.emit(Op::StoreLocal, LINE);
-      self.emit_byte(
-        self.slot_to_u8(computed_key_slot.expect("computed method has key slot"))?,
+      self.emit_slot(
+        computed_key_slot.expect("computed method has key slot"),
         LINE,
       );
     }
@@ -331,12 +331,12 @@ impl Compiler {
     if let Some(key_slot) = computed_key_slot {
       let closure_slot = self.alloc_temp_local("class_computed_method_closure");
       self.emit(Op::StoreLocal, LINE);
-      self.emit_byte(self.slot_to_u8(closure_slot)?, LINE);
+      self.emit_slot(closure_slot, LINE);
       self.emit_get_builtin_name("setFunctionNameIfAnonymous");
       self.emit(Op::LoadLocal, LINE);
-      self.emit_byte(self.slot_to_u8(closure_slot)?, LINE);
+      self.emit_slot(closure_slot, LINE);
       self.emit(Op::LoadLocal, LINE);
-      self.emit_byte(self.slot_to_u8(key_slot)?, LINE);
+      self.emit_slot(key_slot, LINE);
       match md.kind {
         oast::MethodDefinitionKind::Get => {
           self.emit_constant(Value::String("get".into()), LINE);
@@ -815,7 +815,7 @@ impl Compiler {
 
     let ctor_slot = self.alloc_temp_local("class_ctor_tmp");
     self.emit(Op::StoreLocal, LINE);
-    self.emit_byte(self.slot_to_u8(ctor_slot)?, LINE);
+    self.emit_slot(ctor_slot, LINE);
 
     let instance_home_slot = if c
       .body
@@ -824,19 +824,19 @@ impl Compiler {
       .any(|element| matches!(element, oast::ClassElement::MethodDefinition(md) if !md.r#static))
     {
       self.emit(Op::LoadLocal, LINE);
-      self.emit_byte(self.slot_to_u8(ctor_slot)?, LINE);
+      self.emit_slot(ctor_slot, LINE);
       self.emit_constant(Value::String("prototype".to_string().into()), LINE);
       self.emit(Op::GetProperty, LINE);
       let home_slot = self.alloc_temp_local("class_home");
       self.emit(Op::StoreLocal, LINE);
-      self.emit_byte(self.slot_to_u8(home_slot)?, LINE);
+      self.emit_slot(home_slot, LINE);
       Some(home_slot)
     } else {
       None
     };
     if let Some(home_slot) = instance_home_slot {
       self.emit(Op::LoadLocal, LINE);
-      self.emit_byte(self.slot_to_u8(ctor_slot)?, LINE);
+      self.emit_slot(ctor_slot, LINE);
       self.emit_set_method_home_object(home_slot)?;
       self.emit(Op::Discard, LINE);
     }
@@ -869,7 +869,7 @@ impl Compiler {
               .resolve_local(binding)
               .expect("computed class field key binding must be local");
             self.emit(Op::StoreLocal, LINE);
-            self.emit_byte(self.slot_to_u8(slot)?, LINE);
+            self.emit_slot(slot, LINE);
           }
           if field.is_static {
             self.emit_static_class_field(ctor_slot, field, property.value.as_ref())?;
@@ -879,7 +879,7 @@ impl Compiler {
           let proto = self.compile_static_block_function(block)?;
           let function_index = self.chunk.add_function(proto);
           self.emit(Op::LoadLocal, LINE);
-          self.emit_byte(self.slot_to_u8(ctor_slot)?, LINE);
+          self.emit_slot(ctor_slot, LINE);
           self.emit(Op::MakeClosure, LINE);
           self.emit_byte(self.function_index_to_u8(function_index)?, LINE);
           self.emit_set_method_home_object(ctor_slot)?;
@@ -892,7 +892,7 @@ impl Compiler {
     }
 
     self.emit(Op::LoadLocal, LINE);
-    self.emit_byte(self.slot_to_u8(ctor_slot)?, LINE);
+    self.emit_slot(ctor_slot, LINE);
     self.private_names = enclosing_private_names;
     Ok(())
   }

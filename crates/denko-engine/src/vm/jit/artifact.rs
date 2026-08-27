@@ -207,7 +207,7 @@ impl ShortBranchCode {
 
   fn emit_number_argument(
     &mut self,
-    index: u8,
+    index: u16,
     xmm_move: u8,
   ) -> Result<(), ArtifactError> {
     match index {

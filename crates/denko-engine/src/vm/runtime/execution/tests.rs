@@ -43,6 +43,19 @@ mod test {
   use super::*;
 
   #[test]
+  fn closures_capture_local_slots_above_u8_range() {
+    let declarations = (0..300)
+      .map(|index| format!("let value{index} = {index};"))
+      .collect::<String>();
+    let source = format!(
+      "{declarations} function readHighSlot() {{ return value299; }} globalThis.highSlot = readHighSlot();"
+    );
+
+    let (vm, _) = run_script(&source);
+    assert_eq!(vm.get_global("highSlot"), Some(Value::Number(299.0)));
+  }
+
+  #[test]
   fn host_interrupt_is_not_a_catchable_javascript_exception() {
     let session = Parser::parse_source(
       "globalThis.interrupt_caught = false; try { globalThis.interrupt_started = true; } catch (_) { globalThis.interrupt_caught = true; }",

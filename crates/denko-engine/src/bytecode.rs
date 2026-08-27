@@ -44,7 +44,7 @@ pub struct UpvalueSpec {
   /// false when capturing from the enclosing function's own upvalue list.
   pub is_local: bool,
   /// Slot or upvalue index in the enclosing function.
-  pub index: u8,
+  pub index: u16,
   /// Optional global binding name that should mirror writes to this captured
   /// cell. Used for root `var` bindings that are also exposed on the global
   /// object.

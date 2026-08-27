@@ -59,7 +59,7 @@ impl Compiler {
     });
     self.emit(Op::True, LINE);
     self.emit(Op::StoreLocal, LINE);
-    self.emit_byte(self.slot_to_u8(flag_slot)?, LINE);
+    self.emit_slot(flag_slot, LINE);
     let target_depth = if label_index.is_some() {
       loop_index
     } else {
@@ -110,7 +110,7 @@ impl Compiler {
       .clone();
     for action in actions {
       self.emit(Op::LoadLocal, LINE);
-      self.emit_byte(self.slot_to_u8(action.flag_slot)?, LINE);
+      self.emit_slot(action.flag_slot, LINE);
       self.emit(Op::JumpIfFalse, LINE);
       let skip = self.current_ip();
       self.emit_byte(0, LINE);
@@ -157,7 +157,7 @@ impl Compiler {
       .collect::<Vec<_>>();
     for slot in slots {
       self.emit(Op::LoadLocal, LINE);
-      self.emit_byte(self.slot_to_u8(slot)?, LINE);
+      self.emit_slot(slot, LINE);
       self.emit(Op::IteratorClose, LINE);
       self.emit(Op::Discard, LINE);
     }
@@ -200,7 +200,7 @@ impl Compiler {
         self.emit(Op::Copy, LINE);
       }
       self.emit(Op::StoreLocal, LINE);
-      self.emit_byte(self.slot_to_u8(slot)?, LINE);
+      self.emit_slot(slot, LINE);
       if self.local_mirrors_global(slot) {
         self.emit_set_global_name(&fname);
       }
@@ -210,7 +210,7 @@ impl Compiler {
         .is_some_and(|c| c.exports.contains(&fname));
       if is_exported {
         self.emit(Op::LoadLocal, LINE);
-        self.emit_byte(self.slot_to_u8(slot)?, LINE);
+        self.emit_slot(slot, LINE);
         self.emit_set_own_module_export(&fname)?;
       }
     }
@@ -361,7 +361,7 @@ impl Compiler {
         self.compile_expr_oast(&e.expression)?;
         if let Some(slot) = completion_slot {
           self.emit(Op::StoreLocal, LINE);
-          self.emit_byte(self.slot_to_u8(slot)?, LINE);
+          self.emit_slot(slot, LINE);
         } else if !skip_pop {
           self.emit(Op::Discard, LINE);
         }
@@ -491,7 +491,7 @@ impl Compiler {
         let discr_slot =
           self.add_local_in_scope(self.current_function_scope_index(), discr_name, None, false);
         self.emit(Op::StoreLocal, LINE);
-        self.emit_byte(self.slot_to_u8(discr_slot)?, LINE);
+        self.emit_slot(discr_slot, LINE);
 
         // Case clauses share one lexical environment, instantiated before any
         // case selector or consequent is evaluated.
@@ -510,7 +510,7 @@ impl Compiler {
         for (case_idx, case) in s.cases.iter().enumerate() {
           if let Some(test) = &case.test {
             self.emit(Op::LoadLocal, LINE);
-            self.emit_byte(self.slot_to_u8(discr_slot)?, LINE);
+            self.emit_slot(discr_slot, LINE);
             self.compile_expr_oast(test)?;
             // Use CompareJump: cond_type 6 = StrictEq, jump if false.
             self.emit_with_payload(Op::CompareJump, 6, LINE);
@@ -575,7 +575,7 @@ impl Compiler {
           let slot = self.alloc_temp_local("loop_result");
           self.emit(Op::Undefined, LINE);
           self.emit(Op::StoreLocal, LINE);
-          self.emit_byte(self.slot_to_u8(slot)?, LINE);
+          self.emit_slot(slot, LINE);
           slot
         };
         let loop_start = self.current_ip();
@@ -608,7 +608,7 @@ impl Compiler {
             self.patch_jump_to_target(exit_jump, cleanup_start);
           }
           self.emit(Op::LoadLocal, LINE);
-          self.emit_byte(self.slot_to_u8(loop_completion_slot)?, LINE);
+          self.emit_slot(loop_completion_slot, LINE);
         } else if let Some(exit_jump) = exit_jump {
           self.patch_jump(exit_jump);
         }
@@ -646,7 +646,7 @@ impl Compiler {
           let slot = self.alloc_temp_local("loop_result");
           self.emit(Op::Undefined, LINE);
           self.emit(Op::StoreLocal, LINE);
-          self.emit_byte(self.slot_to_u8(slot)?, LINE);
+          self.emit_slot(slot, LINE);
           slot
         };
         let loop_start = self.current_ip();
@@ -676,7 +676,7 @@ impl Compiler {
         let cleanup_start = self.current_ip();
         if owns_completion_slot {
           self.emit(Op::LoadLocal, LINE);
-          self.emit_byte(self.slot_to_u8(loop_completion_slot)?, LINE);
+          self.emit_slot(loop_completion_slot, LINE);
           if let Some(exit_jump) = exit_jump {
             self.patch_jump_to_target(exit_jump, cleanup_start);
           }
@@ -785,7 +785,7 @@ impl Compiler {
                     self.emit(Op::Copy, LINE);
                   }
                   self.emit(Op::StoreLocal, LINE);
-                  self.emit_byte(self.slot_to_u8(slot)?, LINE);
+                  self.emit_slot(slot, LINE);
                   if mirror_global {
                     self.emit_set_global_name(&name);
                   }
@@ -823,7 +823,7 @@ impl Compiler {
 
         for &slot in &per_iteration_slots {
           self.emit(Op::CloneLocalCell, LINE);
-          self.emit_byte(self.slot_to_u8(slot)?, LINE);
+          self.emit_slot(slot, LINE);
         }
 
         let loop_start = self.current_ip();
@@ -855,7 +855,7 @@ impl Compiler {
 
         for &slot in &per_iteration_slots {
           self.emit(Op::CloneLocalCell, LINE);
-          self.emit_byte(self.slot_to_u8(slot)?, LINE);
+          self.emit_slot(slot, LINE);
         }
 
         if let Some(update) = &f.update {
@@ -908,7 +908,7 @@ impl Compiler {
           let slot = self.alloc_temp_local("loop_result");
           self.emit(Op::Undefined, LINE);
           self.emit(Op::StoreLocal, LINE);
-          self.emit_byte(self.slot_to_u8(slot)?, LINE);
+          self.emit_slot(slot, LINE);
           slot
         };
 
@@ -936,7 +936,7 @@ impl Compiler {
               self.mark_local_immutable(slot);
             }
             self.emit(Op::ResetLocalCell, LINE);
-            self.emit_byte(self.slot_to_u8(slot)?, LINE);
+            self.emit_slot(slot, LINE);
           }
         }
         self.activate_current_scope_lexical_bindings();
@@ -960,13 +960,13 @@ impl Compiler {
           false,
         );
         self.emit(Op::StoreLocal, LINE);
-        self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
+        self.emit_slot(iterator_slot, LINE);
 
         let thrown_slot = self.alloc_temp_local("forof_thrown");
         let iterator_close_active_slot = self.alloc_temp_local("forof_close_active");
         self.emit(Op::False, LINE);
         self.emit(Op::StoreLocal, LINE);
-        self.emit_byte(self.slot_to_u8(iterator_close_active_slot)?, LINE);
+        self.emit_slot(iterator_close_active_slot, LINE);
         self.emit(Op::PushHandler, LINE);
         let handler_jump = self.current_ip();
         self.emit_byte(0, LINE);
@@ -976,9 +976,9 @@ impl Compiler {
 
         self.emit(Op::False, LINE);
         self.emit(Op::StoreLocal, LINE);
-        self.emit_byte(self.slot_to_u8(iterator_close_active_slot)?, LINE);
+        self.emit_slot(iterator_close_active_slot, LINE);
         self.emit(Op::LoadLocal, LINE);
-        self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
+        self.emit_slot(iterator_slot, LINE);
         self.emit(Op::IteratorNext, LINE);
         self.emit(Op::Copy, LINE);
         self.emit_constant(Value::String("done".to_string().into()), LINE);
@@ -993,7 +993,7 @@ impl Compiler {
         // only failures after a value was produced perform IteratorClose.
         self.emit(Op::True, LINE);
         self.emit(Op::StoreLocal, LINE);
-        self.emit_byte(self.slot_to_u8(iterator_close_active_slot)?, LINE);
+        self.emit_slot(iterator_close_active_slot, LINE);
 
         match &f.left {
           oast::ForStatementLeft::VariableDeclaration(v) => {
@@ -1014,7 +1014,7 @@ impl Compiler {
               for name in &names {
                 if let Some(slot) = self.resolve_local(name) {
                   self.emit(Op::ResetLocalCell, LINE);
-                  self.emit_byte(self.slot_to_u8(slot)?, LINE);
+                  self.emit_slot(slot, LINE);
                 }
               }
             }
@@ -1098,7 +1098,7 @@ impl Compiler {
           self.patch_jump_list(break_patches, break_cleanup);
         }
         self.emit(Op::LoadLocal, LINE);
-        self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
+        self.emit_slot(iterator_slot, LINE);
         self.emit(Op::IteratorClose, LINE);
         self.emit(Op::Discard, LINE);
         self.emit(Op::Jump, LINE);
@@ -1108,19 +1108,19 @@ impl Compiler {
 
         self.patch_jump(handler_jump);
         self.emit(Op::StoreLocal, LINE);
-        self.emit_byte(self.slot_to_u8(thrown_slot)?, LINE);
+        self.emit_slot(thrown_slot, LINE);
         self.emit(Op::PushHandler, LINE);
         let close_handler_jump = self.current_ip();
         self.emit_byte(0, LINE);
         self.emit_byte(0, LINE);
         self.emit(Op::LoadLocal, LINE);
-        self.emit_byte(self.slot_to_u8(iterator_close_active_slot)?, LINE);
+        self.emit_slot(iterator_close_active_slot, LINE);
         self.emit(Op::JumpIfFalse, LINE);
         let skip_abrupt_close = self.current_ip();
         self.emit_byte(0, LINE);
         self.emit_byte(0, LINE);
         self.emit(Op::LoadLocal, LINE);
-        self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
+        self.emit_slot(iterator_slot, LINE);
         self.emit(Op::IteratorClose, LINE);
         self.emit(Op::Discard, LINE);
         self.patch_jump(skip_abrupt_close);
@@ -1133,13 +1133,13 @@ impl Compiler {
         self.emit(Op::Discard, LINE);
         self.patch_jump(close_done_jump);
         self.emit(Op::LoadLocal, LINE);
-        self.emit_byte(self.slot_to_u8(thrown_slot)?, LINE);
+        self.emit_slot(thrown_slot, LINE);
         self.emit(Op::Throw, LINE);
         self.patch_jump(done_end_jump);
         self.patch_jump(end_jump);
         if owns_completion_slot {
           self.emit(Op::LoadLocal, LINE);
-          self.emit_byte(self.slot_to_u8(loop_completion_slot)?, LINE);
+          self.emit_slot(loop_completion_slot, LINE);
         }
         self.loop_depth = self.loop_depth.saturating_sub(1);
         self.exit_scope();
@@ -1198,7 +1198,7 @@ impl Compiler {
               self.mark_local_immutable(slot);
             }
             self.emit(Op::ResetLocalCell, LINE);
-            self.emit_byte(self.slot_to_u8(slot)?, LINE);
+            self.emit_slot(slot, LINE);
           }
         }
         self.activate_current_scope_lexical_bindings();
@@ -1215,7 +1215,7 @@ impl Compiler {
           false,
         );
         self.emit(Op::StoreLocal, LINE);
-        self.emit_byte(self.slot_to_u8(keys_slot)?, LINE);
+        self.emit_slot(keys_slot, LINE);
 
         self.emit_constant(Value::Number(0.0), LINE);
         let index_slot = self.add_local_in_scope(
@@ -1225,14 +1225,14 @@ impl Compiler {
           false,
         );
         self.emit(Op::StoreLocal, LINE);
-        self.emit_byte(self.slot_to_u8(index_slot)?, LINE);
+        self.emit_slot(index_slot, LINE);
 
         let loop_start = self.current_ip();
 
         self.emit(Op::LoadLocal, LINE);
-        self.emit_byte(self.slot_to_u8(index_slot)?, LINE);
+        self.emit_slot(index_slot, LINE);
         self.emit(Op::LoadLocal, LINE);
-        self.emit_byte(self.slot_to_u8(keys_slot)?, LINE);
+        self.emit_slot(keys_slot, LINE);
         self.emit_constant(Value::String("length".to_string().into()), LINE);
         self.emit(Op::GetProperty, LINE);
         // Use CompareJump: cond_type 2 = Lt, jump if false.
@@ -1242,9 +1242,9 @@ impl Compiler {
         self.emit_byte(0, LINE);
 
         self.emit(Op::LoadLocal, LINE);
-        self.emit_byte(self.slot_to_u8(keys_slot)?, LINE);
+        self.emit_slot(keys_slot, LINE);
         self.emit(Op::LoadLocal, LINE);
-        self.emit_byte(self.slot_to_u8(index_slot)?, LINE);
+        self.emit_slot(index_slot, LINE);
         self.emit(Op::GetProperty, LINE);
 
         match &f.left {
@@ -1266,7 +1266,7 @@ impl Compiler {
               for name in &names {
                 if let Some(slot) = self.resolve_local(name) {
                   self.emit(Op::ResetLocalCell, LINE);
-                  self.emit_byte(self.slot_to_u8(slot)?, LINE);
+                  self.emit_slot(slot, LINE);
                 }
               }
             }
@@ -1276,10 +1276,10 @@ impl Compiler {
             let name = id.name.as_str();
             if let Some(slot) = self.resolve_local(name) {
               self.emit(Op::StoreLocal, LINE);
-              self.emit_byte(self.slot_to_u8(slot)?, LINE);
+              self.emit_slot(slot, LINE);
               if self.local_mirrors_global(slot) {
                 self.emit(Op::LoadLocal, LINE);
-                self.emit_byte(self.slot_to_u8(slot)?, LINE);
+                self.emit_slot(slot, LINE);
                 self.emit_set_global_name(name);
               }
             } else if let Some(upvalue) = self.resolve_upvalue(name) {
@@ -1308,11 +1308,11 @@ impl Compiler {
         }
 
         self.emit(Op::LoadLocal, LINE);
-        self.emit_byte(self.slot_to_u8(index_slot)?, LINE);
+        self.emit_slot(index_slot, LINE);
         self.emit_constant(Value::Number(1.0), LINE);
         self.emit(Op::Add, LINE);
         self.emit(Op::StoreLocal, LINE);
-        self.emit_byte(self.slot_to_u8(index_slot)?, LINE);
+        self.emit_slot(index_slot, LINE);
 
         self.emit(Op::Jump, LINE);
         let back_offset = loop_start as isize - (self.current_ip() as isize);
@@ -1360,12 +1360,12 @@ impl Compiler {
             self.emit(Op::Undefined, LINE);
           }
           self.emit(Op::StoreLocal, LINE);
-          self.emit_byte(self.slot_to_u8(return_slot)?, LINE);
+          self.emit_slot(return_slot, LINE);
           self.emit_handler_pops_to(self.finally_patches[finally_index].handler_depth);
           self.emit_with_env_pops();
           self.emit(Op::True, LINE);
           self.emit(Op::StoreLocal, LINE);
-          self.emit_byte(self.slot_to_u8(did_return_slot)?, LINE);
+          self.emit_slot(did_return_slot, LINE);
           self.emit(Op::Jump, LINE);
           let patch_pos = self.current_ip();
           self.emit_byte(0, LINE);
@@ -1393,10 +1393,10 @@ impl Compiler {
         if !self.iterator_close_stack.is_empty() {
           let return_slot = self.alloc_temp_local("return_value");
           self.emit(Op::StoreLocal, LINE);
-          self.emit_byte(self.slot_to_u8(return_slot)?, LINE);
+          self.emit_slot(return_slot, LINE);
           self.emit_iterator_closes_above(0)?;
           self.emit(Op::LoadLocal, LINE);
-          self.emit_byte(self.slot_to_u8(return_slot)?, LINE);
+          self.emit_slot(return_slot, LINE);
         }
         self.emit_with_env_pops();
         self.emit(Op::Return, LINE);
@@ -1510,7 +1510,7 @@ impl Compiler {
           let slot = self.alloc_temp_local("try_result");
           self.emit(Op::Undefined, LINE);
           self.emit(Op::StoreLocal, LINE);
-          self.emit_byte(self.slot_to_u8(slot)?, LINE);
+          self.emit_slot(slot, LINE);
           slot
         };
         let handler = t.handler.as_ref();
@@ -1528,10 +1528,10 @@ impl Compiler {
           );
           self.emit(Op::Undefined, LINE);
           self.emit(Op::StoreLocal, LINE);
-          self.emit_byte(self.slot_to_u8(return_slot)?, LINE);
+          self.emit_slot(return_slot, LINE);
           self.emit(Op::False, LINE);
           self.emit(Op::StoreLocal, LINE);
-          self.emit_byte(self.slot_to_u8(did_return_slot)?, LINE);
+          self.emit_slot(did_return_slot, LINE);
           self
             .finally_patches
             .push(crate::compiler::FinallyPatchState {
@@ -1613,7 +1613,7 @@ impl Compiler {
               did_return_slot,
             });
           self.emit(Op::LoadLocal, LINE);
-          self.emit_byte(self.slot_to_u8(did_return_slot)?, LINE);
+          self.emit_slot(did_return_slot, LINE);
           self.emit(Op::JumpIfFalse, LINE);
           let skip_return = self.current_ip();
           self.emit_byte(0, LINE);
@@ -1622,12 +1622,12 @@ impl Compiler {
             let outer_return_slot = self.finally_patches[outer_idx].return_slot;
             let outer_did_return_slot = self.finally_patches[outer_idx].did_return_slot;
             self.emit(Op::LoadLocal, LINE);
-            self.emit_byte(self.slot_to_u8(return_slot)?, LINE);
+            self.emit_slot(return_slot, LINE);
             self.emit(Op::StoreLocal, LINE);
-            self.emit_byte(self.slot_to_u8(outer_return_slot)?, LINE);
+            self.emit_slot(outer_return_slot, LINE);
             self.emit(Op::True, LINE);
             self.emit(Op::StoreLocal, LINE);
-            self.emit_byte(self.slot_to_u8(outer_did_return_slot)?, LINE);
+            self.emit_slot(outer_did_return_slot, LINE);
             self.emit_handler_pops_to(self.finally_patches[outer_idx].handler_depth);
             self.emit(Op::Jump, LINE);
             let outer_jump = self.current_ip();
@@ -1638,14 +1638,14 @@ impl Compiler {
               .push(outer_jump);
           } else {
             self.emit(Op::LoadLocal, LINE);
-            self.emit_byte(self.slot_to_u8(return_slot)?, LINE);
+            self.emit_slot(return_slot, LINE);
             if !self.iterator_close_stack.is_empty() {
               let pending_return_slot = self.alloc_temp_local("finally_return_value");
               self.emit(Op::StoreLocal, LINE);
-              self.emit_byte(self.slot_to_u8(pending_return_slot)?, LINE);
+              self.emit_slot(pending_return_slot, LINE);
               self.emit_iterator_closes_above(0)?;
               self.emit(Op::LoadLocal, LINE);
-              self.emit_byte(self.slot_to_u8(pending_return_slot)?, LINE);
+              self.emit_slot(pending_return_slot, LINE);
             }
             self.emit(Op::Return, LINE);
           }
@@ -1706,10 +1706,10 @@ impl Compiler {
               }
               self.activate_current_scope_lexical_bindings();
               self.emit(Op::StoreLocal, LINE);
-              self.emit_byte(self.slot_to_u8(slot)?, LINE);
+              self.emit_slot(slot, LINE);
               if !matches!(param.pattern, OPat::BindingIdentifier(_)) {
                 self.emit(Op::LoadLocal, LINE);
-                self.emit_byte(self.slot_to_u8(slot)?, LINE);
+                self.emit_slot(slot, LINE);
                 self.compile_binding_pattern_assignment_oast(
                   &param.pattern,
                   oxc_ast::ast::VariableDeclarationKind::Let,
@@ -1769,7 +1769,7 @@ impl Compiler {
                 self.patch_jump_to_target(patch_pos, catch_finalizer_start);
               }
               self.emit(Op::LoadLocal, LINE);
-              self.emit_byte(self.slot_to_u8(did_return_slot)?, LINE);
+              self.emit_slot(did_return_slot, LINE);
               self.emit(Op::JumpIfFalse, LINE);
               let skip_return = self.current_ip();
               self.emit_byte(0, LINE);
@@ -1781,12 +1781,12 @@ impl Compiler {
                 let outer_return_slot = self.finally_patches[outer_idx].return_slot;
                 let outer_did_return_slot = self.finally_patches[outer_idx].did_return_slot;
                 self.emit(Op::LoadLocal, LINE);
-                self.emit_byte(self.slot_to_u8(return_slot)?, LINE);
+                self.emit_slot(return_slot, LINE);
                 self.emit(Op::StoreLocal, LINE);
-                self.emit_byte(self.slot_to_u8(outer_return_slot)?, LINE);
+                self.emit_slot(outer_return_slot, LINE);
                 self.emit(Op::True, LINE);
                 self.emit(Op::StoreLocal, LINE);
-                self.emit_byte(self.slot_to_u8(outer_did_return_slot)?, LINE);
+                self.emit_slot(outer_did_return_slot, LINE);
                 self.emit_handler_pops_to(self.finally_patches[outer_idx].handler_depth);
                 self.emit(Op::Jump, LINE);
                 let outer_jump = self.current_ip();
@@ -1797,7 +1797,7 @@ impl Compiler {
                   .push(outer_jump);
               } else {
                 self.emit(Op::LoadLocal, LINE);
-                self.emit_byte(self.slot_to_u8(return_slot)?, LINE);
+                self.emit_slot(return_slot, LINE);
                 self.emit(Op::Return, LINE);
               }
               self.patch_jump(skip_return);
@@ -1812,7 +1812,7 @@ impl Compiler {
                 self.emit_byte(0, LINE);
                 self.patch_jump(catch_handler_jump);
                 self.emit(Op::StoreLocal, LINE);
-                self.emit_byte(self.slot_to_u8(thrown_slot)?, LINE);
+                self.emit_slot(thrown_slot, LINE);
                 self.finally_patches[finally_idx].in_finalizer = true;
                 self.enter_block_scope_with_vars(&fin.body);
                 for stmt in &fin.body {
@@ -1821,7 +1821,7 @@ impl Compiler {
                 self.exit_scope();
                 self.finally_patches[finally_idx].in_finalizer = false;
                 self.emit(Op::LoadLocal, LINE);
-                self.emit_byte(self.slot_to_u8(thrown_slot)?, LINE);
+                self.emit_slot(thrown_slot, LINE);
                 self.emit(Op::Throw, LINE);
                 self.patch_jump(skip_abrupt_finalizer);
               }
@@ -1837,7 +1837,7 @@ impl Compiler {
             self.enter_block_scope();
             let slot = self.add_local_with_mirror("\0finally_thrown".to_string(), None, false);
             self.emit(Op::StoreLocal, LINE);
-            self.emit_byte(self.slot_to_u8(slot)?, LINE);
+            self.emit_slot(slot, LINE);
             if let Some(fin) = finalizer {
               let finally_idx = finally_idx
                 .ok_or_else(|| crate::errors::CompilerError::from("finally state missing"))?;
@@ -1860,7 +1860,7 @@ impl Compiler {
               state.in_finalizer = false;
             }
             self.emit(Op::LoadLocal, LINE);
-            self.emit_byte(self.slot_to_u8(slot)?, LINE);
+            self.emit_slot(slot, LINE);
             self.emit(Op::Throw, LINE);
             self.exit_scope();
           }
@@ -1872,7 +1872,7 @@ impl Compiler {
         }
         if owns_completion_slot {
           self.emit(Op::LoadLocal, LINE);
-          self.emit_byte(self.slot_to_u8(try_completion_slot)?, LINE);
+          self.emit_slot(try_completion_slot, LINE);
         }
       }
       _ => {}

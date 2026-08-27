@@ -203,7 +203,7 @@ impl Compiler {
         self.emit(Op::Undefined, LINE);
       }
       self.emit(Op::StoreLocal, LINE);
-      self.emit_byte(self.slot_to_u8(slot)?, LINE);
+      self.emit_slot(slot, LINE);
       Some(slot)
     } else {
       None
@@ -215,7 +215,7 @@ impl Compiler {
 
     if let Some(slot) = completion_slot {
       self.emit(Op::LoadLocal, LINE);
-      self.emit_byte(self.slot_to_u8(slot)?, LINE);
+      self.emit_slot(slot, LINE);
     }
 
     if let Some(error) = self.emission_error.take() {

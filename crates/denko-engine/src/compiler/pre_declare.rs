@@ -232,13 +232,13 @@ impl Compiler {
               self.emit(Op::Copy, LINE);
             }
             self.emit(Op::StoreLocal, LINE);
-            self.emit_byte(self.slot_to_u8(slot)?, LINE);
+            self.emit_slot(slot, LINE);
             if self.local_mirrors_global(slot) {
               self.emit_set_global_name(&fname);
             }
             if self.current_module.is_some() {
               self.emit(Op::LoadLocal, LINE);
-              self.emit_byte(self.slot_to_u8(slot)?, LINE);
+              self.emit_slot(slot, LINE);
               self.emit_set_own_module_export(&fname)?;
             }
           }
@@ -261,13 +261,13 @@ impl Compiler {
               self.emit(Op::Copy, LINE);
             }
             self.emit(Op::StoreLocal, LINE);
-            self.emit_byte(self.slot_to_u8(slot)?, LINE);
+            self.emit_slot(slot, LINE);
             if self.local_mirrors_global(slot) {
               self.emit_set_global_name(&fname);
             }
             if self.current_module.is_some() {
               self.emit(Op::LoadLocal, LINE);
-              self.emit_byte(self.slot_to_u8(slot)?, LINE);
+              self.emit_slot(slot, LINE);
               self.emit_set_own_module_export(&fname)?;
             }
           }
@@ -289,13 +289,13 @@ impl Compiler {
                 self.emit(Op::Copy, LINE);
               }
               self.emit(Op::StoreLocal, LINE);
-              self.emit_byte(self.slot_to_u8(slot)?, LINE);
+              self.emit_slot(slot, LINE);
               if self.local_mirrors_global(slot) {
                 self.emit_set_global_name(&fname);
               }
               if self.current_module.is_some() {
                 self.emit(Op::LoadLocal, LINE);
-                self.emit_byte(self.slot_to_u8(slot)?, LINE);
+                self.emit_slot(slot, LINE);
                 self.emit_set_own_module_export("default")?;
               }
             } else {

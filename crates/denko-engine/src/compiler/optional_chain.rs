@@ -247,12 +247,12 @@ impl Compiler {
     let receiver_slot = if has_receiver {
       let callee_slot = self.alloc_temp_local("chain_spread_callee");
       self.emit(Op::StoreLocal, LINE);
-      self.emit_byte(self.slot_to_u8(callee_slot)?, LINE);
+      self.emit_slot(callee_slot, LINE);
       let receiver_slot = self.alloc_temp_local("chain_spread_receiver");
       self.emit(Op::StoreLocal, LINE);
-      self.emit_byte(self.slot_to_u8(receiver_slot)?, LINE);
+      self.emit_slot(receiver_slot, LINE);
       self.emit(Op::LoadLocal, LINE);
-      self.emit_byte(self.slot_to_u8(callee_slot)?, LINE);
+      self.emit_slot(callee_slot, LINE);
       Some(receiver_slot)
     } else {
       None
@@ -285,7 +285,7 @@ impl Compiler {
         && let Some(receiver_slot) = receiver_slot
       {
         self.emit(Op::LoadLocal, LINE);
-        self.emit_byte(self.slot_to_u8(receiver_slot)?, LINE);
+        self.emit_slot(receiver_slot, LINE);
         self.emit(if is_spread { Op::True } else { Op::False }, LINE);
         self.emit(Op::BuildArray, LINE);
         self.emit_byte(2, LINE);

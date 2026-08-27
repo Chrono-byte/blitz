@@ -162,15 +162,12 @@ impl Compiler {
     self.compile_expr_oast(&m.object)?;
     let object_slot = self.alloc_temp_local("ref_obj");
     self.emit(Op::StoreLocal, LINE);
-    self.emit_byte(
-      u8::try_from(object_slot).expect("object_slot fits in u8"),
-      LINE,
-    );
+    self.emit_slot(object_slot, LINE);
 
     self.emit_constant(Value::String(m.property.name.to_string().into()), LINE);
     let key_slot = self.alloc_temp_local("ref_key");
     self.emit(Op::StoreLocal, LINE);
-    self.emit_byte(u8::try_from(key_slot).expect("key_slot fits in u8"), LINE);
+    self.emit_slot(key_slot, LINE);
     Ok((object_slot, key_slot))
   }
 
@@ -181,12 +178,12 @@ impl Compiler {
     self.compile_expr_oast(&m.object)?;
     let object_slot = self.alloc_temp_local("ref_obj");
     self.emit(Op::StoreLocal, LINE);
-    self.emit_byte(self.slot_to_u8(object_slot)?, LINE);
+    self.emit_slot(object_slot, LINE);
 
     self.compile_expr_oast(&m.expression)?;
     let key_slot = self.alloc_temp_local("ref_key");
     self.emit(Op::StoreLocal, LINE);
-    self.emit_byte(self.slot_to_u8(key_slot)?, LINE);
+    self.emit_slot(key_slot, LINE);
     Ok((object_slot, key_slot))
   }
 
@@ -196,9 +193,9 @@ impl Compiler {
     key_slot: usize,
   ) -> Result<(), crate::errors::CompilerError> {
     self.emit(Op::LoadLocal, LINE);
-    self.emit_byte(self.slot_to_u8(object_slot)?, LINE);
+    self.emit_slot(object_slot, LINE);
     self.emit(Op::LoadLocal, LINE);
-    self.emit_byte(self.slot_to_u8(key_slot)?, LINE);
+    self.emit_slot(key_slot, LINE);
     self.emit(Op::GetProperty, LINE);
     Ok(())
   }
@@ -210,22 +207,13 @@ impl Compiler {
   ) -> Result<(), crate::errors::CompilerError> {
     let value_slot = self.alloc_temp_local("ref_value");
     self.emit(Op::StoreLocal, LINE);
-    self.emit_byte(
-      u8::try_from(value_slot).expect("value_slot fits in u8"),
-      LINE,
-    );
+    self.emit_slot(value_slot, LINE);
     self.emit(Op::LoadLocal, LINE);
-    self.emit_byte(
-      u8::try_from(object_slot).expect("object_slot fits in u8"),
-      LINE,
-    );
+    self.emit_slot(object_slot, LINE);
     self.emit(Op::LoadLocal, LINE);
-    self.emit_byte(u8::try_from(key_slot).expect("key_slot fits in u8"), LINE);
+    self.emit_slot(key_slot, LINE);
     self.emit(Op::LoadLocal, LINE);
-    self.emit_byte(
-      u8::try_from(value_slot).expect("value_slot fits in u8"),
-      LINE,
-    );
+    self.emit_slot(value_slot, LINE);
     self.emit(Op::SetProperty, LINE);
     Ok(())
   }

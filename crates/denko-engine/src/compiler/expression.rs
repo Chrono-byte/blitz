@@ -308,7 +308,7 @@ impl super::Compiler {
         let home_object_slot = self.alloc_temp_local("object_literal_home");
         self.emit(Op::Copy, LINE);
         self.emit(Op::StoreLocal, LINE);
-        self.emit_byte(self.slot_to_u8(home_object_slot)?, LINE);
+        self.emit_slot(home_object_slot, LINE);
 
         for prop in &obj.properties {
           match prop {
@@ -326,7 +326,7 @@ impl super::Compiler {
               if is_proto_setter {
                 self.emit_get_builtin_name("objectSetPrototypeOf");
                 self.emit(Op::LoadLocal, LINE);
-                self.emit_byte(self.slot_to_u8(home_object_slot)?, LINE);
+                self.emit_slot(home_object_slot, LINE);
                 self.compile_expr_oast(&p.value)?;
                 self.emit(Op::Call, LINE);
                 self.emit_byte(2, LINE);
@@ -361,9 +361,9 @@ impl super::Compiler {
               }
               if let Some(key_slot) = property_key_slot {
                 self.emit(Op::StoreLocal, LINE);
-                self.emit_byte(self.slot_to_u8(key_slot)?, LINE);
+                self.emit_slot(key_slot, LINE);
                 self.emit(Op::LoadLocal, LINE);
-                self.emit_byte(self.slot_to_u8(key_slot)?, LINE);
+                self.emit_slot(key_slot, LINE);
               }
 
               self.emit_constant(Value::String("value".to_string().into()), LINE);
@@ -407,12 +407,12 @@ impl super::Compiler {
               if let Some(key_slot) = property_key_slot {
                 let value_slot = self.alloc_temp_local("object_literal_property_value");
                 self.emit(Op::StoreLocal, LINE);
-                self.emit_byte(self.slot_to_u8(value_slot)?, LINE);
+                self.emit_slot(value_slot, LINE);
                 self.emit_get_builtin_name("setFunctionNameIfAnonymous");
                 self.emit(Op::LoadLocal, LINE);
-                self.emit_byte(self.slot_to_u8(value_slot)?, LINE);
+                self.emit_slot(value_slot, LINE);
                 self.emit(Op::LoadLocal, LINE);
-                self.emit_byte(self.slot_to_u8(key_slot)?, LINE);
+                self.emit_slot(key_slot, LINE);
                 self.emit(Op::Call, LINE);
                 self.emit_byte(2, LINE);
               }
@@ -468,9 +468,9 @@ impl super::Compiler {
               }
               let property_key_slot = self.alloc_temp_local("object_literal_accessor_key");
               self.emit(Op::StoreLocal, LINE);
-              self.emit_byte(self.slot_to_u8(property_key_slot)?, LINE);
+              self.emit_slot(property_key_slot, LINE);
               self.emit(Op::LoadLocal, LINE);
-              self.emit_byte(self.slot_to_u8(property_key_slot)?, LINE);
+              self.emit_slot(property_key_slot, LINE);
 
               let descriptor_prop_name = match p.kind {
                 oast::PropertyKind::Get => "get",
@@ -500,12 +500,12 @@ impl super::Compiler {
               }
               let value_slot = self.alloc_temp_local("object_literal_accessor_value");
               self.emit(Op::StoreLocal, LINE);
-              self.emit_byte(self.slot_to_u8(value_slot)?, LINE);
+              self.emit_slot(value_slot, LINE);
               self.emit_get_builtin_name("setFunctionNameIfAnonymous");
               self.emit(Op::LoadLocal, LINE);
-              self.emit_byte(self.slot_to_u8(value_slot)?, LINE);
+              self.emit_slot(value_slot, LINE);
               self.emit(Op::LoadLocal, LINE);
-              self.emit_byte(self.slot_to_u8(property_key_slot)?, LINE);
+              self.emit_slot(property_key_slot, LINE);
               self.emit_constant(Value::String(descriptor_prop_name.into()), LINE);
               self.emit(Op::Call, LINE);
               self.emit_byte(3, LINE);
@@ -524,14 +524,14 @@ impl super::Compiler {
               let source_slot = self.alloc_temp_local("object_spread");
               self.compile_expr_oast(&spread.argument)?;
               self.emit(Op::StoreLocal, LINE);
-              self.emit_byte(self.slot_to_u8(source_slot)?, LINE);
+              self.emit_slot(source_slot, LINE);
               self.emit(Op::Copy, LINE);
               self.emit_get_global_name("Object");
               self.emit_constant(Value::String("assign".to_string().into()), LINE);
               self.emit(Op::GetProperty, LINE);
               self.emit(Op::Exchange, LINE);
               self.emit(Op::LoadLocal, LINE);
-              self.emit_byte(self.slot_to_u8(source_slot)?, LINE);
+              self.emit_slot(source_slot, LINE);
               self.emit(Op::Call, LINE);
               self.emit_byte(2, LINE);
               self.emit(Op::Discard, LINE);
@@ -647,10 +647,10 @@ impl super::Compiler {
               if Self::is_anonymous_function_definition(&a.right) {
                 let value_slot = self.alloc_temp_local("assignment_function_name");
                 self.emit(Op::StoreLocal, LINE);
-                self.emit_byte(self.slot_to_u8(value_slot)?, LINE);
+                self.emit_slot(value_slot, LINE);
                 self.emit_get_builtin_name("setFunctionNameIfAnonymous");
                 self.emit(Op::LoadLocal, LINE);
-                self.emit_byte(self.slot_to_u8(value_slot)?, LINE);
+                self.emit_slot(value_slot, LINE);
                 self.emit_constant(Value::String(name.into()), LINE);
                 self.emit(Op::Call, LINE);
                 self.emit_byte(2, LINE);
@@ -661,10 +661,10 @@ impl super::Compiler {
                 self.emit(Op::Copy, LINE);
                 if let Some(slot) = self.resolve_local(name) {
                   self.emit(Op::StoreLocal, LINE);
-                  self.emit_byte(self.slot_to_u8(slot)?, LINE);
+                  self.emit_slot(slot, LINE);
                   if self.local_mirrors_global(slot) {
                     self.emit(Op::LoadLocal, LINE);
-                    self.emit_byte(self.slot_to_u8(slot)?, LINE);
+                    self.emit_slot(slot, LINE);
                     self.emit_set_global_name(name);
                   }
                   self.emit_sync_local_module_export(name, slot)?;
@@ -793,20 +793,20 @@ impl super::Compiler {
                 let receiver_slot = self.alloc_temp_local("super_receiver");
                 self.emit(Op::GetThis, LINE);
                 self.emit(Op::StoreLocal, LINE);
-                self.emit_byte(self.slot_to_u8(receiver_slot)?, LINE);
+                self.emit_slot(receiver_slot, LINE);
                 self.emit(Op::LoadLocal, LINE);
-                self.emit_byte(self.slot_to_u8(receiver_slot)?, LINE);
+                self.emit_slot(receiver_slot, LINE);
                 self.emit(Op::Copy, LINE);
                 self.compile_expr_oast(&m.expression)?;
                 self.emit(Op::StoreLocal, LINE);
-                self.emit_byte(self.slot_to_u8(key_slot)?, LINE);
+                self.emit_slot(key_slot, LINE);
                 self.emit(Op::LoadLocal, LINE);
-                self.emit_byte(self.slot_to_u8(key_slot)?, LINE);
+                self.emit_slot(key_slot, LINE);
                 self.emit(Op::GetSuperProperty, LINE);
                 self.compile_expr_oast(&a.right)?;
                 self.emit_compound_assignment_op(a.operator);
                 self.emit(Op::LoadLocal, LINE);
-                self.emit_byte(self.slot_to_u8(key_slot)?, LINE);
+                self.emit_slot(key_slot, LINE);
                 self.emit(Op::Exchange, LINE);
                 self.emit(Op::SetSuperProperty, LINE);
                 self.emit(Op::Exchange, LINE);
@@ -830,7 +830,7 @@ impl super::Compiler {
               let name = id.name.as_str();
               if let Some(slot) = self.resolve_local(name) {
                 self.emit(Op::LoadLocal, LINE);
-                self.emit_byte(self.slot_to_u8(slot)?, LINE);
+                self.emit_slot(slot, LINE);
                 self.emit(Op::Copy, LINE);
                 self.emit(Op::JumpIfFalse, LINE);
                 let jump_end = self.current_ip();
@@ -840,10 +840,10 @@ impl super::Compiler {
                 self.compile_expr_oast(&a.right)?;
                 self.emit(Op::Copy, LINE);
                 self.emit(Op::StoreLocal, LINE);
-                self.emit_byte(self.slot_to_u8(slot)?, LINE);
+                self.emit_slot(slot, LINE);
                 if self.local_mirrors_global(slot) {
                   self.emit(Op::LoadLocal, LINE);
-                  self.emit_byte(self.slot_to_u8(slot)?, LINE);
+                  self.emit_slot(slot, LINE);
                   self.emit_set_global_name(name);
                 }
                 self.patch_jump(jump_end);
@@ -912,7 +912,7 @@ impl super::Compiler {
               let name = id.name.as_str();
               if let Some(slot) = self.resolve_local(name) {
                 self.emit(Op::LoadLocal, LINE);
-                self.emit_byte(self.slot_to_u8(slot)?, LINE);
+                self.emit_slot(slot, LINE);
                 self.emit(Op::Copy, LINE);
                 self.emit(Op::JumpIfTrue, LINE);
                 let jump_end = self.current_ip();
@@ -922,10 +922,10 @@ impl super::Compiler {
                 self.compile_expr_oast(&a.right)?;
                 self.emit(Op::Copy, LINE);
                 self.emit(Op::StoreLocal, LINE);
-                self.emit_byte(self.slot_to_u8(slot)?, LINE);
+                self.emit_slot(slot, LINE);
                 if self.local_mirrors_global(slot) {
                   self.emit(Op::LoadLocal, LINE);
-                  self.emit_byte(self.slot_to_u8(slot)?, LINE);
+                  self.emit_slot(slot, LINE);
                   self.emit_set_global_name(name);
                 }
                 self.patch_jump(jump_end);
@@ -994,7 +994,7 @@ impl super::Compiler {
               let name = id.name.as_str();
               if let Some(slot) = self.resolve_local(name) {
                 self.emit(Op::LoadLocal, LINE);
-                self.emit_byte(self.slot_to_u8(slot)?, LINE);
+                self.emit_slot(slot, LINE);
                 self.emit(Op::Copy, LINE);
                 self.emit(Op::JumpIfNullish, LINE);
                 let jump_end = self.current_ip();
@@ -1009,10 +1009,10 @@ impl super::Compiler {
                 self.compile_expr_oast(&a.right)?;
                 self.emit(Op::Copy, LINE);
                 self.emit(Op::StoreLocal, LINE);
-                self.emit_byte(self.slot_to_u8(slot)?, LINE);
+                self.emit_slot(slot, LINE);
                 if self.local_mirrors_global(slot) {
                   self.emit(Op::LoadLocal, LINE);
-                  self.emit_byte(self.slot_to_u8(slot)?, LINE);
+                  self.emit_slot(slot, LINE);
                   self.emit_set_global_name(name);
                 }
                 self.patch_jump(after_store);
@@ -1238,9 +1238,9 @@ impl super::Compiler {
             self.emit_reference_get(object_slot, key_slot)?;
             let old_slot = self.alloc_temp_local("ref_old");
             self.emit(Op::StoreLocal, LINE);
-            self.emit_byte(self.slot_to_u8(old_slot)?, LINE);
+            self.emit_slot(old_slot, LINE);
             self.emit(Op::LoadLocal, LINE);
-            self.emit_byte(self.slot_to_u8(old_slot)?, LINE);
+            self.emit_slot(old_slot, LINE);
             self.emit(Op::Neg, LINE);
             self.emit(Op::Neg, LINE);
             if !u.prefix {
@@ -1261,9 +1261,9 @@ impl super::Compiler {
             self.emit_reference_get(object_slot, key_slot)?;
             let old_slot = self.alloc_temp_local("ref_old");
             self.emit(Op::StoreLocal, LINE);
-            self.emit_byte(self.slot_to_u8(old_slot)?, LINE);
+            self.emit_slot(old_slot, LINE);
             self.emit(Op::LoadLocal, LINE);
-            self.emit_byte(self.slot_to_u8(old_slot)?, LINE);
+            self.emit_slot(old_slot, LINE);
             self.emit(Op::Neg, LINE);
             self.emit(Op::Neg, LINE);
             if !u.prefix {
@@ -1309,10 +1309,10 @@ impl super::Compiler {
           self.compile_expr_oast(&b.left)?;
           let key_slot = self.alloc_reusable_temp_local("in_property_key");
           self.emit(Op::StoreLocal, LINE);
-          self.emit_byte(self.slot_to_u8(key_slot)?, LINE);
+          self.emit_slot(key_slot, LINE);
           self.compile_expr_oast(&b.right)?;
           self.emit(Op::LoadLocal, LINE);
-          self.emit_byte(self.slot_to_u8(key_slot)?, LINE);
+          self.emit_slot(key_slot, LINE);
           self.emit(Op::HasProperty, LINE);
           return Ok(());
         }
@@ -1658,11 +1658,11 @@ impl super::Compiler {
             self.compile_expr_oast(&m.object)?;
             let receiver_slot = self.alloc_temp_local("call_receiver");
             self.emit(Op::StoreLocal, LINE);
-            self.emit_byte(self.slot_to_u8(receiver_slot)?, LINE);
+            self.emit_slot(receiver_slot, LINE);
             self.emit(Op::LoadLocal, LINE);
-            self.emit_byte(self.slot_to_u8(receiver_slot)?, LINE);
+            self.emit_slot(receiver_slot, LINE);
             self.emit(Op::LoadLocal, LINE);
-            self.emit_byte(self.slot_to_u8(receiver_slot)?, LINE);
+            self.emit_slot(receiver_slot, LINE);
             self.emit_constant(Value::String(m.property.name.to_string().into()), LINE);
             self.emit(Op::GetProperty, LINE);
           }
@@ -1711,16 +1711,16 @@ impl super::Compiler {
             self.compile_expr_oast(&m.expression)?;
             let key_slot = self.alloc_temp_local("call_key");
             self.emit(Op::StoreLocal, LINE);
-            self.emit_byte(self.slot_to_u8(key_slot)?, LINE);
+            self.emit_slot(key_slot, LINE);
             let receiver_slot = self.alloc_temp_local("call_receiver");
             self.emit(Op::StoreLocal, LINE);
-            self.emit_byte(self.slot_to_u8(receiver_slot)?, LINE);
+            self.emit_slot(receiver_slot, LINE);
             self.emit(Op::LoadLocal, LINE);
-            self.emit_byte(self.slot_to_u8(receiver_slot)?, LINE);
+            self.emit_slot(receiver_slot, LINE);
             self.emit(Op::LoadLocal, LINE);
-            self.emit_byte(self.slot_to_u8(receiver_slot)?, LINE);
+            self.emit_slot(receiver_slot, LINE);
             self.emit(Op::LoadLocal, LINE);
-            self.emit_byte(self.slot_to_u8(key_slot)?, LINE);
+            self.emit_slot(key_slot, LINE);
             self.emit(Op::GetProperty, LINE);
           }
 
@@ -1744,11 +1744,11 @@ impl super::Compiler {
             self.compile_expr_oast(&m.object)?;
             let receiver_slot = self.alloc_temp_local("call_receiver");
             self.emit(Op::StoreLocal, LINE);
-            self.emit_byte(self.slot_to_u8(receiver_slot)?, LINE);
+            self.emit_slot(receiver_slot, LINE);
             self.emit(Op::LoadLocal, LINE);
-            self.emit_byte(self.slot_to_u8(receiver_slot)?, LINE);
+            self.emit_slot(receiver_slot, LINE);
             self.emit(Op::LoadLocal, LINE);
-            self.emit_byte(self.slot_to_u8(receiver_slot)?, LINE);
+            self.emit_slot(receiver_slot, LINE);
             let key = self.ensure_private_name_constant(&m.field.name);
             self.emit_constant(key, LINE);
             self.emit(Op::GetProperty, LINE);

@@ -125,9 +125,9 @@ impl super::Compiler {
         self.compile_expr_oast(&member.object)?;
         let receiver = self.alloc_temp_local("spread_call_receiver");
         self.emit(Op::StoreLocal, LINE);
-        self.emit_byte(self.slot_to_u8(receiver)?, LINE);
+        self.emit_slot(receiver, LINE);
         self.emit(Op::LoadLocal, LINE);
-        self.emit_byte(self.slot_to_u8(receiver)?, LINE);
+        self.emit_slot(receiver, LINE);
         self.emit_constant(Value::String(member.property.name.to_string().into()), LINE);
         self.emit(Op::GetProperty, LINE);
         Some(receiver)
@@ -141,14 +141,14 @@ impl super::Compiler {
         self.compile_expr_oast(&member.expression)?;
         let key = self.alloc_temp_local("spread_call_key");
         self.emit(Op::StoreLocal, LINE);
-        self.emit_byte(self.slot_to_u8(key)?, LINE);
+        self.emit_slot(key, LINE);
         let receiver = self.alloc_temp_local("spread_call_receiver");
         self.emit(Op::StoreLocal, LINE);
-        self.emit_byte(self.slot_to_u8(receiver)?, LINE);
+        self.emit_slot(receiver, LINE);
         self.emit(Op::LoadLocal, LINE);
-        self.emit_byte(self.slot_to_u8(receiver)?, LINE);
+        self.emit_slot(receiver, LINE);
         self.emit(Op::LoadLocal, LINE);
-        self.emit_byte(self.slot_to_u8(key)?, LINE);
+        self.emit_slot(key, LINE);
         self.emit(Op::GetProperty, LINE);
         Some(receiver)
       }
@@ -157,10 +157,10 @@ impl super::Compiler {
         self.compile_expr_oast(&c.callee)?;
         let eval_callee = self.alloc_temp_local("spread_eval_callee");
         self.emit(Op::StoreLocal, LINE);
-        self.emit_byte(self.slot_to_u8(eval_callee)?, LINE);
+        self.emit_slot(eval_callee, LINE);
         self.emit_get_builtin_name("callEvalIdentifier");
         self.emit(Op::LoadLocal, LINE);
-        self.emit_byte(self.slot_to_u8(eval_callee)?, LINE);
+        self.emit_slot(eval_callee, LINE);
         None
       }
       _ => {
@@ -210,7 +210,7 @@ impl super::Compiler {
         // the actual spread flag. A third true entry marks `super(...)`.
         if let Some(receiver) = receiver_slot {
           self.emit(Op::LoadLocal, LINE);
-          self.emit_byte(self.slot_to_u8(receiver)?, LINE);
+          self.emit_slot(receiver, LINE);
         } else {
           self.emit(Op::Undefined, LINE);
         }
@@ -361,11 +361,11 @@ impl super::Compiler {
         self.compile_expr_oast(&m.object)?;
         let receiver_slot = self.alloc_temp_local("call_receiver");
         self.emit(Op::StoreLocal, LINE);
-        self.emit_byte(self.slot_to_u8(receiver_slot)?, LINE);
+        self.emit_slot(receiver_slot, LINE);
         self.emit(Op::LoadLocal, LINE);
-        self.emit_byte(self.slot_to_u8(receiver_slot)?, LINE);
+        self.emit_slot(receiver_slot, LINE);
         self.emit(Op::LoadLocal, LINE);
-        self.emit_byte(self.slot_to_u8(receiver_slot)?, LINE);
+        self.emit_slot(receiver_slot, LINE);
         self.emit_constant(Value::String(m.property.name.to_string().into()), LINE);
         self.emit(Op::GetProperty, LINE);
       }
@@ -390,16 +390,16 @@ impl super::Compiler {
         self.compile_expr_oast(&m.expression)?;
         let key_slot = self.alloc_temp_local("call_key");
         self.emit(Op::StoreLocal, LINE);
-        self.emit_byte(self.slot_to_u8(key_slot)?, LINE);
+        self.emit_slot(key_slot, LINE);
         let receiver_slot = self.alloc_temp_local("call_receiver");
         self.emit(Op::StoreLocal, LINE);
-        self.emit_byte(self.slot_to_u8(receiver_slot)?, LINE);
+        self.emit_slot(receiver_slot, LINE);
         self.emit(Op::LoadLocal, LINE);
-        self.emit_byte(self.slot_to_u8(receiver_slot)?, LINE);
+        self.emit_slot(receiver_slot, LINE);
         self.emit(Op::LoadLocal, LINE);
-        self.emit_byte(self.slot_to_u8(receiver_slot)?, LINE);
+        self.emit_slot(receiver_slot, LINE);
         self.emit(Op::LoadLocal, LINE);
-        self.emit_byte(self.slot_to_u8(key_slot)?, LINE);
+        self.emit_slot(key_slot, LINE);
         self.emit(Op::GetProperty, LINE);
       }
 
@@ -423,11 +423,11 @@ impl super::Compiler {
         self.compile_expr_oast(&m.object)?;
         let receiver_slot = self.alloc_temp_local("call_receiver");
         self.emit(Op::StoreLocal, LINE);
-        self.emit_byte(self.slot_to_u8(receiver_slot)?, LINE);
+        self.emit_slot(receiver_slot, LINE);
         self.emit(Op::LoadLocal, LINE);
-        self.emit_byte(self.slot_to_u8(receiver_slot)?, LINE);
+        self.emit_slot(receiver_slot, LINE);
         self.emit(Op::LoadLocal, LINE);
-        self.emit_byte(self.slot_to_u8(receiver_slot)?, LINE);
+        self.emit_slot(receiver_slot, LINE);
         let key = self.ensure_private_name_constant(&m.field.name);
         self.emit_constant(key, LINE);
         self.emit(Op::GetProperty, LINE);
@@ -461,11 +461,11 @@ impl super::Compiler {
       self.compile_expr_oast(&c.callee)?;
       let callee_slot = self.alloc_temp_local("tail_eval_callee");
       self.emit(Op::StoreLocal, LINE);
-      self.emit_byte(self.slot_to_u8(callee_slot)?, LINE);
+      self.emit_slot(callee_slot, LINE);
 
       self.emit_get_builtin_name("isIntrinsicEval");
       self.emit(Op::LoadLocal, LINE);
-      self.emit_byte(self.slot_to_u8(callee_slot)?, LINE);
+      self.emit_slot(callee_slot, LINE);
       self.emit_call_with_arg_count(Op::Call, 1)?;
       self.emit(Op::JumpIfFalse, LINE);
       let non_eval = self.current_ip();
@@ -480,7 +480,7 @@ impl super::Compiler {
 
       self.patch_jump(non_eval);
       self.emit(Op::LoadLocal, LINE);
-      self.emit_byte(self.slot_to_u8(callee_slot)?, LINE);
+      self.emit_slot(callee_slot, LINE);
       let tail_arg_count = self.compile_call_arguments(&c.arguments)?;
       self.emit_call_with_arg_count(Op::TailCall, tail_arg_count)?;
       self.patch_jump(end);

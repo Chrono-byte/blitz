@@ -19,7 +19,7 @@ use std::sync::Arc;
 use thiserror::Error;
 
 /// Current version of the bytecode bundle container format.
-pub const BYTECODE_BUNDLE_VERSION: u16 = 3;
+pub const BYTECODE_BUNDLE_VERSION: u16 = 4;
 
 const MAGIC: &[u8; 8] = b"BLITZBC\0";
 const HEADER_LEN: usize = MAGIC.len() + 2 + 8 + 4;
@@ -302,7 +302,7 @@ struct WireFunctionProto {
 #[derive(Clone, Serialize, Deserialize)]
 struct WireUpvalueSpec {
   is_local: bool,
-  index: u8,
+  index: u16,
   mirror_global_name: Option<String>,
   immutable: bool,
   sloppy_immutable_silent: bool,
