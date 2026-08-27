@@ -222,7 +222,7 @@ impl Compiler {
             let (proto, _env_len) = self.compile_function(&fname, None, f, None, false)?;
             let idx = self.chunk.add_function(proto);
             self.emit(Op::MakeClosure, LINE);
-            self.emit_byte(self.function_index_to_u8(idx)?, LINE);
+            self.emit_function_index(idx, LINE);
             let slot = if let Some(s) = self.resolve_local(&fname) {
               s
             } else {
@@ -251,7 +251,7 @@ impl Compiler {
             let (proto, _env_len) = self.compile_function(&fname, None, f, None, false)?;
             let idx = self.chunk.add_function(proto);
             self.emit(Op::MakeClosure, LINE);
-            self.emit_byte(self.function_index_to_u8(idx)?, LINE);
+            self.emit_function_index(idx, LINE);
             let slot = if let Some(s) = self.resolve_local(&fname) {
               s
             } else {
@@ -279,7 +279,7 @@ impl Compiler {
               let (proto, _env_len) = self.compile_function(&fname, None, f, None, false)?;
               let idx = self.chunk.add_function(proto);
               self.emit(Op::MakeClosure, LINE);
-              self.emit_byte(self.function_index_to_u8(idx)?, LINE);
+              self.emit_function_index(idx, LINE);
               let slot = if let Some(s) = self.resolve_local(&fname) {
                 s
               } else {
@@ -303,7 +303,7 @@ impl Compiler {
               let (proto, _env_len) = self.compile_function(&fname, None, f, None, false)?;
               let idx = self.chunk.add_function(proto);
               self.emit(Op::MakeClosure, LINE);
-              self.emit_byte(self.function_index_to_u8(idx)?, LINE);
+              self.emit_function_index(idx, LINE);
               if self.current_module.is_some() {
                 self.emit_set_own_module_export("default")?;
               }

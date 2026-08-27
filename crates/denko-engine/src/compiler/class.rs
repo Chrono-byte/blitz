@@ -192,7 +192,7 @@ impl Compiler {
       self.emit(Op::LoadLocal, LINE);
       self.emit_slot(target_slot, LINE);
       self.emit(Op::MakeClosure, LINE);
-      self.emit_byte(self.function_index_to_u8(function_index)?, LINE);
+      self.emit_function_index(function_index, LINE);
       self.emit_set_method_home_object(target_slot)?;
       self.emit(Op::CallBuiltin, LINE);
       self.emit_byte(0, LINE);
@@ -327,7 +327,7 @@ impl Compiler {
     };
     self.emit_constant(Value::String(first_descriptor_key.to_string().into()), LINE);
     self.emit(Op::MakeClosure, LINE);
-    self.emit_byte(self.function_index_to_u8(fidx)?, LINE);
+    self.emit_function_index(fidx, LINE);
     if let Some(key_slot) = computed_key_slot {
       let closure_slot = self.alloc_temp_local("class_computed_method_closure");
       self.emit(Op::StoreLocal, LINE);
@@ -804,7 +804,7 @@ impl Compiler {
 
     let idx = self.chunk.add_function(proto);
     self.emit(Op::MakeClosure, LINE);
-    self.emit_byte(self.function_index_to_u8(idx)?, LINE);
+    self.emit_function_index(idx, LINE);
     if let Some(super_class) = &c.super_class {
       self.emit_get_builtin_name("classInitExtends");
       self.emit(Op::Exchange, LINE);
@@ -881,7 +881,7 @@ impl Compiler {
           self.emit(Op::LoadLocal, LINE);
           self.emit_slot(ctor_slot, LINE);
           self.emit(Op::MakeClosure, LINE);
-          self.emit_byte(self.function_index_to_u8(function_index)?, LINE);
+          self.emit_function_index(function_index, LINE);
           self.emit_set_method_home_object(ctor_slot)?;
           self.emit(Op::CallBuiltin, LINE);
           self.emit_byte(0, LINE);

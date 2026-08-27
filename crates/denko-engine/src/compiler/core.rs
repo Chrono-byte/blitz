@@ -482,13 +482,20 @@ impl Compiler {
     self.emit_with_payload(Op::Const, idx, line);
   }
 
-  /// Safely converts a function index (usize) to u8, checking that it doesn't exceed 255.
-  pub(crate) fn function_index_to_u8(
-    &self,
+  /// Encode a nested-function index in the 16-bit auxiliary field used by RISC v2.
+  pub(crate) fn emit_function_index(
+    &mut self,
     idx: usize,
-  ) -> Result<u8, CompilerError> {
-    u8::try_from(idx)
-      .map_err(|_| CompilerError::from(format!("Too many functions (max 255, got {})", idx)))
+    line: u32,
+  ) {
+    let Ok(idx) = u16::try_from(idx) else {
+      self.emission_error.get_or_insert_with(|| {
+        CompilerError::from(format!("Too many functions (max 65535, got {idx})"))
+      });
+      return;
+    };
+    self.risc.set_last_payload(u32::from(idx), line);
+    self.pending_operand_bytes = 2;
   }
 
   /// Add a compact module-index/export-name descriptor to the constant pool.

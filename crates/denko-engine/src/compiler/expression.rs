@@ -289,7 +289,7 @@ impl super::Compiler {
         let (proto, _env_len) = self.compile_arrow_function(name, a, None)?;
         let idx = self.chunk.add_function(proto);
         self.emit(Op::MakeClosure, LINE);
-        self.emit_byte(self.function_index_to_u8(idx)?, LINE);
+        self.emit_function_index(idx, LINE);
       }
       OExpr::FunctionExpression(f) => {
         let self_name = f.id.as_ref().map(|id| id.name.as_str());
@@ -297,7 +297,7 @@ impl super::Compiler {
         let (proto, _env_len) = self.compile_function(name, self_name, f, None, false)?;
         let idx = self.chunk.add_function(proto);
         self.emit(Op::MakeClosure, LINE);
-        self.emit_byte(self.function_index_to_u8(idx)?, LINE);
+        self.emit_function_index(idx, LINE);
       }
       OExpr::ObjectExpression(obj) => {
         // Start with an empty object and define each property as it is visited.
@@ -399,7 +399,7 @@ impl super::Compiler {
                 proto.is_constructor = false;
                 let index = self.chunk.add_function(proto);
                 self.emit(Op::MakeClosure, LINE);
-                self.emit_byte(self.function_index_to_u8(index)?, LINE);
+                self.emit_function_index(index, LINE);
                 self.emit_set_method_home_object(home_object_slot)?;
               } else {
                 self.compile_expr_oast(&p.value)?;
@@ -493,7 +493,7 @@ impl super::Compiler {
                 proto.is_constructor = false;
                 let idx = self.chunk.add_function(proto);
                 self.emit(Op::MakeClosure, LINE);
-                self.emit_byte(self.function_index_to_u8(idx)?, LINE);
+                self.emit_function_index(idx, LINE);
                 self.emit_set_method_home_object(home_object_slot)?;
               } else {
                 self.compile_expr_oast(&p.value)?;

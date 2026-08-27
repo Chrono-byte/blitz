@@ -44,15 +44,27 @@ mod test {
 
   #[test]
   fn closures_capture_local_slots_above_u8_range() {
-    let declarations = (0..300)
+    let declarations = (0..299)
       .map(|index| format!("let value{index} = {index};"))
       .collect::<String>();
     let source = format!(
-      "{declarations} function readHighSlot() {{ return value299; }} globalThis.highSlot = readHighSlot();"
+      "{declarations} class HighSlot {{}} function readHighSlot() {{ return new HighSlot(); }} globalThis.firstHighSlot = readHighSlot() instanceof HighSlot; globalThis.secondHighSlot = readHighSlot() instanceof HighSlot;"
     );
 
     let (vm, _) = run_script(&source);
-    assert_eq!(vm.get_global("highSlot"), Some(Value::Number(299.0)));
+    assert_eq!(vm.get_global("firstHighSlot"), Some(Value::Bool(true)));
+    assert_eq!(vm.get_global("secondHighSlot"), Some(Value::Bool(true)));
+  }
+
+  #[test]
+  fn scripts_create_nested_functions_above_u8_range() {
+    let declarations = (0..300)
+      .map(|index| format!("function function{index}() {{ return {index}; }}"))
+      .collect::<String>();
+    let source = format!("{declarations} globalThis.highFunction = function299();");
+
+    let (vm, _) = run_script(&source);
+    assert_eq!(vm.get_global("highFunction"), Some(Value::Number(299.0)));
   }
 
   #[test]
@@ -6240,12 +6252,14 @@ mod test {
     let src = crate::js!(
       r#"
             var nextCount = 0;
+            var iteratorMethodCount = 0;
             var initialArgumentCount = -1;
             var initialArgument = 1;
             var resumedArgument = 0;
             var delegatedResult = { value: 4 };
             var iterable = {};
             iterable[Symbol.iterator] = function() {
+              iteratorMethodCount += 1;
               return {
                 next: function(value) {
                   nextCount += 1;
@@ -6268,6 +6282,7 @@ mod test {
             var observedInitialArgumentCount = initialArgumentCount;
             var observedInitialArgument = initialArgument;
             var observedResumedArgument = resumedArgument;
+            var observedIteratorMethodCount = iteratorMethodCount;
 
             function* stringDelegate() { yield* 'ab'; }
             var stringIterator = stringDelegate();
@@ -6301,6 +6316,10 @@ mod test {
     assert!(matches!(
       vm.get_global("observedResumedArgument"),
       Some(Value::Number(42.0))
+    ));
+    assert!(matches!(
+      vm.get_global("observedIteratorMethodCount"),
+      Some(Value::Number(1.0))
     ));
     assert!(matches!(
       vm.get_global("preservedResult"),
