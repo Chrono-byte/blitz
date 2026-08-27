@@ -101,7 +101,9 @@ Runtime.runMain(Runtime.provideLive(program));
 Public services currently include `blitz:fs`, `blitz:http`,
 `blitz:terminal`, and `blitz:websocket`. See the
 [Effect standard library design](docs/EFFECT_STDLIB_DESIGN.md) for the API
-contracts and runtime boundaries.
+contracts and runtime boundaries. New portable service work is moving to
+Effect's first-party APIs with Blitz supplying the live platform Layer; see the
+[first-party Effect API migration](docs/FIRST_PARTY_EFFECT_API_MIGRATION.md).
 
 ## Node.js compatibility
 

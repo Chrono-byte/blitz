@@ -1,5 +1,11 @@
 # Effect-native runtime API expansion plan
 
+> Historical expansion plan. The service ownership and migration sequence are
+> superseded by
+> [`FIRST_PARTY_EFFECT_API_MIGRATION.md`](FIRST_PARTY_EFFECT_API_MIGRATION.md).
+> Keep implemented `blitz:*` APIs stable until their atomic migrations ship,
+> but do not use this plan to add new copies of first-party Effect services.
+
 ## Purpose and status
 
 This plan closes the eleven API and runtime gaps found after the parser-free

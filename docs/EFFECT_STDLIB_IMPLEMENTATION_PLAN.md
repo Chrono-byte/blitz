@@ -1,5 +1,11 @@
 # Effect-native standard-library implementation plan
 
+> Historical implementation plan. New portable service work follows
+> [`FIRST_PARTY_EFFECT_API_MIGRATION.md`](FIRST_PARTY_EFFECT_API_MIGRATION.md).
+> Existing milestones remain useful as records of the Effect 3 implementation,
+> but must not be extended with new Blitz-owned copies of first-party Effect
+> services.
+
 ## Purpose
 
 This plan implements the API direction in

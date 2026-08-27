@@ -2,7 +2,14 @@
 
 ## Status
 
-This document defines the target public TypeScript API for `blitz-runtime`.
+This document describes the currently implemented Effect 3 standard library.
+Its ownership model is superseded by
+[`FIRST_PARTY_EFFECT_API_MIGRATION.md`](FIRST_PARTY_EFFECT_API_MIGRATION.md):
+when Effect owns a portable service contract, new Blitz applications use that
+first-party service and Blitz supplies its live implementation. Existing
+`blitz:*` contracts remain authoritative until each atomic migration ships.
+
+This document defines the current public TypeScript API for `blitz-runtime`.
 It covers Blitz-owned host capabilities, not ECMAScript semantics. It replaces
 callback-first Blitz APIs as the recommended application API while preserving
 standards compatibility at the appropriate boundaries. The phased delivery
