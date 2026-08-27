@@ -623,6 +623,7 @@ impl Vm {
         self.memory.temporary.push(callee.clone());
         self.memory.temporary.extend(args.iter().cloned());
 
+        let control_flow_epoch = self.execution.control_flow_epoch;
         let prev_this = std::mem::replace(&mut self.execution.active.this_value, Value::Undefined);
         let prev_builtin_this =
           std::mem::replace(&mut self.execution.builtin_this_arg_prepended, false);
@@ -633,10 +634,12 @@ impl Vm {
         let result = self.invoke_builtin(f, args);
         self.leave_function_realm(previous_realm);
         self.execution.builtin_this_arg_prepended = prev_builtin_this;
-        self.execution.active.this_value = prev_this;
-        self.execution.active.closure_env = prev_closure_env;
-        self.execution.active.slots = prev_slots;
-        self.execution.active.lexical_env = prev_lexical_env;
+        if self.execution.control_flow_epoch == control_flow_epoch {
+          self.execution.active.this_value = prev_this;
+          self.execution.active.closure_env = prev_closure_env;
+          self.execution.active.slots = prev_slots;
+          self.execution.active.lexical_env = prev_lexical_env;
+        }
 
         let result = (|| {
           let result = result?;
@@ -717,6 +720,7 @@ impl Vm {
           let mut call_args: Vec<Value> = Vec::with_capacity(args.len() + 1);
           call_args.push(this_arg_owned.clone());
           call_args.extend_from_slice(args);
+          let control_flow_epoch = self.execution.control_flow_epoch;
           let prev_this = std::mem::replace(&mut self.execution.active.this_value, this_arg_owned);
           let prev_builtin_this =
             std::mem::replace(&mut self.execution.builtin_this_arg_prepended, true);
@@ -725,10 +729,12 @@ impl Vm {
           let prev_lexical_env = Rc::clone(&self.execution.active.lexical_env);
           let result = self.invoke_builtin(f, &call_args);
           self.execution.builtin_this_arg_prepended = prev_builtin_this;
-          self.execution.active.this_value = prev_this;
-          self.execution.active.closure_env = prev_closure_env;
-          self.execution.active.slots = prev_slots;
-          self.execution.active.lexical_env = prev_lexical_env;
+          if self.execution.control_flow_epoch == control_flow_epoch {
+            self.execution.active.this_value = prev_this;
+            self.execution.active.closure_env = prev_closure_env;
+            self.execution.active.slots = prev_slots;
+            self.execution.active.lexical_env = prev_lexical_env;
+          }
           let result = result?;
           let result_root_base = self.memory.temporary.len();
           self.memory.temporary.push(result.clone());
@@ -758,6 +764,7 @@ impl Vm {
           let mut call_args: Vec<Value> = Vec::with_capacity(args.len() + 1);
           call_args.push(this_arg_owned.clone());
           call_args.extend_from_slice(args);
+          let control_flow_epoch = self.execution.control_flow_epoch;
           let prev_this = std::mem::replace(&mut self.execution.active.this_value, this_arg_owned);
           let prev_builtin_this =
             std::mem::replace(&mut self.execution.builtin_this_arg_prepended, true);
@@ -768,10 +775,12 @@ impl Vm {
           let result = self.invoke_builtin(f, &call_args);
           self.leave_function_realm(previous_realm);
           self.execution.builtin_this_arg_prepended = prev_builtin_this;
-          self.execution.active.this_value = prev_this;
-          self.execution.active.closure_env = prev_closure_env;
-          self.execution.active.slots = prev_slots;
-          self.execution.active.lexical_env = prev_lexical_env;
+          if self.execution.control_flow_epoch == control_flow_epoch {
+            self.execution.active.this_value = prev_this;
+            self.execution.active.closure_env = prev_closure_env;
+            self.execution.active.slots = prev_slots;
+            self.execution.active.lexical_env = prev_lexical_env;
+          }
           let result = result?;
           let result_root_base = self.memory.temporary.len();
           self.memory.temporary.push(result.clone());

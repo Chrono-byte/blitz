@@ -215,6 +215,8 @@ pub(super) struct ExecutionState {
   /// Number of active interpreter loops. Native calls only drain jobs when
   /// this is zero, preserving JavaScript job run-to-completion.
   pub(super) interpreter_depth: usize,
+  /// Changes whenever exception handling transfers execution to a handler.
+  pub(super) control_flow_epoch: u64,
   pub(super) builtin_this_arg_prepended: bool,
   pub(super) pending_closure_env: Option<crate::closure_environment::ClosureEnvironment>,
   pub(super) call_stack: CallStack,

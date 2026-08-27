@@ -111,6 +111,27 @@ mod test {
   }
 
   #[test]
+  fn builtin_callback_throw_preserves_catching_function_context() {
+    let source = r#"
+      const first = 1;
+      const second = 2;
+      const third = 3;
+      function run() {
+        const marker = 40;
+        try {
+          [0].map(() => { throw "boom"; });
+        } catch (_) {
+          return marker + first + second + third;
+        }
+      }
+      globalThis.result = run();
+    "#;
+
+    let (vm, _) = run_script(source);
+    assert_eq!(vm.get_global("result"), Some(Value::Number(46.0)));
+  }
+
+  #[test]
   fn host_interrupt_is_not_a_catchable_javascript_exception() {
     let session = Parser::parse_source(
       "globalThis.interrupt_caught = false; try { globalThis.interrupt_started = true; } catch (_) { globalThis.interrupt_caught = true; }",

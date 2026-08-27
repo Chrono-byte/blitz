@@ -67,6 +67,7 @@ impl Vm {
     self.prune_stale_handlers();
 
     self.exceptions.pending_frame_count = Some(handler.frame_count);
+    self.execution.control_flow_epoch = self.execution.control_flow_epoch.wrapping_add(1);
     self.execution.active.chunk = handler.chunk;
     self.execution.active.ip = handler.handler_ip;
     self.execution.active.lexical_env = handler.saved_lexical_env;
