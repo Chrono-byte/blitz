@@ -68,6 +68,16 @@ mod test {
   }
 
   #[test]
+  fn scripts_create_nested_arrows_above_u8_range() {
+    let declarations = (0..300)
+      .map(|index| format!("const arrow{index} = () => {index};"))
+      .collect::<String>();
+    let source = format!("{declarations} globalThis.highArrow = arrow299();");
+    let (vm, _) = run_script(&source);
+    assert_eq!(vm.get_global("highArrow"), Some(Value::Number(299.0)));
+  }
+
+  #[test]
   fn closures_capture_upvalues_above_u8_range() {
     let declarations = (0..300)
       .map(|index| format!("let captured{index} = undefined;"))
