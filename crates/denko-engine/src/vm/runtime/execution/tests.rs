@@ -89,6 +89,18 @@ mod test {
   }
 
   #[test]
+  fn class_method_captures_high_module_slots_by_ordinal() {
+    let declarations = (0..400)
+      .map(|index| format!("let filler{index} = undefined;"))
+      .collect::<String>();
+    let source = format!(
+      "{declarations} const first = 1, second = 2, third = 3; class Runner {{ runLoop(value) {{ let current = value; try {{ while (true) {{ current = current + first; if (current > second) break; }} }} catch (error) {{ current = third; }} finally {{ current = current; }} return current; }} }} globalThis.captureOrdinal = new Runner().runLoop(0);"
+    );
+    let (vm, _) = run_script(&source);
+    assert_eq!(vm.get_global("captureOrdinal"), Some(Value::Number(3.0)));
+  }
+
+  #[test]
   fn host_interrupt_is_not_a_catchable_javascript_exception() {
     let session = Parser::parse_source(
       "globalThis.interrupt_caught = false; try { globalThis.interrupt_started = true; } catch (_) { globalThis.interrupt_caught = true; }",
