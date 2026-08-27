@@ -225,7 +225,7 @@ pub(crate) fn create_intl_intrinsic(
           ObjectData::with_prototype(vm.realm().object_prototype()),
         ))))
       }),
-      &function_prototype,
+      function_prototype,
     );
     set_builtin_name(&method, "resolvedOptions");
     set_builtin_length(&method, 0.0);
@@ -254,7 +254,7 @@ pub(crate) fn create_intl_intrinsic(
             .unwrap_or(Value::Undefined),
         )
       }),
-      &function_prototype,
+      function_prototype,
     );
     set_builtin_name(&method, "supportedLocalesOf");
     set_builtin_length(&method, 1.0);

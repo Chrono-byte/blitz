@@ -231,7 +231,7 @@ fn perform_promise_all_keyed(
       return reject_capability(vm, &capability, abrupt_reason(&error, thrown));
     }
   };
-  let entries: Rc<RefCell<Vec<(PropertyKey, Option<Value>)>>> = Rc::new(RefCell::new(Vec::new()));
+  let entries = Rc::new(RefCell::new(Vec::<(PropertyKey, Option<Value>)>::new()));
   let remaining = Rc::new(RefCell::new(1usize));
 
   for key in keys {

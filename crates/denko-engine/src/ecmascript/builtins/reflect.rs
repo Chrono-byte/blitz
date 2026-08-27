@@ -217,15 +217,14 @@ pub(crate) fn create_reflect_intrinsics(
             let Value::Object(intl) = intl_namespace? else {
               return None;
             };
-            let constructor = intl
+            intl
               .borrow()
               .properties
               .get(&PropertyKey::String(name))
               .and_then(|descriptor| match descriptor {
                 PropertyDescriptor::Data { value, .. } => Some(value.clone()),
                 PropertyDescriptor::Accessor { .. } => None,
-              });
-            constructor
+              })
           });
           if let Some(constructor_in_realm) = constructor_in_realm {
             let prototype = vm
