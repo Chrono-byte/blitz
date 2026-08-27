@@ -12,7 +12,7 @@ const BLITZ = resolve(ROOT, "../../target/debug/blitz");
 const MARKER = "BLITZ_EFFECT_V4_RESULT=";
 
 const source = `
-import { Chunk, Effect, FileSystem, Ref, Stream } from ${JSON.stringify(EFFECT_ENTRY)};
+import { Effect, FileSystem, Ref, Stream } from ${JSON.stringify(EFFECT_ENTRY)};
 
 const program = Effect.gen(function*() {
   const finalized = yield* Ref.make(false);
@@ -28,7 +28,7 @@ const program = Effect.gen(function*() {
   const text = yield* fileSystem.readFileString("ignored");
   const values = yield* Stream.runCollect(Stream.make(1, 2, 3));
   yield* Effect.sleep("1 millis");
-  return { finalized: yield* Ref.get(finalized), stream: Chunk.toArray(values), text };
+  return { finalized: yield* Ref.get(finalized), stream: values, text };
 });
 
 Effect.runPromise(program).then(
