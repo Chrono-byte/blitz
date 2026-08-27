@@ -1,6 +1,64 @@
 // SPDX-License-Identifier: MPL-2.0
 use super::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+fn mark_realm_callables(
+  value: &Value,
+  realm_global: &Value,
+  visited: &mut HashSet<u64>,
+) {
+  let object = match value {
+    Value::Closure { props, .. } | Value::BuiltinObject(_, props) => {
+      props
+        .borrow_mut()
+        .set_internal_slot("[[RealmGlobals]]", realm_global.clone());
+      Rc::clone(props)
+    }
+    Value::Object(object) | Value::Array(_, object) | Value::Promise(_, object) => {
+      Rc::clone(object)
+    }
+    Value::Proxy(proxy) => {
+      let proxy = proxy.borrow();
+      mark_realm_callables(&proxy.target, realm_global, visited);
+      if let Some(handler) = &proxy.handler {
+        mark_realm_callables(handler, realm_global, visited);
+      }
+      return;
+    }
+    _ => return,
+  };
+  let (identity, prototype, descriptors) = {
+    let object = object.borrow();
+    (
+      object.identity,
+      object.get_prototype(),
+      object
+        .properties
+        .values()
+        .cloned()
+        .collect::<Vec<_>>(),
+    )
+  };
+  if !visited.insert(identity) {
+    return;
+  }
+  mark_realm_callables(&prototype, realm_global, visited);
+  for descriptor in descriptors {
+    match descriptor {
+      PropertyDescriptor::Data { value, .. } => {
+        mark_realm_callables(&value, realm_global, visited);
+      }
+      PropertyDescriptor::Accessor { get, set, .. } => {
+        if let Some(getter) = get {
+          mark_realm_callables(&getter, realm_global, visited);
+        }
+        if let Some(setter) = set {
+          mark_realm_callables(&setter, realm_global, visited);
+        }
+      }
+    }
+  }
+}
 
 /// Builds the ECMAScript intrinsics and installs the available global bindings.
 pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) -> Intrinsics {
@@ -12,6 +70,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   let object_ctor_map = foundation.object_constructor_properties;
   let generator_proto_map = foundation.generator_prototype;
   let generator_function_proto_map = foundation.generator_function_prototype;
+  let async_function_proto_map = foundation.async_function_prototype;
   let throw_type_error_val = foundation.throw_type_error;
 
   let array_intrinsics =
@@ -38,6 +97,16 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     &function_proto_map,
   );
   let function_ctor_val = function_intrinsics.constructor;
+  let _generator_function_ctor_val = builtins::function::create_generator_function_constructor(
+    globals,
+    &function_ctor_val,
+    &generator_function_proto_map,
+  );
+  let _async_function_ctor_val = builtins::function::create_async_function_constructor(
+    globals,
+    &function_ctor_val,
+    &async_function_proto_map,
+  );
 
   // 27.2 Promise Objects
   let (promise_proto_map, _promise_ctor_map, promise_ctor_val) =
@@ -46,6 +115,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   let reflect_intrinsics =
     builtins::reflect::create_reflect_intrinsics(&object_proto_map, &function_proto_map);
   let reflect_obj = reflect_intrinsics.object;
+  let intl_obj = builtins::intl::create_intl_intrinsic(&object_proto_map, &function_proto_map);
 
   let date_intrinsics =
     builtins::date::create_date_intrinsics(&object_proto_map, &function_proto_map);
@@ -98,6 +168,9 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   let set_ctor_val = collection_intrinsics.set_constructor.clone();
   let iterator_proto = collection_intrinsics.iterator_prototype.clone();
   array_iterator_proto
+    .borrow_mut()
+    .set_prototype_value(iterator_proto.clone());
+  generator_proto_map
     .borrow_mut()
     .set_prototype_value(iterator_proto.clone());
   let map_iterator_proto = collection_intrinsics
@@ -185,9 +258,20 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
       shadowrealm_ctor_val: &shadowrealm_ctor_val,
     },
   );
+  globals.borrow_mut().properties.insert(
+    PropertyKey::String("Intl".into()),
+    PropertyDescriptor::builtin_data(intl_obj),
+  );
+  let realm_global = Value::Object(Rc::clone(globals));
+  mark_realm_callables(&realm_global, &realm_global, &mut HashSet::new());
 
   let text_intrinsics = primitive_intrinsics.text;
   let numeric_intrinsics = primitive_intrinsics.numeric;
+  if let Value::Object(string_iterator_proto) = &text_intrinsics.string_iterator_prototype {
+    string_iterator_proto
+      .borrow_mut()
+      .set_prototype_value(iterator_proto.clone());
+  }
   let typed_array_constructors = vec![
     uint8array_ctor_val,
     int8array_ctor_val,
@@ -261,10 +345,11 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     array_iterator_prototype: Some(Value::Object(array_iterator_proto)),
     map_iterator_prototype: Some(map_iterator_proto),
     set_iterator_prototype: Some(set_iterator_proto),
-    string_iterator_prototype: None,
+    string_iterator_prototype: Some(text_intrinsics.string_iterator_prototype),
     regexp_string_iterator_prototype: None,
     generator_prototype: Some(Value::Object(generator_proto_map)),
     generator_function_prototype: Some(Value::Object(generator_function_proto_map)),
+    async_function_prototype: Some(Value::Object(async_function_proto_map)),
     async_generator_prototype: None,
     async_from_sync_iterator_prototype: None,
     throw_type_error: Some(throw_type_error_val),
@@ -272,7 +357,16 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     hidden_builtins: HashMap::new(),
   };
 
-  install_hidden_builtins(&mut intrinsics);
+  let intrinsic_eval = globals
+    .borrow()
+    .properties
+    .get(&PropertyKey::String("eval".to_string().into()))
+    .and_then(|descriptor| match descriptor {
+      PropertyDescriptor::Data { value, .. } => Some(value.clone()),
+      PropertyDescriptor::Accessor { .. } => None,
+    })
+    .unwrap_or(Value::Undefined);
+  install_hidden_builtins(&mut intrinsics, intrinsic_eval);
 
   intrinsics
 }

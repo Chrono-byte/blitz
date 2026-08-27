@@ -2,6 +2,20 @@
 use super::*;
 use crate::ecmascript::semantics::byte_views::array_buffer_backing;
 
+type RealmKernel = (
+  Intrinsics,
+  Rc<RefCell<crate::environment::EnvironmentRecord>>,
+);
+
+thread_local! {
+  static REALM_KERNELS: RefCell<HashMap<u64, RealmKernel>> = RefCell::new(HashMap::new());
+}
+
+pub(crate) fn realm_kernel(globals: &Rc<RefCell<ObjectData>>) -> Option<RealmKernel> {
+  let identity = globals.borrow().identity;
+  REALM_KERNELS.with(|cache| cache.borrow().get(&identity).cloned())
+}
+
 /// Checks if a promise's constructor matches the given constructor value.
 pub(crate) fn promise_constructor_matches(
   vm: &mut Vm,
@@ -104,7 +118,10 @@ pub(crate) fn collect_iterable_values(
   } else {
     let len_val = vm.get_property_host(iterable, &PropertyKey::String("length".into()))?;
     let len = to_length(vm, &len_val)?;
-    let mut items = Vec::with_capacity(len);
+    let mut items = Vec::new();
+    items
+      .try_reserve(len)
+      .map_err(|_| vm.throw_range_error("Iterable is too large"))?;
     for idx in 0..len {
       let item = vm.get_property_host(
         iterable,
@@ -283,7 +300,20 @@ pub(crate) fn builtin_object(
 
 /// Delegate to the ECMAScript semantics module for builtin wiring.
 pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) -> Intrinsics {
-  crate::ecmascript::semantics::install_minimal_kernel_constructors(globals)
+  let identity = globals.borrow().identity;
+  if let Some((intrinsics, _)) = realm_kernel(globals) {
+    return intrinsics;
+  }
+  let intrinsics = crate::ecmascript::semantics::install_minimal_kernel_constructors(globals);
+  let global_environment = Rc::new(RefCell::new(crate::environment::EnvironmentRecord::new(
+    None,
+  )));
+  REALM_KERNELS.with(|cache| {
+    cache
+      .borrow_mut()
+      .insert(identity, (intrinsics.clone(), global_environment));
+  });
+  intrinsics
 }
 
 /// Fulfills a pending promise with a given value, invoking all pending callbacks.

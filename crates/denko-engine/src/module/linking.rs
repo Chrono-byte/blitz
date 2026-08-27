@@ -50,6 +50,120 @@ impl ModuleLoader {
           .insert(exported_name, slot);
       }
     }
+
+    let explicit_exports = module_paths
+      .iter()
+      .filter_map(|path| {
+        self.map.get(path).map(|record| {
+          (
+            path.clone(),
+            record
+              .borrow()
+              .exports
+              .keys()
+              .cloned()
+              .collect::<HashSet<_>>(),
+          )
+        })
+      })
+      .collect::<HashMap<_, _>>();
+
+    // Namespace objects enumerate names contributed by `export *`. Resolve
+    // those names to the original live cells before namespace construction;
+    // iterate to a fixed point so chains of star exports are included.
+    for _ in 0..=module_paths.len() {
+      let mut changed = false;
+      for path in module_paths {
+        let Some(record) = self.map.get(path).cloned() else {
+          continue;
+        };
+        let (specifier, base_dir, star_exports) = {
+          let record = record.borrow();
+          (
+            record.specifier.clone(),
+            record
+              .path
+              .parent()
+              .unwrap_or_else(|| Path::new("."))
+              .to_path_buf(),
+            record.star_exports.clone(),
+          )
+        };
+        let importer = path
+          .to_string_lossy()
+          .starts_with(VIRTUAL_PATH_PREFIX)
+          .then_some(specifier.as_str());
+        let mut candidates: HashMap<String, Option<SharedValue>> = HashMap::new();
+        for source in star_exports {
+          let dependency = self.construct_from_importer(&base_dir, importer, &source)?;
+          let dependency_path = dependency.borrow().path.clone();
+          let names = dependency
+            .borrow()
+            .exports
+            .keys()
+            .filter(|name| name.as_str() != "default")
+            .cloned()
+            .collect::<Vec<_>>();
+          for name in names {
+            let mut resolve_set = HashSet::new();
+            let Some(slot) = self.resolve_export(&dependency_path, &name, &mut resolve_set)? else {
+              continue;
+            };
+            match candidates.entry(name) {
+              std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(Some(slot));
+              }
+              std::collections::hash_map::Entry::Occupied(mut entry) => {
+                if entry
+                  .get()
+                  .as_ref()
+                  .is_some_and(|existing| !Rc::ptr_eq(existing, &slot))
+                {
+                  entry.insert(None);
+                }
+              }
+            }
+          }
+        }
+
+        let explicit = explicit_exports
+          .get(path)
+          .cloned()
+          .unwrap_or_default();
+        let mut record = record.borrow_mut();
+        let previous_star_names = record
+          .exports
+          .keys()
+          .filter(|name| !explicit.contains(*name))
+          .cloned()
+          .collect::<Vec<_>>();
+        for name in previous_star_names {
+          if !matches!(candidates.get(&name), Some(Some(_))) {
+            record.exports.remove(&name);
+            changed = true;
+          }
+        }
+        for (name, slot) in candidates {
+          if explicit.contains(&name) {
+            continue;
+          }
+          let Some(slot) = slot else {
+            continue;
+          };
+          if record
+            .exports
+            .get(&name)
+            .is_none_or(|existing| !Rc::ptr_eq(existing, &slot))
+          {
+            record.exports.insert(name, slot);
+            changed = true;
+          }
+        }
+      }
+      if !changed {
+        break;
+      }
+    }
     Ok(())
   }
 
@@ -296,6 +410,65 @@ impl ModuleLoader {
           .get("body")
           .and_then(|b| b.as_array())
           .ok_or_else(|| BundlerError::from("Expected program body"))?;
+        let mut local_initial_values = HashMap::new();
+        for item in body {
+          let declaration =
+            if item.get("type").and_then(JsonValue::as_str) == Some("ExportNamedDeclaration") {
+              item.get("declaration")
+            } else {
+              Some(item)
+            };
+          let Some(declaration) = declaration else {
+            continue;
+          };
+          match declaration
+            .get("type")
+            .and_then(JsonValue::as_str)
+          {
+            Some("VariableDeclaration") => {
+              let initial = if declaration
+                .get("kind")
+                .and_then(JsonValue::as_str)
+                == Some("var")
+              {
+                Value::Undefined
+              } else {
+                Value::Uninitialized
+              };
+              if let Some(declarations) = declaration
+                .get("declarations")
+                .and_then(JsonValue::as_array)
+              {
+                for variable in declarations {
+                  let mut names = Vec::new();
+                  estree_binding_names(variable.get("id"), &mut names);
+                  for name in names {
+                    local_initial_values.insert(name, initial.clone());
+                  }
+                }
+              }
+            }
+            Some("ClassDeclaration") => {
+              if let Some(name) = declaration
+                .get("id")
+                .and_then(|id| id.get("name"))
+                .and_then(JsonValue::as_str)
+              {
+                local_initial_values.insert(name.to_string(), Value::Uninitialized);
+              }
+            }
+            Some("FunctionDeclaration") => {
+              if let Some(name) = declaration
+                .get("id")
+                .and_then(|id| id.get("name"))
+                .and_then(JsonValue::as_str)
+              {
+                local_initial_values.insert(name.to_string(), Value::Undefined);
+              }
+            }
+            _ => {}
+          }
+        }
         for item in body {
           let type_only = item
             .get("importKind")
@@ -329,9 +502,15 @@ impl ModuleLoader {
                 if let Some(specs) = item.get("specifiers").and_then(|s| s.as_array()) {
                   for sp in specs {
                     if let Some(exported) = estree_module_export_name(sp.get("exported")) {
+                      let local = estree_module_export_name(sp.get("local"))
+                        .unwrap_or_else(|| exported.clone());
+                      let initial = local_initial_values
+                        .get(&local)
+                        .cloned()
+                        .unwrap_or(Value::Uninitialized);
                       rec
                         .exports
-                        .insert(exported, Rc::new(RefCell::new(Value::Undefined)));
+                        .insert(exported, Rc::new(RefCell::new(initial)));
                     }
                   }
                 }

@@ -1566,6 +1566,13 @@ mod test {
           [Symbol.match](value) { return "matched:" + value; },
           [Symbol.search](value) { return value.length; }
         };
+        const originalSearch = RegExp.prototype[Symbol.search];
+        let fallbackSearchArgument;
+        RegExp.prototype[Symbol.search] = function(value) {
+          fallbackSearchArgument = value;
+          return originalSearch.call(this, value);
+        };
+        const boxedSearchIndex = new String("ba").search("a");
         let startsWithRejected = false;
         try { "x".startsWith(original); } catch (error) {
           startsWithRejected = error instanceof TypeError;
@@ -1584,6 +1591,8 @@ mod test {
           copied.flags,
           "abc".match(custom),
           "abc".search(custom),
+          boxedSearchIndex,
+          typeof fallbackSearchArgument,
           startsWithRejected,
           "x".startsWith(original) === false
         ].join(",");
@@ -1593,11 +1602,168 @@ mod test {
     assert_eq!(
       vm.get_global("result"),
       Some(Value::String(
-        "a:a,2,a,1,2,true,true,x,gi,matched:abc,3,true,true"
+        "a:a,2,a,1,2,true,true,x,gi,matched:abc,3,1,string,true,true"
           .to_string()
           .into()
       ))
     );
+  }
+
+  #[test]
+  fn string_regexp_protocols_do_not_dispatch_through_primitive_wrappers() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        let dispatches = 0;
+        for (const symbol of [
+          Symbol.match,
+          Symbol.search,
+          Symbol.replace,
+          Symbol.split
+        ]) {
+          Object.defineProperty(Number.prototype, symbol, {
+            configurable: true,
+            get() {
+              dispatches += 1;
+              return function() {};
+            }
+          });
+        }
+
+        globalThis.result = [
+          "a1b".match(1)[0],
+          "a1b".search(1),
+          "a1b".replace(1, "x"),
+          "a1b1c".replaceAll(1, "x"),
+          "a1b".split(1).join(":"),
+          dispatches
+        ].join(",");
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("result"),
+      Some(Value::String("1,1,axb,axbxc,a:b,0".to_string().into()))
+    );
+  }
+
+  #[test]
+  fn object_literals_assign_names_to_anonymous_functions_and_accessors() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        const named = Symbol("method");
+        const namedAccessor = Symbol("accessor");
+        const anonymous = Symbol();
+        const object = {
+          arrow: () => {},
+          function: function() {},
+          generator: function*() {},
+          method() {},
+          *generatorMethod() {},
+          [named]() {},
+          [anonymous]: function() {},
+          get accessor() {},
+          set setter(value) {},
+          get [namedAccessor]() {}
+        };
+        const descriptor = Object.getOwnPropertyDescriptor;
+
+        globalThis.result = [
+          object.arrow.name,
+          object.function.name,
+          object.generator.name,
+          object.method.name,
+          object.generatorMethod.name,
+          object[named].name,
+          object[anonymous].name,
+          descriptor(object, "accessor").get.name,
+          descriptor(object, "setter").set.name,
+          descriptor(object, namedAccessor).get.name
+        ].join(",");
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("result"),
+      Some(Value::String(
+        "arrow,function,generator,method,generatorMethod,[method],,get accessor,set setter,get [accessor]"
+          .to_string()
+          .into()
+      ))
+    );
+  }
+
+  #[test]
+  fn string_literals_preserve_escaped_utf16_surrogates() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        const low = '\uD834';
+        const high = '\uDF06';
+        const pair = low + high;
+        globalThis.result = [
+          low.length,
+          low.charCodeAt(0),
+          high.length,
+          high.charCodeAt(0),
+          pair.length,
+          pair.codePointAt(0)
+        ].join(",");
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("result"),
+      Some(Value::String("1,55348,1,57094,2,119558".to_string().into()))
+    );
+  }
+
+  #[test]
+  fn bitwise_operators_finish_left_numeric_coercion_before_coercing_right() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        let trace = "";
+        let typeError = false;
+        try {
+          ({ valueOf() { trace += "left"; return Symbol(); } })
+            & ({ valueOf() { trace += "right"; return 1; } });
+        } catch (error) {
+          typeError = error instanceof TypeError;
+        }
+        globalThis.result = typeError + "," + trace;
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("result"),
+      Some(Value::String("true,left".to_string().into()))
+    );
+  }
+
+  #[test]
+  fn regexp_symbol_match_reads_and_coerces_flags_before_matching() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        const token = {};
+        let readGlobal = false;
+        const receiver = {
+          get flags() {
+            return { toString() { throw token; } };
+          },
+          get global() {
+            readGlobal = true;
+            return true;
+          }
+        };
+        let caught;
+        try {
+          RegExp.prototype[Symbol.match].call(receiver, "");
+        } catch (error) {
+          caught = error;
+        }
+        globalThis.result = caught === token && !readGlobal;
+      "#
+    ));
+
+    assert_eq!(vm.get_global("result"), Some(Value::Bool(true)));
   }
 
   #[test]
@@ -6728,6 +6894,7 @@ mod test {
       "Reflect",
       "Proxy",
       "JSON",
+      "Intl",
       "globalThis",
     ]
     .into_iter()

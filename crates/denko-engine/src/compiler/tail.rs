@@ -102,7 +102,11 @@ impl super::Compiler {
       return Ok(false);
     }
 
-    let arg_count = self.checked_arg_count(c.arguments.len())?;
+    let is_eval_identifier = matches!(
+      &c.callee,
+      oast::Expression::Identifier(identifier) if identifier.name == "eval"
+    );
+    let arg_count = self.checked_arg_count(c.arguments.len() + usize::from(is_eval_identifier))?;
     let is_super_construct = matches!(&c.callee, oast::Expression::Super(_));
     if is_super_construct {
       if !self.allow_super {
@@ -149,6 +153,16 @@ impl super::Compiler {
         Some(receiver)
       }
       oast::Expression::Super(_) => None,
+      oast::Expression::Identifier(_) if is_eval_identifier => {
+        self.compile_expr_oast(&c.callee)?;
+        let eval_callee = self.alloc_temp_local("spread_eval_callee");
+        self.emit(Op::StoreLocal, LINE);
+        self.emit_byte(self.slot_to_u8(eval_callee)?, LINE);
+        self.emit_get_builtin_name("callEvalIdentifier");
+        self.emit(Op::LoadLocal, LINE);
+        self.emit_byte(self.slot_to_u8(eval_callee)?, LINE);
+        None
+      }
       _ => {
         self.compile_expr_oast(&c.callee)?;
         None
@@ -165,7 +179,10 @@ impl super::Compiler {
       None
     };
 
-    let mut spread_flags = Vec::with_capacity(c.arguments.len());
+    let mut spread_flags = Vec::with_capacity(usize::from(arg_count));
+    if is_eval_identifier {
+      spread_flags.push(false);
+    }
     for arg in &c.arguments {
       match arg {
         oast::Argument::SpreadElement(s) => {
@@ -436,6 +453,36 @@ impl super::Compiler {
       self.patch_jump(nullish);
       self.emit(Op::Discard, LINE);
       self.emit(Op::Undefined, LINE);
+      self.patch_jump(end);
+      return Ok(());
+    }
+
+    if matches!(&c.callee, OExpr::Identifier(identifier) if identifier.name == "eval") {
+      self.compile_expr_oast(&c.callee)?;
+      let callee_slot = self.alloc_temp_local("tail_eval_callee");
+      self.emit(Op::StoreLocal, LINE);
+      self.emit_byte(self.slot_to_u8(callee_slot)?, LINE);
+
+      self.emit_get_builtin_name("isIntrinsicEval");
+      self.emit(Op::LoadLocal, LINE);
+      self.emit_byte(self.slot_to_u8(callee_slot)?, LINE);
+      self.emit_call_with_arg_count(Op::Call, 1)?;
+      self.emit(Op::JumpIfFalse, LINE);
+      let non_eval = self.current_ip();
+      self.emit_jump_placeholder();
+
+      self.emit_get_builtin_name("directEval");
+      let direct_arg_count = self.compile_call_arguments(&c.arguments)?;
+      self.emit_call_with_arg_count(Op::Call, direct_arg_count)?;
+      self.emit(Op::Jump, LINE);
+      let end = self.current_ip();
+      self.emit_jump_placeholder();
+
+      self.patch_jump(non_eval);
+      self.emit(Op::LoadLocal, LINE);
+      self.emit_byte(self.slot_to_u8(callee_slot)?, LINE);
+      let tail_arg_count = self.compile_call_arguments(&c.arguments)?;
+      self.emit_call_with_arg_count(Op::TailCall, tail_arg_count)?;
       self.patch_jump(end);
       return Ok(());
     }

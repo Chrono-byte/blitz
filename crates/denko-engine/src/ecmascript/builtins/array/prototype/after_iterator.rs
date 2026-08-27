@@ -232,7 +232,10 @@ pub(in crate::ecmascript::builtins::array) fn install_after_iterator(
             let out_key = Value::String((i - start).to_string().into());
             if vm.has_property_host(&receiver, &key)? {
               let item = vm.get_property_host(&receiver, &key)?;
-              vm.set_property_host(&result, &out_key, item)?;
+              let out_key = vm.to_property_key(&out_key)?;
+              if !vm.create_data_property_host(&result, out_key, item)? {
+                return Err(vm.throw_type_error("Array.prototype.slice could not create property"));
+              }
             } else {
               delete_property_or_throw(vm, &result, &PKey::String((i - start).to_string().into()))?;
             }
@@ -905,4 +908,38 @@ pub(in crate::ecmascript::builtins::array) fn install_after_iterator(
       set_builtin_length(&builtin, length);
     }
   }
+
+  let mut unscopables = ObjectData::with_prototype(Value::Null);
+  for name in [
+    "at",
+    "copyWithin",
+    "entries",
+    "fill",
+    "find",
+    "findIndex",
+    "findLast",
+    "findLastIndex",
+    "flat",
+    "flatMap",
+    "includes",
+    "keys",
+    "toReversed",
+    "toSorted",
+    "toSpliced",
+    "values",
+  ] {
+    unscopables.properties.insert(
+      PKey::String(name.into()),
+      PropertyDescriptor::ordinary_data(Value::Bool(true)),
+    );
+  }
+  array_proto_map.borrow_mut().properties.insert(
+    PKey::Symbol(SymbolId::well_known_unscopables()),
+    PropertyDescriptor::Data {
+      value: Value::Object(Rc::new(RefCell::new(unscopables))),
+      writable: false,
+      enumerable: false,
+      configurable: true,
+    },
+  );
 }

@@ -617,6 +617,7 @@ impl Decoder {
       root_slot_names: wire.root_slot_names,
       root_lexical_tdz: wire.root_lexical_tdz,
       root_slot_immutable: wire.root_slot_immutable,
+      root_function_declarations: Vec::new(),
       risc_spill_count: wire.risc_spill_count,
       risc_value_spill_count: wire.risc_value_spill_count,
       root_strict: wire.root_strict,

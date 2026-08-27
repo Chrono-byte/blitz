@@ -245,7 +245,7 @@ impl Vm {
         }
         Ok(PendingOperationStep::Complete {
           destination,
-          value: Self::make_iterator_result(value, done),
+          value: self.make_iterator_result(value, done),
         })
       }
       (
@@ -261,7 +261,7 @@ impl Vm {
         }
         Ok(PendingOperationStep::Complete {
           destination,
-          value: Self::make_iterator_result(value, done),
+          value: self.make_iterator_result(value, done),
         })
       }
       (
@@ -390,7 +390,7 @@ impl Vm {
         if done {
           mark_async_iterator_done(&record.wrapper);
         }
-        return Ok(Self::make_iterator_result(value, done));
+        return Ok(self.make_iterator_result(value, done));
       }
 
       let result = self.await_value_or_throw(result)?;

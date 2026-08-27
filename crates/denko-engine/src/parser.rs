@@ -29,6 +29,84 @@ use oxc_span::SourceType;
 use serde_json::Value;
 use std::path::Path;
 
+pub(crate) const EVAL_NEW_TARGET_SENTINEL: &str = "__denko_internal_eval_new_target_7f3a__";
+
+fn rewrite_eval_new_target(source: &str) -> String {
+  #[derive(Clone, Copy)]
+  enum State {
+    Code,
+    SingleQuoted,
+    DoubleQuoted,
+    Template,
+    LineComment,
+    BlockComment,
+  }
+
+  let bytes = source.as_bytes();
+  let mut output = Vec::with_capacity(source.len());
+  let mut state = State::Code;
+  let mut index = 0;
+  while index < bytes.len() {
+    match state {
+      State::Code if bytes[index..].starts_with(b"new.target") => {
+        let before_is_ident = index > 0
+          && (bytes[index - 1].is_ascii_alphanumeric() || matches!(bytes[index - 1], b'_' | b'$'));
+        let end = index + b"new.target".len();
+        let after_is_ident = end < bytes.len()
+          && (bytes[end].is_ascii_alphanumeric() || matches!(bytes[end], b'_' | b'$'));
+        if !before_is_ident && !after_is_ident {
+          output.extend_from_slice(EVAL_NEW_TARGET_SENTINEL.as_bytes());
+          index = end;
+          continue;
+        }
+        output.push(bytes[index]);
+      }
+      State::Code => {
+        output.push(bytes[index]);
+        state = match bytes[index] {
+          b'\'' => State::SingleQuoted,
+          b'"' => State::DoubleQuoted,
+          b'`' => State::Template,
+          b'/' if bytes.get(index + 1) == Some(&b'/') => State::LineComment,
+          b'/' if bytes.get(index + 1) == Some(&b'*') => State::BlockComment,
+          _ => State::Code,
+        };
+      }
+      State::SingleQuoted | State::DoubleQuoted | State::Template => {
+        output.push(bytes[index]);
+        let delimiter = match state {
+          State::SingleQuoted => b'\'',
+          State::DoubleQuoted => b'"',
+          State::Template => b'`',
+          _ => unreachable!(),
+        };
+        if bytes[index] == b'\\' && index + 1 < bytes.len() {
+          index += 1;
+          output.push(bytes[index]);
+        } else if bytes[index] == delimiter {
+          state = State::Code;
+        }
+      }
+      State::LineComment => {
+        output.push(bytes[index]);
+        if matches!(bytes[index], b'\n' | b'\r') {
+          state = State::Code;
+        }
+      }
+      State::BlockComment => {
+        output.push(bytes[index]);
+        if bytes[index] == b'*' && bytes.get(index + 1) == Some(&b'/') {
+          index += 1;
+          output.push(b'/');
+          state = State::Code;
+        }
+      }
+    }
+    index += 1;
+  }
+  String::from_utf8(output).expect("eval rewrite preserves UTF-8 source bytes")
+}
+
 /// Parser facade around Oxc's source-text parser.
 ///
 /// Use `new_from_source` with `parse`, or use the convenience `parse_source`
@@ -98,6 +176,40 @@ impl Parser {
     // must opt in explicitly via `parse_source_with_type(..., SourceType::mjs())`
     // or the appropriate TypeScript variant.
     Self::parse_source_with_type(source, SourceType::script())
+  }
+
+  /// Parse direct-eval Script code in the syntactic context inherited from
+  /// its caller. Oxc's function-context option is required to admit
+  /// `new.target`; the compiler still applies eval-specific early errors.
+  pub(crate) fn parse_eval_source(
+    source: &str,
+    allow_new_target: bool,
+  ) -> Result<ParserSession, ParserError> {
+    let source = if allow_new_target {
+      rewrite_eval_new_target(source)
+    } else {
+      source.to_string()
+    };
+    ParserSession::try_new(Allocator::default(), source, |alloc, source| {
+      let ret = OxcParser::new(alloc, source, SourceType::script())
+        .with_options(ParseOptions {
+          parse_regular_expression: true,
+          allow_return_outside_function: allow_new_target,
+          ..ParseOptions::default()
+        })
+        .parse();
+      if !ret.diagnostics.is_empty() {
+        return Err(ParserError::from(
+          ret
+            .diagnostics
+            .into_iter()
+            .map(|error| format!("{:?}", error.with_source_code(source.to_string())))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        ));
+      }
+      Ok(ret.program)
+    })
   }
 
   /// Parse source text with an explicit Oxc SourceType (js or ts).

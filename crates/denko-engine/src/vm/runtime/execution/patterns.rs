@@ -271,7 +271,9 @@ pub(super) fn build_quickened_sites(
         SiteAction::Region(id)
       } else if is_numeric_compare(code, ip, COMPARE) {
         SiteAction::Legacy(QuickenedKind::NumericCompareBranch)
-      } else if is_single_argument_method_call(code, ip, METHOD_CALL) {
+      } else if chunk.root_slot_names.is_empty()
+        && is_single_argument_method_call(code, ip, METHOD_CALL)
+      {
         SiteAction::Legacy(QuickenedKind::SingleArgumentMethodCall)
       } else if is_numeric_property_add(code, ip, PROPERTY_ADD) {
         SiteAction::Legacy(QuickenedKind::NumericPropertyAdd)

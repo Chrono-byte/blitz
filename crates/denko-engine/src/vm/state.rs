@@ -167,7 +167,7 @@ pub struct Vm {
   pub(super) _gc_registration: gc::VmGcRegistration,
 }
 
-pub(super) struct RealmState {
+pub(crate) struct RealmState {
   pub(super) realm: Realm,
   pub(super) globals: Rc<RefCell<ObjectData>>,
   pub(super) global_env: Rc<RefCell<EnvironmentRecord>>,

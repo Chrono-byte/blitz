@@ -61,6 +61,7 @@ impl Vm {
       if let Some(frame) = self.execution.call_stack.pop() {
         self.exceptions.unwound_risc_state = frame.risc_state;
         self.execution.active = frame.context;
+        self.leave_function_realm(frame.previous_realm);
       }
     }
     self.prune_stale_handlers();

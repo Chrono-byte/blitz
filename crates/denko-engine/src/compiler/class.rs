@@ -21,10 +21,6 @@ impl Compiler {
       .map(|id| id.name.to_string())
       .ok_or_else(|| crate::errors::CompilerError::from("anonymous class declaration"))?;
 
-    if let Some(err) = self.check_var_lexical_conflict(&name) {
-      return Err(crate::errors::CompilerError::from(err));
-    }
-
     let slot = if let Some(slot) = self.resolve_local(&name) {
       slot
     } else {
@@ -283,6 +279,8 @@ impl Compiler {
     self.strict_context = outer_strict;
     let (mut proto, _env_len) = compiled?;
     proto.is_strict = true;
+    proto.has_prototype_property = proto.is_generator;
+    proto.is_constructor = false;
     let fidx = self.chunk.add_function(proto);
     let computed_key_slot = if md.computed {
       Some(self.alloc_temp_local("class_computed_method_key"))
@@ -413,12 +411,14 @@ impl Compiler {
         bindings: HashMap::new(),
         lexical_bindings: HashSet::new(),
         block_var_names: HashSet::new(),
+        runtime_env_count: 0,
       }],
       globals: HashMap::new(),
       is_root: false,
       strict_context: true,
       loop_depth: 0,
       with_depth: 0,
+      may_capture_with: self.with_depth > 0 || self.may_capture_with,
       handler_depth: 0,
       continue_patches: Vec::new(),
       break_patches: Vec::new(),
@@ -492,12 +492,14 @@ impl Compiler {
         bindings: HashMap::new(),
         lexical_bindings: HashSet::new(),
         block_var_names: HashSet::new(),
+        runtime_env_count: 0,
       }],
       globals: HashMap::new(),
       is_root: false,
       strict_context: true,
       loop_depth: 0,
       with_depth: 0,
+      may_capture_with: self.with_depth > 0 || self.may_capture_with,
       handler_depth: 0,
       continue_patches: Vec::new(),
       break_patches: Vec::new(),
@@ -687,12 +689,14 @@ impl Compiler {
             bindings: HashMap::new(),
             lexical_bindings: HashSet::new(),
             block_var_names: HashSet::new(),
+            runtime_env_count: 0,
           }],
           globals: HashMap::new(),
           is_root: false,
           strict_context: true,
           loop_depth: 0,
           with_depth: 0,
+          may_capture_with: self.with_depth > 0 || self.may_capture_with,
           handler_depth: 0,
           continue_patches: Vec::new(),
           break_patches: Vec::new(),
@@ -810,7 +814,6 @@ impl Compiler {
     }
 
     let ctor_slot = self.alloc_temp_local("class_ctor_tmp");
-    self.emit(Op::Copy, LINE);
     self.emit(Op::StoreLocal, LINE);
     self.emit_byte(self.slot_to_u8(ctor_slot)?, LINE);
 
@@ -831,6 +834,12 @@ impl Compiler {
     } else {
       None
     };
+    if let Some(home_slot) = instance_home_slot {
+      self.emit(Op::LoadLocal, LINE);
+      self.emit_byte(self.slot_to_u8(ctor_slot)?, LINE);
+      self.emit_set_method_home_object(home_slot)?;
+      self.emit(Op::Discard, LINE);
+    }
 
     let mut prepared_field_iter = prepared_fields.iter();
     for element in &c.body.body {

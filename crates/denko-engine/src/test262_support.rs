@@ -31,6 +31,7 @@ fn print_args(
 }
 
 fn builtin_eval_script(
+  vm: &mut Vm,
   globals: &Rc<RefCell<ObjectData>>,
   args: &[Value],
 ) -> Result<Value, String> {
@@ -45,12 +46,10 @@ fn builtin_eval_script(
   let chunk = crate::typecheck::with_strict_override(None, || {
     let src = src.as_str_lossy();
     let session = Parser::parse_source(src).map_err(|e| format!("evalScript parse: {}", e))?;
-    compiler::compile_session(&session).map_err(|e| format!("evalScript compile: {}", e))
+    compiler::compile_repl_session(&session).map_err(|e| format!("evalScript compile: {}", e))
   })?;
-  let mut eval_vm = Vm::new(Rc::clone(globals));
-  eval_vm
-    .run(chunk)
-    .map_err(|e| format!("evalScript runtime: {}", e))
+  vm.run_nested_in_realm(chunk, Rc::clone(globals))
+    .map_err(|failure| format!("evalScript runtime: {}", failure.error))
 }
 
 fn make_test262_object(
@@ -97,8 +96,10 @@ fn make_test262_object(
   let eval_globals = Rc::clone(globals);
   data.properties.insert(
     PropertyKey::String("evalScript".to_string().into()),
-    PropertyDescriptor::ordinary_data(host_builtin(Rc::new(move |_vm, args| {
-      builtin_eval_script(&eval_globals, args).map_err(crate::errors::RuntimeError::from)
+    PropertyDescriptor::ordinary_data(host_builtin(Rc::new(move |vm, args| {
+      let offset = usize::from(vm.builtin_this_arg_prepended());
+      builtin_eval_script(vm, &eval_globals, &args[offset..])
+        .map_err(crate::errors::RuntimeError::from)
     }))),
   );
   data.properties.insert(
@@ -154,8 +155,9 @@ fn make_test262_object(
   let print_native = Rc::clone(print_native);
   data.properties.insert(
     PropertyKey::String("createRealm".to_string().into()),
-    PropertyDescriptor::ordinary_data(host_builtin(Rc::new(move |_vm, _args| {
+    PropertyDescriptor::ordinary_data(host_builtin(Rc::new(move |vm, _args| {
       let realm_global = Rc::new(RefCell::new(ObjectData::new()));
+      let realm_root = vm.create_host_root(Value::Object(Rc::clone(&realm_global)));
       realm_global.borrow_mut().properties.insert(
         PropertyKey::String("globalThis".to_string().into()),
         PropertyDescriptor::ordinary_data(Value::Object(realm_global.clone())),
@@ -173,6 +175,7 @@ fn make_test262_object(
           PropertyDescriptor::ordinary_data(Value::Object(realm_global)),
         );
       }
+      vm.release_host_root(realm_root)?;
       Ok(new_262)
     }))),
   );
@@ -207,11 +210,11 @@ pub fn make_test262_globals_with_print(print_native: NativeFn) -> Rc<RefCell<Obj
   define_native_global(&globals, "print", print_native.clone());
   globals.borrow_mut().properties.insert(
     PropertyKey::String("NaN".to_string().into()),
-    PropertyDescriptor::ordinary_data(Value::Number(f64::NAN)),
+    PropertyDescriptor::immutable_data(Value::Number(f64::NAN)),
   );
   globals.borrow_mut().properties.insert(
     PropertyKey::String("Infinity".to_string().into()),
-    PropertyDescriptor::ordinary_data(Value::Number(f64::INFINITY)),
+    PropertyDescriptor::immutable_data(Value::Number(f64::INFINITY)),
   );
 
   runtime_utils::install_minimal_kernel_constructors(&globals);

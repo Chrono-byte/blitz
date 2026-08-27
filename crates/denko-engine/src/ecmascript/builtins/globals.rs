@@ -130,121 +130,116 @@ fn source_is_whitespace_and_comments_only(src: &str) -> bool {
 }
 
 /// Installs global function builtins such as eval, parseInt, parseFloat, etc.
-pub(crate) fn install_global_function_builtins(g: &mut ObjectData) {
+pub(crate) fn install_global_function_builtins(
+  g: &mut ObjectData,
+  function_proto: &Rc<std::cell::RefCell<ObjectData>>,
+) {
   use PropertyKey as PKey;
 
   g.properties.insert(
-        PKey::String("eval".to_string().into()),
-        PropertyDescriptor::builtin_data(Value::Builtin(Rc::new(move |vm, args| {
-            let off = static_builtin_arg_offset(vm, args, "eval");
-            let src = match args.get(off) {
-                Some(Value::String(s)) => s.as_str_lossy(),
-                Some(other) => return Ok(other.clone()),
-                None => return Ok(Value::Undefined),
-            };
-            let trimmed = src.trim_start();
-            if trimmed.starts_with('/') {
-                if source_is_whitespace_and_comments_only(src) {
-                    return Ok(Value::Undefined);
-                }
-            } else if !trimmed.is_empty()
-                && trimmed
-                    .chars()
-                    .all(|c| c == '_' || c == '$' || c.is_ascii_alphanumeric())
-                && matches!(trimmed.chars().next(), Some(c) if c == '_' || c == '$' || c.is_ascii_alphabetic())
-            {
-                if let Some(value) = vm.resolve_identifier_value(trimmed)? {
-                    return Ok(value);
-                }
-                return Err(vm.throw_reference_error(&format!("{trimmed} is not defined")));
-            } else if source_is_whitespace_and_comments_only(src) {
-                return Ok(Value::Undefined);
-            }
-            let strict = vm.active_strict_mode();
-            let (allow_new_target, allow_super) = vm.current_eval_context_flags();
-            if !strict {
-                match vm.eval_expression_source_direct(src) {
-                    Ok(value) => return Ok(value),
-                    Err(err) => {
-                        let msg = err.to_string();
-                        if !msg.contains("parse:")
-                            && !msg.contains("compile:")
-                            && !msg.contains("Unexpected end of bytecode at ip 0")
-                        {
-                            return Err(err);
-                        }
-                    }
-                }
-            }
-            let eval_src = if strict {
-    crate::js!(format(script), "'use strict';\n{src}")
+    PKey::String("eval".to_string().into()),
+    PropertyDescriptor::builtin_data(crate::ecmascript::semantics::builtin_object(
+      Rc::new(move |vm, args| {
+        let off = static_builtin_arg_offset(vm, args, "eval");
+        let src = match args.get(off) {
+          Some(Value::String(s)) => s.as_str_lossy(),
+          Some(other) => return Ok(other.clone()),
+          None => return Ok(Value::Undefined),
+        };
+        if source_is_whitespace_and_comments_only(src) {
+          return Ok(Value::Undefined);
+        }
+        let chunk = crate::typecheck::with_strict_override(None, || {
+          compiler::with_compile_context_override(Some((false, false)), || {
+            let session = Parser::parse_source(src)
+              .map_err(|e| syntax_error(vm, format!("eval parse: {}", e)))?;
+            compiler::compile_repl_session(&session)
+              .map_err(|e| syntax_error(vm, format!("eval compile: {}", e)))
+          })
+        })?;
+        if !chunk.root_strict
+          && let Some(name) = vm.global_eval_lexical_conflict_name(&chunk)
+        {
+          return Err(syntax_error(
+            vm,
+            format!("redeclaration of global lexical binding `{}`", name),
+          ));
+        }
+        if !chunk.root_strict
+          && let Some(name) = vm.global_function_declaration_conflict_name(&chunk)
+        {
+          return Err(vm.throw_type_error(&format!("cannot declare global function `{}`", name,)));
+        }
+        match vm.run_nested(chunk, false) {
+          Ok(value) => Ok(value),
+          Err(failure) => {
+            if let Some(thrown) = failure.thrown {
+              Err(vm.throw_exception(thrown))
             } else {
-                src.to_string()
-            };
-            let chunk = crate::typecheck::with_strict_override(None, || {
-                compiler::with_compile_context_override(
-                    Some((allow_new_target, allow_super)),
-                    || {
-                        let session = Parser::parse_source(&eval_src)
-                            .map_err(|e| syntax_error(vm, format!("eval parse: {}", e)))?;
-                        compiler::compile_repl_session(&session)
-                            .map_err(|e| syntax_error(vm, format!("eval compile: {}", e)))
-                    },
-                )
-            })?;
-            if !chunk.root_strict
-                && let Some(name) = vm.direct_eval_lexical_conflict_name(&chunk)
-            {
-                return Err(syntax_error(
-                    vm,
-                    format!("redeclaration of lexical binding `{}`", name),
-                ));
+              Err(failure.error)
             }
-            vm.set_current_strict_mode(strict);
-            match vm.run_nested(chunk, true) {
-                Ok(value) => Ok(value),
-                Err(failure) => {
-                    if let Some(thrown) = failure.thrown {
-                        Err(vm.throw_exception(thrown))
-                    } else {
-                        Err(failure.error)
-                    }
-                }
-            }
-        }))),
-    );
+          }
+        }
+      }),
+      function_proto,
+    )),
+  );
 
   g.properties.insert(
     PKey::String("parseInt".to_string().into()),
-    PropertyDescriptor::builtin_data(Value::Builtin(Rc::new(global_parse_int))),
+    PropertyDescriptor::builtin_data(crate::ecmascript::semantics::builtin_object(
+      Rc::new(global_parse_int),
+      function_proto,
+    )),
   );
   g.properties.insert(
     PKey::String("parseFloat".to_string().into()),
-    PropertyDescriptor::builtin_data(Value::Builtin(Rc::new(global_parse_float))),
+    PropertyDescriptor::builtin_data(crate::ecmascript::semantics::builtin_object(
+      Rc::new(global_parse_float),
+      function_proto,
+    )),
   );
   g.properties.insert(
     PKey::String("encodeURI".to_string().into()),
-    PropertyDescriptor::builtin_data(Value::Builtin(Rc::new(global_encode_uri))),
+    PropertyDescriptor::builtin_data(crate::ecmascript::semantics::builtin_object(
+      Rc::new(global_encode_uri),
+      function_proto,
+    )),
   );
   g.properties.insert(
     PKey::String("encodeURIComponent".to_string().into()),
-    PropertyDescriptor::builtin_data(Value::Builtin(Rc::new(global_encode_uri_component))),
+    PropertyDescriptor::builtin_data(crate::ecmascript::semantics::builtin_object(
+      Rc::new(global_encode_uri_component),
+      function_proto,
+    )),
   );
   g.properties.insert(
     PKey::String("decodeURI".to_string().into()),
-    PropertyDescriptor::builtin_data(Value::Builtin(Rc::new(global_decode_uri))),
+    PropertyDescriptor::builtin_data(crate::ecmascript::semantics::builtin_object(
+      Rc::new(global_decode_uri),
+      function_proto,
+    )),
   );
   g.properties.insert(
     PKey::String("decodeURIComponent".to_string().into()),
-    PropertyDescriptor::builtin_data(Value::Builtin(Rc::new(global_decode_uri_component))),
+    PropertyDescriptor::builtin_data(crate::ecmascript::semantics::builtin_object(
+      Rc::new(global_decode_uri_component),
+      function_proto,
+    )),
   );
   g.properties.insert(
     PKey::String("escape".into()),
-    PropertyDescriptor::builtin_data(Value::Builtin(Rc::new(annex_b_escape))),
+    PropertyDescriptor::builtin_data(crate::ecmascript::semantics::builtin_object(
+      Rc::new(annex_b_escape),
+      function_proto,
+    )),
   );
   g.properties.insert(
     PKey::String("unescape".into()),
-    PropertyDescriptor::builtin_data(Value::Builtin(Rc::new(annex_b_unescape))),
+    PropertyDescriptor::builtin_data(crate::ecmascript::semantics::builtin_object(
+      Rc::new(annex_b_unescape),
+      function_proto,
+    )),
   );
 }
 

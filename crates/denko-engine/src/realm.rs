@@ -154,6 +154,8 @@ pub struct Intrinsics {
   pub generator_prototype: Option<Value>,
   /// GeneratorFunction prototype for this realm.
   pub generator_function_prototype: Option<Value>,
+  /// AsyncFunction prototype for this realm.
+  pub async_function_prototype: Option<Value>,
   /// AsyncGenerator prototype for this realm.
   pub async_generator_prototype: Option<Value>,
   /// AsyncFromSyncIterator prototype for this realm.
@@ -270,6 +272,17 @@ impl Realm {
   pub fn generator_function_prototype(&self) -> Value {
     self
       .generator_function_prototype_ref()
+      .cloned()
+      .unwrap_or(Value::Null)
+  }
+
+  /// Get `AsyncFunction.prototype`, falling back to `Function.prototype`.
+  pub fn async_function_prototype(&self) -> Value {
+    self
+      .intrinsics
+      .async_function_prototype
+      .as_ref()
+      .or_else(|| self.function_prototype_ref())
       .cloned()
       .unwrap_or(Value::Null)
   }

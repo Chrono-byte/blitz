@@ -242,6 +242,10 @@ impl Vm {
     props
       .borrow_mut()
       .set_captured_lexical_env(Some(Rc::clone(&self.execution.active.lexical_env)));
+    props.borrow_mut().set_internal_slot(
+      "[[RealmGlobals]]",
+      Value::Object(Rc::clone(&self.realm_state.globals)),
+    );
     if closure_proto.is_generator {
       props.borrow_mut().set_prototype_value(
         self
@@ -249,6 +253,10 @@ impl Vm {
           .realm
           .generator_function_prototype(),
       );
+    } else if closure_proto.is_async {
+      props
+        .borrow_mut()
+        .set_prototype_value(self.realm_state.realm.async_function_prototype());
     }
 
     if closure_proto.captures_this
@@ -275,7 +283,16 @@ impl Vm {
     props.borrow_mut().properties.insert(
       PropertyKey::String("name".to_string().into()),
       PropertyDescriptor::Data {
-        value: Value::String(closure_proto.name.clone().into()),
+        value: Value::String(
+          if matches!(
+            closure_proto.name.as_str(),
+            "<anonymous>" | "<arrow>" | "<method>"
+          ) {
+            "".into()
+          } else {
+            closure_proto.name.clone().into()
+          },
+        ),
         writable: false,
         enumerable: false,
         configurable: true,

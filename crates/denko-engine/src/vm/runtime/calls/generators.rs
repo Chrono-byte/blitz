@@ -91,7 +91,7 @@ impl Vm {
       Value::Builtin(Rc::new(move |vm, args| {
         let mut runner = next_runner
           .try_borrow_mut()
-          .map_err(|_| RuntimeError::from("TypeError: generator is already executing"))?;
+          .map_err(|_| vm.throw_type_error("generator is already executing"))?;
         let user_args = if vm.builtin_this_arg_prepended() {
           args.get(1..).unwrap_or_default()
         } else {
@@ -103,7 +103,7 @@ impl Vm {
           .unwrap_or(Value::Undefined);
 
         if runner.status == GeneratorStatus::Completed {
-          Ok(Self::make_iterator_result(Value::Undefined, true))
+          Ok(vm.make_iterator_result(Value::Undefined, true))
         } else {
           if runner.status == GeneratorStatus::SuspendedStart {
             runner.status = GeneratorStatus::SuspendedYield;
@@ -116,11 +116,11 @@ impl Vm {
             vm.run_risc_state(risc_state, false)
           };
           match outcome {
-            Ok(RiscRunOutcome::Yield(value)) => Ok(Self::make_iterator_result(value, false)),
+            Ok(RiscRunOutcome::Yield(value)) => Ok(vm.make_iterator_result(value, false)),
             Ok(RiscRunOutcome::YieldStar(result)) => Ok(result),
             Ok(RiscRunOutcome::Return(value)) => {
               runner.complete();
-              Ok(Self::make_iterator_result(value, true))
+              Ok(vm.make_iterator_result(value, true))
             }
             Ok(RiscRunOutcome::Initialized) => Err(RuntimeError::from(
               "generator initialization marker executed twice",
@@ -142,7 +142,7 @@ impl Vm {
       Value::Builtin(Rc::new(move |vm, args| {
         let mut runner = throw_runner
           .try_borrow_mut()
-          .map_err(|_| RuntimeError::from("TypeError: generator is already executing"))?;
+          .map_err(|_| vm.throw_type_error("generator is already executing"))?;
         let user_args = if vm.builtin_this_arg_prepended() {
           args.get(1..).unwrap_or_default()
         } else {
@@ -172,11 +172,11 @@ impl Vm {
             generator_vm.run_risc_state(risc_state, false)
           };
           match outcome {
-            Ok(RiscRunOutcome::Yield(value)) => Ok(Self::make_iterator_result(value, false)),
+            Ok(RiscRunOutcome::Yield(value)) => Ok(vm.make_iterator_result(value, false)),
             Ok(RiscRunOutcome::YieldStar(result)) => Ok(result),
             Ok(RiscRunOutcome::Return(value)) => {
               runner.complete();
-              Ok(Self::make_iterator_result(value, true))
+              Ok(vm.make_iterator_result(value, true))
             }
             Ok(RiscRunOutcome::Initialized) => Err(RuntimeError::from(
               "generator initialization marker executed twice",
@@ -198,7 +198,7 @@ impl Vm {
       Value::Builtin(Rc::new(move |vm, args| {
         let mut runner = return_runner
           .try_borrow_mut()
-          .map_err(|_| RuntimeError::from("TypeError: generator is already executing"))?;
+          .map_err(|_| vm.throw_type_error("generator is already executing"))?;
         let user_args = if vm.builtin_this_arg_prepended() {
           args.get(1..).unwrap_or_default()
         } else {
@@ -210,7 +210,7 @@ impl Vm {
           .unwrap_or(Value::Undefined);
         if !runner.resume_return(result_value.clone()) {
           runner.complete();
-          return Ok(Self::make_iterator_result(result_value, true));
+          return Ok(vm.make_iterator_result(result_value, true));
         }
 
         let outcome = {
@@ -218,11 +218,11 @@ impl Vm {
           vm.run_risc_state(risc_state, false)
         };
         match outcome {
-          Ok(RiscRunOutcome::Yield(value)) => Ok(Self::make_iterator_result(value, false)),
+          Ok(RiscRunOutcome::Yield(value)) => Ok(vm.make_iterator_result(value, false)),
           Ok(RiscRunOutcome::YieldStar(result)) => Ok(result),
           Ok(RiscRunOutcome::Return(value)) => {
             runner.complete();
-            Ok(Self::make_iterator_result(value, true))
+            Ok(vm.make_iterator_result(value, true))
           }
           Ok(RiscRunOutcome::Initialized) => Err(RuntimeError::from(
             "generator initialization marker executed twice",

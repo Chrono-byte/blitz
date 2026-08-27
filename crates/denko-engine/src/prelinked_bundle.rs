@@ -414,6 +414,7 @@ fn decode_chunk(
     root_slot_names,
     root_lexical_tdz,
     root_slot_immutable,
+    root_function_declarations: Vec::new(),
     risc_spill_count,
     risc_value_spill_count,
     root_strict,

@@ -138,12 +138,14 @@ impl Compiler {
         bindings: HashMap::new(),
         lexical_bindings: HashSet::new(),
         block_var_names: HashSet::new(),
+        runtime_env_count: 0,
       }],
       globals: HashMap::new(),
       is_root: false,
       strict_context: self.strict_context,
       loop_depth: 0,
       with_depth: 0,
+      may_capture_with: self.with_depth > 0 || self.may_capture_with,
       handler_depth: 0,
       continue_patches: Vec::new(),
       break_patches: Vec::new(),
@@ -164,6 +166,13 @@ impl Compiler {
     inner.strict_context = function_is_strict;
     inner.chunk.allow_new_target = inner.allow_new_target;
     inner.chunk.allow_super = inner.allow_super;
+    if !has_simple_parameter_list && !function_is_strict {
+      // Sloppy direct eval in a non-simple parameter list may introduce var
+      // bindings after compilation. Resolve outer names through the runtime
+      // environment chain so closures created before or after that eval see
+      // the newly introduced binding instead of a prematurely fixed upvalue.
+      inner.outer_bindings.clear();
+    }
 
     let mut raw_param_slots = Vec::new();
     if has_simple_parameter_list {
@@ -236,10 +245,11 @@ impl Compiler {
     } else {
       inner.emit_parameter_initializers_from_raw_slots(&func.params, &raw_param_slots)?;
     }
+    let parameter_environment_slot_names = inner.environment_slot_names();
 
     // Instantiate body declarations only after parameter initialization.
     if let Some(body) = &func.body {
-      inner.pre_declare_variables_oast_stmts(&body.statements);
+      inner.enter_function_body_scope_with_vars(&body.statements, !has_simple_parameter_list);
       inner.pre_declare_functions_oast_stmts(&body.statements);
       inner.emit_hoisted_function_decls_oast_stmts(&body.statements)?;
     }
@@ -258,6 +268,7 @@ impl Compiler {
         }
         inner.compile_statement_oast(stmt)?;
       }
+      inner.exit_scope();
     }
 
     inner.emit_fallthrough_return(LINE);
@@ -269,7 +280,12 @@ impl Compiler {
     chunk.allow_super = inner.allow_super;
     let has_rest = func.params.rest.is_some();
     let has_simple_parameter_list = Self::has_simple_parameter_list(func);
-    let slot_names = inner.environment_slot_names();
+    let mut slot_names = if has_simple_parameter_list {
+      inner.environment_slot_names()
+    } else {
+      parameter_environment_slot_names
+    };
+    slot_names.resize(inner.locals.len(), None);
     let slot_types = inner.local_types;
     let lexical_tdz = inner.local_tdz;
     let has_prototype_property = !func.r#async;
@@ -411,12 +427,14 @@ impl Compiler {
         bindings: HashMap::new(),
         lexical_bindings: HashSet::new(),
         block_var_names: HashSet::new(),
+        runtime_env_count: 0,
       }],
       globals: HashMap::new(),
       is_root: false,
       strict_context: self.strict_context,
       loop_depth: 0,
       with_depth: 0,
+      may_capture_with: self.with_depth > 0 || self.may_capture_with,
       handler_depth: 0,
       continue_patches: Vec::new(),
       break_patches: Vec::new(),
@@ -487,10 +505,11 @@ impl Compiler {
     if !has_simple_parameter_list {
       inner.emit_parameter_initializers_from_raw_slots(&func.params, &raw_param_slots)?;
     }
+    let parameter_environment_slot_names = inner.environment_slot_names();
 
     // Arrow body declarations are likewise outside the non-simple parameter
     // environment.
-    inner.pre_declare_variables_oast_stmts(&func.body.statements);
+    inner.enter_function_body_scope_with_vars(&func.body.statements, !has_simple_parameter_list);
     inner.pre_declare_functions_oast_stmts(&func.body.statements);
     inner.emit_hoisted_function_decls_oast_stmts(&func.body.statements)?;
 
@@ -543,6 +562,8 @@ impl Compiler {
       inner.emit_fallthrough_return(LINE);
     }
 
+    inner.exit_scope();
+
     let mut chunk = super::risc::RiscBuilder::finish(
       std::mem::take(&mut inner.chunk),
       std::mem::take(&mut inner.risc),
@@ -550,7 +571,12 @@ impl Compiler {
     chunk.allow_new_target = inner.allow_new_target;
     chunk.allow_super = inner.allow_super;
     let has_rest = func.params.rest.is_some();
-    let slot_names = inner.environment_slot_names();
+    let mut slot_names = if has_simple_parameter_list {
+      inner.environment_slot_names()
+    } else {
+      parameter_environment_slot_names
+    };
+    slot_names.resize(inner.locals.len(), None);
     let slot_types = inner.local_types;
     let lexical_tdz = inner.local_tdz;
     Ok((

@@ -8,7 +8,6 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::rc::Weak;
 
 use crate::errors::RuntimeError;
 use crate::value::{SharedValue, Value};
@@ -22,12 +21,14 @@ pub struct Binding {
   pub mutable: bool,
   /// Whether the binding has been initialized.
   pub initialized: bool,
+  /// Whether this is a lexical (`let`, `const`, or class) binding.
+  pub lexical: bool,
 }
 
 #[derive(Clone, Debug)]
 /// Declarative environment record with an optional outer environment.
 pub struct EnvironmentRecord {
-  outer: Option<Weak<RefCell<EnvironmentRecord>>>,
+  outer: Option<Rc<RefCell<EnvironmentRecord>>>,
   bindings: HashMap<String, Binding>,
   binding_object: Option<Value>,
   with_environment: bool,
@@ -41,7 +42,7 @@ impl EnvironmentRecord {
       .as_ref()
       .is_some_and(|outer| outer.borrow().has_object_environment);
     Self {
-      outer: outer.map(|outer| Rc::downgrade(&outer)),
+      outer,
       bindings: HashMap::new(),
       binding_object: None,
       with_environment: false,
@@ -56,7 +57,7 @@ impl EnvironmentRecord {
     with_environment: bool,
   ) -> Self {
     Self {
-      outer: outer.map(|outer| Rc::downgrade(&outer)),
+      outer,
       bindings: HashMap::new(),
       binding_object: Some(binding_object),
       with_environment,
@@ -66,7 +67,7 @@ impl EnvironmentRecord {
 
   /// Return the outer environment, if any.
   pub fn outer(&self) -> Option<Rc<RefCell<EnvironmentRecord>>> {
-    self.outer.as_ref().and_then(Weak::upgrade)
+    self.outer.clone()
   }
 
   /// Return the object used for object-environment binding resolution, if any.
@@ -97,6 +98,25 @@ impl EnvironmentRecord {
         cell,
         mutable: true,
         initialized,
+        lexical: false,
+      },
+    );
+  }
+
+  /// Create a mutable lexical binding in this record.
+  pub fn create_mutable_lexical_binding(
+    &mut self,
+    name: String,
+    cell: SharedValue,
+    initialized: bool,
+  ) {
+    self.bindings.insert(
+      name,
+      Binding {
+        cell,
+        mutable: true,
+        initialized,
+        lexical: true,
       },
     );
   }
@@ -114,6 +134,7 @@ impl EnvironmentRecord {
         cell,
         mutable: false,
         initialized,
+        lexical: true,
       },
     );
   }
@@ -137,17 +158,61 @@ impl EnvironmentRecord {
     name: &str,
     initialized: bool,
   ) -> bool {
-    if self.set_binding_initialized(name, initialized) {
+    if let Some(binding) = self.bindings.get_mut(name) {
+      binding.initialized = initialized;
+      let cell = Rc::clone(&binding.cell);
+      if let Some(outer) = &self.outer {
+        outer
+          .borrow_mut()
+          .set_binding_initialized_for_cell(name, &cell, initialized);
+      }
       return true;
     }
-    if let Some(outer) = &self.outer
-      && let Some(outer) = outer.upgrade()
-    {
+    if let Some(outer) = &self.outer {
       return outer
         .borrow_mut()
         .set_binding_initialized_in_chain(name, initialized);
     }
     false
+  }
+
+  fn set_binding_initialized_for_cell(
+    &mut self,
+    name: &str,
+    cell: &SharedValue,
+    initialized: bool,
+  ) {
+    if let Some(binding) = self.bindings.get_mut(name)
+      && Rc::ptr_eq(&binding.cell, cell)
+    {
+      binding.initialized = initialized;
+    }
+    if let Some(outer) = &self.outer {
+      outer
+        .borrow_mut()
+        .set_binding_initialized_for_cell(name, cell, initialized);
+    }
+  }
+
+  /// Mark the binding backed by `cell` initialized anywhere in this chain.
+  pub fn set_binding_initialized_for_cell_in_chain(
+    &mut self,
+    cell: &SharedValue,
+    initialized: bool,
+  ) -> bool {
+    if let Some(binding) = self
+      .bindings
+      .values_mut()
+      .find(|binding| Rc::ptr_eq(&binding.cell, cell))
+    {
+      binding.initialized = initialized;
+      return true;
+    }
+    self.outer.as_ref().is_some_and(|outer| {
+      outer
+        .borrow_mut()
+        .set_binding_initialized_for_cell_in_chain(cell, initialized)
+    })
   }
 
   /// Return whether this record directly contains `name`.
@@ -156,6 +221,39 @@ impl EnvironmentRecord {
     name: &str,
   ) -> bool {
     self.bindings.contains_key(name)
+  }
+
+  /// Return whether this record directly contains a lexical binding named `name`.
+  pub fn has_lexical_binding(
+    &self,
+    name: &str,
+  ) -> bool {
+    self
+      .bindings
+      .get(name)
+      .is_some_and(|binding| binding.lexical)
+  }
+
+  /// Return the storage cell for an own binding without walking outer records.
+  pub fn own_binding_cell(
+    &self,
+    name: &str,
+  ) -> Option<SharedValue> {
+    self
+      .bindings
+      .get(name)
+      .map(|binding| Rc::clone(&binding.cell))
+  }
+
+  /// Return mutability and initialization state for an own binding.
+  pub fn own_binding_state(
+    &self,
+    name: &str,
+  ) -> Option<(bool, bool)> {
+    self
+      .bindings
+      .get(name)
+      .map(|binding| (binding.mutable, binding.initialized))
   }
 
   /// Read a binding from this record without walking outer environments.
@@ -190,9 +288,7 @@ impl EnvironmentRecord {
     if let Some(value) = self.get_own_binding_value(name)? {
       return Ok(Some(value));
     }
-    if let Some(outer) = &self.outer
-      && let Some(outer) = outer.upgrade()
-    {
+    if let Some(outer) = &self.outer {
       return outer.borrow().get_binding_value(name);
     }
     Ok(None)
@@ -220,9 +316,7 @@ impl EnvironmentRecord {
       binding.initialized = true;
       return Ok(true);
     }
-    if let Some(outer) = &self.outer
-      && let Some(outer) = outer.upgrade()
-    {
+    if let Some(outer) = &self.outer {
       return outer
         .borrow_mut()
         .set_mutable_binding(name, value);
@@ -241,9 +335,7 @@ impl EnvironmentRecord {
     for binding in self.bindings.values() {
       values.push(binding.cell.borrow().clone());
     }
-    if let Some(outer) = &self.outer
-      && let Some(outer) = outer.upgrade()
-    {
+    if let Some(outer) = &self.outer {
       outer.borrow().collect_binding_values(values);
     }
   }

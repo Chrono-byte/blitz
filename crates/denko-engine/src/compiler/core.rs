@@ -76,6 +76,8 @@ pub(crate) struct Compiler {
   pub loop_depth: usize,
   /// Current nested `with` depth.
   pub with_depth: usize,
+  /// Whether this compilation unit can close over an outer `with` environment.
+  pub may_capture_with: bool,
   /// Active bytecode exception handlers that must survive a call.
   pub handler_depth: usize,
   /// Stack of continue patch sites for nested loops. Each entry holds a list
@@ -206,6 +208,8 @@ pub struct Scope {
   pub lexical_bindings: HashSet<String>,
   /// Block-scoped var names collected from statements in this block.
   pub block_var_names: HashSet<String>,
+  /// Number of declarative environment records emitted for this scope.
+  pub runtime_env_count: usize,
 }
 
 /// State for patching return statements in finally blocks.
@@ -322,12 +326,14 @@ impl Compiler {
         bindings: HashMap::new(),
         lexical_bindings: HashSet::new(),
         block_var_names: HashSet::new(),
+        runtime_env_count: 0,
       }],
       globals: HashMap::new(),
       is_root: true,
       strict_context: false,
       loop_depth: 0,
       with_depth: 0,
+      may_capture_with: false,
       handler_depth: 0,
       continue_patches: Vec::new(),
       break_patches: Vec::new(),
@@ -876,13 +882,34 @@ impl Compiler {
       bindings: HashMap::new(),
       lexical_bindings: HashSet::new(),
       block_var_names: HashSet::new(),
+      runtime_env_count: 0,
     });
+  }
+
+  pub(crate) fn mirrors_root_bindings(&self) -> bool {
+    self.is_root && self.current_module.is_none()
   }
 
   /// Enters a block scope with the given block var names.
   pub(crate) fn enter_block_scope_with_vars(
     &mut self,
     stmts: &[oast::Statement<'_>],
+  ) {
+    self.enter_block_scope_with_vars_mode(stmts, false);
+  }
+
+  pub(crate) fn enter_function_body_scope_with_vars(
+    &mut self,
+    stmts: &[oast::Statement<'_>],
+    separate_var_environment: bool,
+  ) {
+    self.enter_block_scope_with_vars_mode(stmts, separate_var_environment);
+  }
+
+  fn enter_block_scope_with_vars_mode(
+    &mut self,
+    stmts: &[oast::Statement<'_>],
+    separate_var_environment: bool,
   ) {
     let mut block_var_names = HashSet::new();
     for stmt in stmts {
@@ -894,8 +921,61 @@ impl Compiler {
       bindings: HashMap::new(),
       lexical_bindings: HashSet::new(),
       block_var_names,
+      runtime_env_count: 0,
     });
     self.pre_declare_variables_oast_stmts(stmts);
+    if separate_var_environment {
+      self.activate_current_scope_var_bindings();
+    }
+    self.activate_current_scope_lexical_bindings();
+  }
+
+  fn activate_current_scope_var_bindings(&mut self) {
+    let mut bindings: Vec<_> = self
+      .scopes
+      .last()
+      .into_iter()
+      .flat_map(|scope| scope.block_var_names.iter())
+      .filter_map(|name| {
+        self
+          .resolve_local(name)
+          .map(|slot| (slot, name.clone()))
+      })
+      .collect();
+    bindings.sort_by_key(|(slot, _)| *slot);
+    for (slot, name) in &bindings {
+      self.emit_constant(crate::value::Value::String(name.clone().into()), 1);
+      self.emit_with_payload(Op::PushLexicalEnv, *slot as u32, 1);
+    }
+    if let Some(scope) = self.scopes.last_mut() {
+      scope.runtime_env_count += bindings.len();
+    }
+  }
+
+  pub(crate) fn activate_current_scope_lexical_bindings(&mut self) {
+    let mut bindings: Vec<_> = self
+      .scopes
+      .last()
+      .into_iter()
+      .flat_map(|scope| scope.lexical_bindings.iter())
+      .filter_map(|name| {
+        self
+          .scopes
+          .last()?
+          .bindings
+          .get(name)
+          .copied()
+          .map(|slot| (slot, name.clone()))
+      })
+      .collect();
+    bindings.sort_by_key(|(slot, _)| *slot);
+    for (slot, name) in &bindings {
+      self.emit_constant(crate::value::Value::String(name.clone().into()), 1);
+      self.emit_with_payload(Op::PushLexicalEnv, *slot as u32, 1);
+    }
+    if let Some(scope) = self.scopes.last_mut() {
+      scope.runtime_env_count += bindings.len();
+    }
   }
 
   /// Names that belong to the function/root environment. Block bindings and
@@ -919,6 +999,9 @@ impl Compiler {
       .scopes
       .pop()
       .expect("compiler must always have an active scope");
+    for _ in 0..scope.runtime_env_count {
+      self.emit(Op::PopEnv, 1);
+    }
     debug_assert!(
       !matches!(scope.kind, ScopeKind::Function) || !self.scopes.is_empty(),
       "cannot pop the last function scope"
@@ -1115,8 +1198,26 @@ impl Compiler {
     &mut self,
     name: &str,
   ) {
-    if self.with_depth > 0 {
-      self.emit_get_global_name(name);
+    if self.with_depth > 0 || self.may_capture_with {
+      let reference_slot = self.alloc_temp_local("with_identifier_reference");
+      self.emit_get_builtin_name("resolveWithBindingObject");
+      self.emit_constant(Value::String(name.into()), LINE);
+      self.emit(Op::Call, LINE);
+      self.emit_byte(1, LINE);
+      self.emit(Op::StoreLocal, LINE);
+      self.emit_byte(
+        u8::try_from(reference_slot).expect("with reference slot fits in u8"),
+        LINE,
+      );
+      self.emit_get_builtin_name("getResolvedIdentifier");
+      self.emit(Op::LoadLocal, LINE);
+      self.emit_byte(
+        u8::try_from(reference_slot).expect("with reference slot fits in u8"),
+        LINE,
+      );
+      self.emit_constant(Value::String(name.into()), LINE);
+      self.emit(Op::Call, LINE);
+      self.emit_byte(2, LINE);
     } else if let Some(slot) = self.resolve_local(name) {
       self.emit(Op::LoadLocal, LINE);
       self.emit_byte(u8::try_from(slot).expect("slot fits in u8"), LINE);

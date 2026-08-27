@@ -144,7 +144,7 @@ pub(crate) fn install_global_bindings(
       enumerable: false,
       configurable: false,
     });
-  builtins::globals::install_global_function_builtins(&mut g);
+  builtins::globals::install_global_function_builtins(&mut g, function_proto_map);
   g.properties.insert(
     PKey::String("Reflect".to_string().into()),
     PropertyDescriptor::builtin_data(Value::Object(Rc::clone(values.reflect_obj))),

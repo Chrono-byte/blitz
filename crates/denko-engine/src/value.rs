@@ -1269,6 +1269,9 @@ impl Value {
       Value::Closure { proto, .. } => proto.has_prototype_property && proto.is_constructor,
       Value::BuiltinObject(_, props) => {
         let props_ref = props.borrow();
+        if let Some(value) = props_ref.internal_slot("[[BoundTargetFunction]]") {
+          return value.is_constructable();
+        }
         if matches!(
           props_ref.internal_slot("[[Constructable]]"),
           Some(Value::Bool(true))
@@ -1280,9 +1283,6 @@ impl Value {
           .contains_key(&PropertyKey::String("prototype".to_string().into()))
         {
           return true;
-        }
-        if let Some(value) = props_ref.internal_slot("[[BoundTargetFunction]]") {
-          return value.is_constructable();
         }
         false
       }

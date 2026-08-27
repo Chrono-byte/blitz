@@ -171,6 +171,12 @@ pub(crate) fn create_reflect_intrinsics(
             {
               Some("Object".into())
             } else if intrinsics
+              .number_constructor
+              .as_ref()
+              .is_some_and(|value| strict_equal(value, &target))
+            {
+              Some("Number".into())
+            } else if intrinsics
               .promise_constructor
               .as_ref()
               .is_some_and(|value| strict_equal(value, &target))
@@ -180,21 +186,47 @@ pub(crate) fn create_reflect_intrinsics(
               None
             }
           });
-        let realm_globals = vm
-          .get_property_host(&new_target, &key("[[RealmGlobals]]"))
-          .ok();
+        let realm_globals = Vm::function_realm_globals(&new_target);
         if let (Some(name), Some(Value::Object(globals))) = (constructor_name, realm_globals) {
-          let constructor_in_realm = globals
-            .borrow()
-            .properties
-            .get(&PropertyKey::String(name))
-            .and_then(|descriptor| {
-              if let PropertyDescriptor::Data { value, .. } = descriptor {
-                Some(value.clone())
-              } else {
-                None
-              }
-            });
+          if name.to_string_lossy() == "GeneratorFunction"
+            && let Some((intrinsics, _)) = crate::runtime_utils::realm_kernel(&globals)
+            && let Some(prototype) = intrinsics.generator_function_prototype
+          {
+            desired_prototype = Some(prototype);
+          }
+          let (constructor_in_realm, intl_namespace) = {
+            let globals = globals.borrow();
+            let constructor = globals
+              .properties
+              .get(&PropertyKey::String(name.clone()))
+              .and_then(|descriptor| match descriptor {
+                PropertyDescriptor::Data { value, .. } => Some(value.clone()),
+                PropertyDescriptor::Accessor { .. } => None,
+              });
+            let intl =
+              globals
+                .properties
+                .get(&key("Intl"))
+                .and_then(|descriptor| match descriptor {
+                  PropertyDescriptor::Data { value, .. } => Some(value.clone()),
+                  PropertyDescriptor::Accessor { .. } => None,
+                });
+            (constructor, intl)
+          };
+          let constructor_in_realm = constructor_in_realm.or_else(|| {
+            let Value::Object(intl) = intl_namespace? else {
+              return None;
+            };
+            let constructor = intl
+              .borrow()
+              .properties
+              .get(&PropertyKey::String(name))
+              .and_then(|descriptor| match descriptor {
+                PropertyDescriptor::Data { value, .. } => Some(value.clone()),
+                PropertyDescriptor::Accessor { .. } => None,
+              });
+            constructor
+          });
           if let Some(constructor_in_realm) = constructor_in_realm {
             let prototype = vm
               .get_property_host(&constructor_in_realm, &key("prototype"))
@@ -211,10 +243,8 @@ pub(crate) fn create_reflect_intrinsics(
           }
         }
       }
-      if let Some(prototype) = desired_prototype
-        && let Value::Object(object) = &result
-      {
-        object.borrow_mut().set_prototype_value(prototype);
+      if let Some(prototype) = desired_prototype {
+        let _ = vm.set_prototype_of_value(&result, &prototype)?;
       }
       Ok(result)
     }),

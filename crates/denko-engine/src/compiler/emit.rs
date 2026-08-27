@@ -95,6 +95,7 @@ impl FrontendOp {
   pub(crate) const GetAsyncIterator: Self = Self::Bytecode(BytecodeOp::GetAsyncIterator);
   pub(crate) const Increment: Self = Self::Bytecode(BytecodeOp::Increment);
   pub(crate) const Decrement: Self = Self::Bytecode(BytecodeOp::Decrement);
+  pub(crate) const PushLexicalEnv: Self = Self::Bytecode(BytecodeOp::PushLexicalEnv);
 
   pub(crate) fn bytecode(self) -> Option<BytecodeOp> {
     match self {

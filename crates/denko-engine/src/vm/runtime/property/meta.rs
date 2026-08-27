@@ -141,6 +141,9 @@ impl Vm {
     if same_value(&current, proto) {
       return Ok(true);
     }
+    if same_value(obj, &self.realm().object_prototype()) {
+      return Ok(false);
+    }
     if !object_is_extensible(obj) {
       return Ok(false);
     }
@@ -223,6 +226,19 @@ impl Vm {
     key: &PropertyKey,
   ) -> Result<Option<PropertyDescriptor>, RuntimeError> {
     let Value::Proxy(proxy) = obj else {
+      if let Value::Object(object) = obj
+        && let PropertyKey::String(name) = key
+        && object
+          .borrow()
+          .module_namespace_exports
+          .as_ref()
+          .and_then(|exports| exports.get(name))
+          .is_some_and(|binding| matches!(*binding.borrow(), Value::Uninitialized))
+      {
+        return Err(
+          self.throw_reference_error("Cannot access module binding before initialization"),
+        );
+      }
       return Ok(own_property_descriptor(obj, key));
     };
 

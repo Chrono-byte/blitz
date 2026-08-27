@@ -223,6 +223,8 @@ pub struct Chunk {
   pub root_lexical_tdz: Vec<bool>,
   /// Root script immutability flags (`const`).
   pub root_slot_immutable: Vec<bool>,
+  /// Function declarations instantiated in the root variable environment.
+  pub root_function_declarations: Vec<String>,
   /// Number of non-lexical frame spill slots required by RISC v2 lowering.
   pub risc_spill_count: u16,
   /// Prefix of `risc_spill_count` occupied by stable lowered value homes.
@@ -343,6 +345,7 @@ impl Chunk {
       root_slot_names: Vec::new(),
       root_lexical_tdz: Vec::new(),
       root_slot_immutable: Vec::new(),
+      root_function_declarations: Vec::new(),
       risc_spill_count: 0,
       risc_value_spill_count: 0,
       root_strict: false,
@@ -1190,10 +1193,13 @@ pub enum Op {
   Increment,
   /// Decrement: apply ToNumeric and subtract the matching numeric unit.
   Decrement,
+  /// PushLexicalEnv: create a declarative environment for the local slot in
+  /// aux16. `rd` contains the binding name.
+  PushLexicalEnv,
 }
 
 /// Total number of opcode variants.
-pub const OP_COUNT: usize = Op::Decrement as usize + 1;
+pub const OP_COUNT: usize = Op::PushLexicalEnv as usize + 1;
 
 impl Op {
   /// Converts a byte to an Op if valid, returns None otherwise
@@ -1301,6 +1307,7 @@ impl Op {
       Op::GetAsyncIterator => "GetAsyncIterator",
       Op::Increment => "Increment",
       Op::Decrement => "Decrement",
+      Op::PushLexicalEnv => "PushLexicalEnv",
     }
   }
 
@@ -1416,6 +1423,7 @@ impl TryFrom<u8> for Op {
       79 => Ok(GetAsyncIterator),
       80 => Ok(Increment),
       81 => Ok(Decrement),
+      82 => Ok(PushLexicalEnv),
       _ => Err(()),
     }
   }

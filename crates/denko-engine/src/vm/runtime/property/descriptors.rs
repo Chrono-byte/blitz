@@ -418,6 +418,13 @@ impl Vm {
             return Ok(false);
           }
         }
+        let desc_is_accessor = desc.has_get || desc.has_set;
+        let desc_is_data = desc.has_value || desc.has_writable;
+        if matches!(cur, PropertyDescriptor::Data { .. }) && desc_is_accessor
+          || matches!(cur, PropertyDescriptor::Accessor { .. }) && desc_is_data
+        {
+          return Ok(false);
+        }
         if let PropertyDescriptor::Data {
           writable, value, ..
         } = &cur
@@ -432,10 +439,34 @@ impl Vm {
             return Ok(false);
           }
         }
+        if let PropertyDescriptor::Accessor { get, set, .. } = &cur {
+          if desc.has_get
+            && !values_equal(
+              desc.get.as_ref().unwrap_or(&Value::Undefined),
+              get.as_ref().unwrap_or(&Value::Undefined),
+            )
+          {
+            return Ok(false);
+          }
+          if desc.has_set
+            && !values_equal(
+              desc.set.as_ref().unwrap_or(&Value::Undefined),
+              set.as_ref().unwrap_or(&Value::Undefined),
+            )
+          {
+            return Ok(false);
+          }
+        }
       }
     }
 
-    let is_accessor = desc.get.is_some() || desc.set.is_some();
+    let is_accessor = if desc.has_get || desc.has_set {
+      true
+    } else if desc.has_value || desc.has_writable {
+      false
+    } else {
+      matches!(current, Some(PropertyDescriptor::Accessor { .. }))
+    };
     let new_desc = if is_accessor {
       let (current_get, current_set) = match &current {
         Some(PropertyDescriptor::Accessor { get, set, .. }) => (get.clone(), set.clone()),

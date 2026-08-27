@@ -480,7 +480,7 @@ impl Compiler {
     }
   }
 
-  pub(super) fn statements_contain_direct_super_call(statements: &[oast::Statement<'_>]) -> bool {
+  pub(crate) fn statements_contain_direct_super_call(statements: &[oast::Statement<'_>]) -> bool {
     statements
       .iter()
       .any(|statement| match statement {

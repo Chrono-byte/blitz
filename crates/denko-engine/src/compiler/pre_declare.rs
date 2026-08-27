@@ -97,7 +97,7 @@ impl Compiler {
             let is_var = matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var);
             let slot = if is_var {
               self.resolve_local(&name).unwrap_or_else(|| {
-                let mirror_global = self.is_root;
+                let mirror_global = self.mirrors_root_bindings();
                 self.add_var_local(name.clone(), None, mirror_global)
               })
             } else if let Some(slot) = self
@@ -159,7 +159,7 @@ impl Compiler {
     nested_var_names.sort();
     for name in nested_var_names {
       if self.resolve_local(&name).is_none() {
-        self.add_var_local(name, None, self.is_root);
+        self.add_var_local(name, None, self.mirrors_root_bindings());
       }
     }
   }
@@ -176,7 +176,7 @@ impl Compiler {
           if let Some(ident) = &f.id {
             let name = ident.name.to_string();
             if self.resolve_local(&name).is_none() {
-              self.add_local_with_mirror(name, None, self.is_root);
+              self.add_local_with_mirror(name, None, self.mirrors_root_bindings());
             }
           }
         }
@@ -186,7 +186,7 @@ impl Compiler {
           {
             let name = ident.name.to_string();
             if self.resolve_local(&name).is_none() {
-              self.add_local_with_mirror(name, None, self.is_root);
+              self.add_local_with_mirror(name, None, self.mirrors_root_bindings());
             }
           }
         }
@@ -196,7 +196,7 @@ impl Compiler {
           {
             let name = ident.name.to_string();
             if self.resolve_local(&name).is_none() {
-              self.add_local_with_mirror(name, None, self.is_root);
+              self.add_local_with_mirror(name, None, self.mirrors_root_bindings());
             }
           }
         }
@@ -226,14 +226,14 @@ impl Compiler {
             let slot = if let Some(s) = self.resolve_local(&fname) {
               s
             } else {
-              self.add_local_with_mirror(fname.clone(), None, self.is_root)
+              self.add_local_with_mirror(fname.clone(), None, self.mirrors_root_bindings())
             };
-            if self.is_root {
+            if self.local_mirrors_global(slot) {
               self.emit(Op::Copy, LINE);
             }
             self.emit(Op::StoreLocal, LINE);
             self.emit_byte(self.slot_to_u8(slot)?, LINE);
-            if self.is_root {
+            if self.local_mirrors_global(slot) {
               self.emit_set_global_name(&fname);
             }
             if self.current_module.is_some() {
@@ -255,14 +255,14 @@ impl Compiler {
             let slot = if let Some(s) = self.resolve_local(&fname) {
               s
             } else {
-              self.add_local_with_mirror(fname.clone(), None, self.is_root)
+              self.add_local_with_mirror(fname.clone(), None, self.mirrors_root_bindings())
             };
-            if self.is_root {
+            if self.local_mirrors_global(slot) {
               self.emit(Op::Copy, LINE);
             }
             self.emit(Op::StoreLocal, LINE);
             self.emit_byte(self.slot_to_u8(slot)?, LINE);
-            if self.is_root {
+            if self.local_mirrors_global(slot) {
               self.emit_set_global_name(&fname);
             }
             if self.current_module.is_some() {
@@ -283,14 +283,14 @@ impl Compiler {
               let slot = if let Some(s) = self.resolve_local(&fname) {
                 s
               } else {
-                self.add_local_with_mirror(fname.clone(), None, self.is_root)
+                self.add_local_with_mirror(fname.clone(), None, self.mirrors_root_bindings())
               };
-              if self.is_root {
+              if self.local_mirrors_global(slot) {
                 self.emit(Op::Copy, LINE);
               }
               self.emit(Op::StoreLocal, LINE);
               self.emit_byte(self.slot_to_u8(slot)?, LINE);
-              if self.is_root {
+              if self.local_mirrors_global(slot) {
                 self.emit_set_global_name(&fname);
               }
               if self.current_module.is_some() {

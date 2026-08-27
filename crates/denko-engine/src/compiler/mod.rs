@@ -192,21 +192,30 @@ impl Compiler {
       .filter(|s| !matches!(s, oast::Statement::FunctionDeclaration(_)))
       .collect();
 
-    if repl_mode
-      && stmts.is_empty()
-      && let Some(directive) = program.directives.last()
-    {
-      self.emit_constant(
-        Value::String(directive.expression.value.to_string().into()),
-        LINE,
-      );
+    let completion_slot = if repl_mode {
+      let slot = self.alloc_temp_local("statement_list_completion");
+      if let Some(directive) = program.directives.last() {
+        self.emit_constant(
+          Value::String(directive.expression.value.to_string().into()),
+          LINE,
+        );
+      } else {
+        self.emit(Op::Undefined, LINE);
+      }
+      self.emit(Op::StoreLocal, LINE);
+      self.emit_byte(self.slot_to_u8(slot)?, LINE);
+      Some(slot)
+    } else {
+      None
+    };
+
+    for stmt in &stmts {
+      self.compile_statement_oast_with_mode(stmt, false, completion_slot)?;
     }
 
-    for (i, stmt) in stmts.iter().enumerate() {
-      let is_last_expr_stmt = repl_mode
-        && i == stmts.len() - 1
-        && matches!(stmt, oast::Statement::ExpressionStatement(_));
-      self.compile_statement_oast_with_mode(stmt, is_last_expr_stmt, None)?;
+    if let Some(slot) = completion_slot {
+      self.emit(Op::LoadLocal, LINE);
+      self.emit_byte(self.slot_to_u8(slot)?, LINE);
     }
 
     if let Some(error) = self.emission_error.take() {
@@ -219,6 +228,17 @@ impl Compiler {
       self.chunk.root_slot_names = self.environment_slot_names();
       self.chunk.root_lexical_tdz = self.local_tdz.clone();
       self.chunk.root_slot_immutable = self.local_immutable.clone();
+      self.chunk.root_function_declarations = program
+        .body
+        .iter()
+        .filter_map(|statement| match statement {
+          oast::Statement::FunctionDeclaration(function) => function
+            .id
+            .as_ref()
+            .map(|identifier| identifier.name.to_string()),
+          _ => None,
+        })
+        .collect();
       self.chunk.root_strict = self.strict_context;
     }
     let chunk = std::mem::take(&mut self.chunk);

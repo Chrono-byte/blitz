@@ -48,10 +48,13 @@ impl Vm {
       }
       let mut env = Some(Rc::clone(&self.execution.active.lexical_env));
       while let Some(current) = env {
+        if Rc::ptr_eq(&current, &self.realm_state.global_env) {
+          break;
+        }
         let (conflict, outer) = {
           let borrowed = current.borrow();
           (
-            !borrowed.is_with_environment() && borrowed.has_binding(name),
+            !borrowed.is_with_environment() && borrowed.has_lexical_binding(name),
             borrowed.outer(),
           )
         };
@@ -62,6 +65,58 @@ impl Vm {
       }
     }
     None
+  }
+
+  pub(crate) fn global_eval_lexical_conflict_name(
+    &self,
+    chunk: &crate::bytecode::Chunk,
+  ) -> Option<String> {
+    let global_env = self.realm_state.global_env.borrow();
+    chunk
+      .root_slot_names
+      .iter()
+      .enumerate()
+      .find_map(|(index, maybe_name)| {
+        let name = maybe_name.as_deref()?;
+        if chunk
+          .root_lexical_tdz
+          .get(index)
+          .copied()
+          .unwrap_or(false)
+          || !global_env.has_lexical_binding(name)
+        {
+          return None;
+        }
+        Some(name.to_string())
+      })
+  }
+
+  pub(crate) fn global_function_declaration_conflict_name(
+    &self,
+    chunk: &crate::bytecode::Chunk,
+  ) -> Option<String> {
+    let globals = self.realm_state.globals.borrow();
+    chunk
+      .root_function_declarations
+      .iter()
+      .find_map(|name| {
+        let key = PropertyKey::String(name.clone().into());
+        let can_declare = match globals.properties.get(&key) {
+          None => globals.extensible,
+          Some(PropertyDescriptor::Data {
+            writable,
+            enumerable,
+            configurable,
+            ..
+          }) => *configurable || *writable && *enumerable,
+          Some(PropertyDescriptor::Accessor { configurable, .. }) => *configurable,
+        };
+        (!can_declare).then(|| name.clone())
+      })
+  }
+
+  pub(crate) fn direct_eval_uses_global_var_environment(&self) -> bool {
+    self.execution.active.closure_env.is_none()
   }
 
   /// Replace the current lexical environment.
@@ -99,6 +154,136 @@ impl Vm {
     )
   }
 
+  pub(crate) fn resolve_with_binding_object(
+    &mut self,
+    name: &str,
+  ) -> Result<Option<Value>, RuntimeError> {
+    let mut env = Some(Rc::clone(&self.execution.active.lexical_env));
+    while let Some(current) = env {
+      let (has_declarative_binding, binding_object, with_environment, outer) = {
+        let borrowed = current.borrow();
+        (
+          borrowed.has_binding(name),
+          borrowed.binding_object(),
+          borrowed.is_with_environment(),
+          borrowed.outer(),
+        )
+      };
+      if has_declarative_binding {
+        return Ok(None);
+      }
+      if let Some(binding_object) = binding_object {
+        let key = PropertyKey::String(name.into());
+        if self.has_property_host(&binding_object, &key)?
+          && (!with_environment || !self.is_unscopable_binding(&binding_object, name)?)
+        {
+          return Ok(Some(binding_object));
+        }
+      }
+      env = outer;
+    }
+    Ok(None)
+  }
+
+  pub(crate) fn get_resolved_identifier(
+    &mut self,
+    binding_object: &Value,
+    name: &str,
+  ) -> Result<Value, RuntimeError> {
+    if binding_object.is_object() {
+      let key = PropertyKey::String(name.into());
+      if !self.has_property_host(binding_object, &key)? {
+        if self.is_strict_mode() {
+          return Err(self.throw_reference_error(&format!("{name} is not defined")));
+        }
+        return Ok(Value::Undefined);
+      }
+      return self.get_property_host(binding_object, &key);
+    }
+    self
+      .resolve_identifier_outside_object_environments(name)?
+      .ok_or_else(|| self.throw_reference_error(&format!("{name} is not defined")))
+  }
+
+  pub(crate) fn set_resolved_identifier(
+    &mut self,
+    binding_object: &Value,
+    name: &str,
+    value: Value,
+  ) -> Result<Value, RuntimeError> {
+    if binding_object.is_object() {
+      let key = PropertyKey::String(name.into());
+      if !self.has_property_host(binding_object, &key)? && self.is_strict_mode() {
+        return Err(self.throw_reference_error(&format!("{name} is not defined")));
+      }
+      drop(self.set_property_host(binding_object, &Value::String(name.into()), value.clone())?);
+      return Ok(value);
+    }
+    if self.set_identifier_outside_object_environments(name, value.clone())? {
+      return Ok(value);
+    }
+    if self.is_strict_mode() {
+      return Err(self.throw_reference_error(&format!("{name} is not defined")));
+    }
+    self
+      .realm_state
+      .globals
+      .borrow_mut()
+      .properties
+      .insert(
+        PropertyKey::String(name.into()),
+        PropertyDescriptor::ordinary_data(value.clone()),
+      );
+    Ok(value)
+  }
+
+  fn resolve_identifier_outside_object_environments(
+    &mut self,
+    name: &str,
+  ) -> Result<Option<Value>, RuntimeError> {
+    let mut env = Some(Rc::clone(&self.execution.active.lexical_env));
+    while let Some(current) = env {
+      let (value, binding_object, outer) = {
+        let borrowed = current.borrow();
+        (
+          borrowed.get_own_binding_value(name)?,
+          borrowed.binding_object(),
+          borrowed.outer(),
+        )
+      };
+      if binding_object.is_none() && value.is_some() {
+        return Ok(value);
+      }
+      env = outer;
+    }
+    Ok(self.get_global(name))
+  }
+
+  fn set_identifier_outside_object_environments(
+    &mut self,
+    name: &str,
+    value: Value,
+  ) -> Result<bool, RuntimeError> {
+    let mut env = Some(Rc::clone(&self.execution.active.lexical_env));
+    while let Some(current) = env {
+      let (has_binding, binding_object, outer) = {
+        let borrowed = current.borrow();
+        (
+          borrowed.has_binding(name),
+          borrowed.binding_object(),
+          borrowed.outer(),
+        )
+      };
+      if binding_object.is_none() && has_binding {
+        return current
+          .borrow_mut()
+          .set_mutable_binding(name, value);
+      }
+      env = outer;
+    }
+    Ok(false)
+  }
+
   fn resolve_lexical_identifier_value(
     &mut self,
     name: &str,
@@ -120,10 +305,7 @@ impl Vm {
       if let Some(binding_object) = binding_object {
         let key = PropertyKey::String(name.to_string().into());
         let found = self.has_property_host(&binding_object, &key)?;
-        if found
-          && (!with_environment || !self.is_unscopable_binding(&binding_object, name)?)
-          && self.has_property_host(&binding_object, &key)?
-        {
+        if found && (!with_environment || !self.is_unscopable_binding(&binding_object, name)?) {
           return Ok(Some(self.get_property_host(&binding_object, &key)?));
         }
       }
@@ -157,6 +339,12 @@ impl Vm {
         )
       };
       if has_decl_binding {
+        let binding_state = current.borrow().own_binding_state(name);
+        if binding_state.is_some_and(|(_, initialized)| !initialized) {
+          return Err(
+            self.throw_reference_error("Cannot access lexical binding before initialization"),
+          );
+        }
         let current_slot = self
           .execution
           .active
@@ -253,10 +441,7 @@ impl Vm {
         let name_str = name.to_string();
         let key = PropertyKey::String(name_str.clone().into());
         let found = self.has_property_host(&binding_object, &key)?;
-        if found
-          && (!with_environment || !self.is_unscopable_binding(&binding_object, name)?)
-          && self.has_property_host(&binding_object, &key)?
-        {
+        if found && (!with_environment || !self.is_unscopable_binding(&binding_object, name)?) {
           drop(self.set_property_host(&binding_object, &Value::String(name_str.into()), value)?);
           return Ok(true);
         }
@@ -285,10 +470,7 @@ impl Vm {
         let name_str = name.to_string();
         let key = PropertyKey::String(name_str.clone().into());
         let found = self.has_property_host(&binding_object, &key)?;
-        if found
-          && (!with_environment || !self.is_unscopable_binding(&binding_object, name)?)
-          && self.has_property_host(&binding_object, &key)?
-        {
+        if found && (!with_environment || !self.is_unscopable_binding(&binding_object, name)?) {
           drop(self.set_property_host(&binding_object, &Value::String(name_str.into()), value)?);
           self.bump_object_generation(&binding_object);
           return Ok(true);
@@ -399,6 +581,15 @@ impl Vm {
       .properties
       .insert(key, PropertyDescriptor::ordinary_data(value.clone()));
     for frame in self.execution.call_stack.iter_mut() {
+      let same_realm = Self::function_realm_globals(&frame.callee)
+        .and_then(|globals| match globals {
+          Value::Object(globals) => Some(Rc::ptr_eq(&globals, &self.realm_state.globals)),
+          _ => None,
+        })
+        .unwrap_or(true);
+      if !same_realm {
+        continue;
+      }
       if let Some(slots) = &frame.context.slots
         && let Some(slot) = slots
           .names
@@ -429,7 +620,25 @@ impl Vm {
     if let Some(value) = self.resolve_lexical_identifier_value(name)? {
       return Ok(Some(value));
     }
-    Ok(self.get_global(name))
+    let realm_globals = self
+      .execution
+      .call_stack
+      .last()
+      .and_then(|frame| Self::function_realm_globals(&frame.callee))
+      .and_then(|value| match value {
+        Value::Object(globals) => Some(globals),
+        _ => None,
+      })
+      .unwrap_or_else(|| Rc::clone(&self.realm_state.globals));
+    let value = realm_globals
+      .borrow()
+      .properties
+      .get(&PropertyKey::String(name.into()))
+      .and_then(|descriptor| match descriptor {
+        PropertyDescriptor::Data { value, .. } => Some(value.clone()),
+        PropertyDescriptor::Accessor { .. } => None,
+      });
+    Ok(value)
   }
 }
 
@@ -520,14 +729,23 @@ impl Vm {
     }
 
     if self.set_lexical_identifier_value(name, value.clone())?
-      || self.set_current_frame_local_by_name(name, value.clone())?
+      || self.execution.direct_eval_outer.is_some()
+        && self.set_current_frame_local_by_name(name, value.clone())?
     {
       return Ok(());
     }
     let key = PropertyKey::String(name.to_string().into());
-    let current = self
-      .realm_state
-      .globals
+    let realm_globals = self
+      .execution
+      .call_stack
+      .last()
+      .and_then(|frame| Self::function_realm_globals(&frame.callee))
+      .and_then(|value| match value {
+        Value::Object(globals) => Some(globals),
+        _ => None,
+      })
+      .unwrap_or_else(|| Rc::clone(&self.realm_state.globals));
+    let current = realm_globals
       .borrow()
       .properties
       .get(&key)
@@ -543,16 +761,14 @@ impl Vm {
         }
       }
       Some(PropertyDescriptor::Accessor { .. }) => {
-        let global_obj = Value::Object(Rc::clone(&self.realm_state.globals));
+        let global_obj = Value::Object(Rc::clone(&realm_globals));
         self.set_property_tracked(&global_obj, &key, value)?;
       }
       None if self.is_strict_mode() => {
         return Err(self.throw_reference_error(&format!("{name} is not defined")));
       }
       _ => {
-        self
-          .realm_state
-          .globals
+        realm_globals
           .borrow_mut()
           .properties
           .insert(key, PropertyDescriptor::ordinary_data(value));

@@ -8,7 +8,7 @@ use std::rc::Rc;
 use crate::ecmascript::semantics::{descriptor_value_from_descriptor, property_key_to_value};
 use crate::runtime_utils::{
   array_from_values, builtin_object, collect_iterable_values, set_builtin_length, set_builtin_name,
-  static_builtin_arg_offset, to_length, usize_to_f64,
+  static_builtin_arg_offset, strict_equal, to_length, usize_to_f64,
 };
 use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value};
 use crate::{RuntimeError, Vm};
@@ -41,6 +41,15 @@ pub(crate) fn install_object_intrinsics(
 
   let constructor_properties_for_constructor = Rc::clone(constructor_properties);
   let constructor_function: BuiltinFn = Rc::new(move |vm, args| {
+    if let Some(new_target) = vm.pending_constructor_new_target()
+      && let Some(active_constructor) = constructor_properties_for_constructor
+        .borrow()
+        .internal_slot("[[ObjectConstructor]]")
+        .cloned()
+      && !strict_equal(&new_target, &active_constructor)
+    {
+      return Ok(args.first().cloned().unwrap_or(Value::Undefined));
+    }
     let value_idx = if args.len() > 1 { 1 } else { 0 };
     let value = args
       .get(value_idx)
@@ -68,6 +77,9 @@ pub(crate) fn install_object_intrinsics(
     Rc::clone(&constructor_function),
     Rc::clone(constructor_properties),
   );
+  constructor_properties
+    .borrow_mut()
+    .set_internal_slot("[[ObjectConstructor]]", constructor.clone());
 
   object_prototype.borrow_mut().properties.insert(
     PKey::String("constructor".to_string().into()),
@@ -535,7 +547,7 @@ pub(crate) fn install_object_intrinsics(
         let builtin = builtin_object(
           Rc::new(|vm, args| {
             let off = static_builtin_arg_offset(vm, args, "Object");
-            let target = args.get(off).cloned().unwrap_or(Value::Undefined);
+            let target = vm.to_object_value(args.get(off).cloned().unwrap_or(Value::Undefined))?;
             let key_value = args
               .get(off + 1)
               .cloned()
@@ -584,7 +596,7 @@ pub(crate) fn install_object_intrinsics(
         let builtin = builtin_object(
           Rc::new(move |vm, args| {
             let off = static_builtin_arg_offset(vm, args, "Object");
-            let target = args.get(off).cloned().unwrap_or(Value::Undefined);
+            let target = vm.to_object_value(args.get(off).cloned().unwrap_or(Value::Undefined))?;
             let key_value = args
               .get(off + 1)
               .cloned()
@@ -831,13 +843,7 @@ pub(crate) fn install_object_intrinsics(
             .get(off + 1)
             .cloned()
             .unwrap_or(Value::Undefined);
-          if !matches!(
-            props,
-            Value::Object(_)
-              | Value::Array(..)
-              | Value::Closure { .. }
-              | Value::BuiltinObject(_, _)
-          ) {
+          if !props.is_object() {
             return Err(vm.throw_type_error("Object.defineProperties called on non-object"));
           }
           for key in vm.own_property_keys_value(&props)? {

@@ -9,21 +9,43 @@ use std::rc::Rc;
 
 impl Vm {
   pub(super) fn persist_root_bindings(&mut self) {
+    self.persist_root_bindings_with_filter(false);
+  }
+
+  pub(super) fn persist_root_var_bindings(&mut self) {
+    self.persist_root_bindings_with_filter(true);
+  }
+
+  fn persist_root_bindings_with_filter(
+    &mut self,
+    skip_lexical: bool,
+  ) {
     let Some(slots) = self.execution.active.slots.as_ref() else {
       return;
     };
     let names = slots.names.clone();
     let immutable = slots.immutable.clone();
     let locals = self.execution.active.locals.clone();
+    let lexical = self
+      .execution
+      .active
+      .chunk
+      .root_lexical_tdz
+      .clone();
     let mut global_env = self.realm_state.global_env.borrow_mut();
 
     for (index, name) in names.into_iter().enumerate() {
+      if skip_lexical && lexical.get(index).copied().unwrap_or(false) {
+        continue;
+      }
       let (Some(name), Some(cell)) = (name, locals.get(index)) else {
         continue;
       };
       let initialized = !matches!(*cell.borrow(), Value::Uninitialized);
       if immutable.get(index).copied().unwrap_or(false) {
         global_env.create_immutable_binding(name, Rc::clone(cell), initialized);
+      } else if lexical.get(index).copied().unwrap_or(false) {
+        global_env.create_mutable_lexical_binding(name, Rc::clone(cell), initialized);
       } else {
         global_env.create_mutable_binding(name, Rc::clone(cell), initialized);
       }
@@ -89,6 +111,14 @@ impl Vm {
             Rc::clone(&self.execution.active.locals[idx]),
             initialized,
           );
+        } else if slot_tdz.get(idx).copied().unwrap_or(false) {
+          root_env
+            .borrow_mut()
+            .create_mutable_lexical_binding(
+              name.clone(),
+              Rc::clone(&self.execution.active.locals[idx]),
+              initialized,
+            );
         } else {
           root_env.borrow_mut().create_mutable_binding(
             name.clone(),
@@ -96,7 +126,7 @@ impl Vm {
             initialized,
           );
         }
-        if initialized {
+        if initialized && self.current_module_specifier().is_none() {
           let value = self.execution.active.locals[idx].borrow().clone();
           self
             .realm_state

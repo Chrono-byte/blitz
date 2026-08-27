@@ -240,11 +240,22 @@ pub(super) fn array_species_create(
   length: usize,
 ) -> Result<Value, RuntimeError> {
   let default_constructor = vm.get_global("Array").unwrap_or(Value::Undefined);
-  let constructor = if is_array_value(vm, receiver)? {
+  let mut constructor = if is_array_value(vm, receiver)? {
     vm.get_property_host(receiver, &PropertyKey::String("constructor".into()))?
   } else {
     Value::Undefined
   };
+  if constructor.is_constructable()
+    && let Some(Value::Object(constructor_globals)) = Vm::function_realm_globals(&constructor)
+    && !Rc::ptr_eq(&constructor_globals, &vm.globals_rc())
+    && let Some((intrinsics, _)) = crate::runtime_utils::realm_kernel(&constructor_globals)
+    && intrinsics
+      .array_constructor
+      .as_ref()
+      .is_some_and(|intrinsic| strict_equal(intrinsic, &constructor))
+  {
+    constructor = Value::Undefined;
+  }
   let constructor = match constructor {
     Value::Undefined => default_constructor,
     value

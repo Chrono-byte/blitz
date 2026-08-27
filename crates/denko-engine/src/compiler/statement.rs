@@ -189,19 +189,19 @@ impl Compiler {
       let slot = if let Some(s) = self.resolve_local(&fname) {
         s
       } else {
-        self.add_local_with_mirror(fname.clone(), None, self.is_root)
+        self.add_local_with_mirror(fname.clone(), None, self.mirrors_root_bindings())
       };
 
       if slot == self.locals.len() - 1 {
         self.add_lexical_binding(&fname);
       }
 
-      if self.is_root {
+      if self.local_mirrors_global(slot) {
         self.emit(Op::Copy, LINE);
       }
       self.emit(Op::StoreLocal, LINE);
       self.emit_byte(self.slot_to_u8(slot)?, LINE);
-      if self.is_root {
+      if self.local_mirrors_global(slot) {
         self.emit_set_global_name(&fname);
       }
       let is_exported = self
@@ -336,7 +336,15 @@ impl Compiler {
           }
           other => {
             if let Some(expr) = other.as_expression() {
-              self.compile_expr_oast(expr)?;
+              if Self::is_anonymous_function_definition(expr) {
+                self.emit_get_builtin_name("setFunctionNameIfAnonymous");
+                self.compile_expr_oast(expr)?;
+                self.emit_constant(Value::String("default".into()), LINE);
+                self.emit(Op::Call, LINE);
+                self.emit_byte(2, LINE);
+              } else {
+                self.compile_expr_oast(expr)?;
+              }
             } else {
               return Err(crate::errors::CompilerError::from(
                 "unsupported export default declaration",
@@ -596,11 +604,11 @@ impl Compiler {
         }
         let cleanup_start = self.current_ip();
         if owns_completion_slot {
-          self.emit(Op::LoadLocal, LINE);
-          self.emit_byte(self.slot_to_u8(loop_completion_slot)?, LINE);
           if let Some(exit_jump) = exit_jump {
             self.patch_jump_to_target(exit_jump, cleanup_start);
           }
+          self.emit(Op::LoadLocal, LINE);
+          self.emit_byte(self.slot_to_u8(loop_completion_slot)?, LINE);
         } else if let Some(exit_jump) = exit_jump {
           self.patch_jump(exit_jump);
         }
@@ -708,6 +716,30 @@ impl Compiler {
         self.break_patches.push(Vec::new());
         let mut per_iteration_slots = Vec::new();
 
+        if let Some(OForInit::VariableDeclaration(v)) = &f.init
+          && matches!(
+            v.kind,
+            oxc_ast::ast::VariableDeclarationKind::Let
+              | oxc_ast::ast::VariableDeclarationKind::Const
+          )
+        {
+          let mut names = HashSet::new();
+          for declaration in &v.declarations {
+            Self::collect_binding_names(&declaration.id, &mut names);
+          }
+          let mut names: Vec<_> = names.into_iter().collect();
+          names.sort();
+          for name in names {
+            let slot = self.add_local_with_mirror(name.clone(), None, false);
+            self.mark_local_tdz(slot);
+            self.add_lexical_binding(&name);
+            if matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Const) {
+              self.mark_local_immutable(slot);
+            }
+          }
+          self.activate_current_scope_lexical_bindings();
+        }
+
         if let Some(init) = &f.init {
           match init {
             OForInit::VariableDeclaration(v) => {
@@ -721,17 +753,16 @@ impl Compiler {
                     unreachable!("simple for declarations were checked above");
                   };
                   let name = identifier.name.to_string();
-                  let mirror_global =
-                    self.is_root && matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var);
+                  let mirror_global = self.mirrors_root_bindings()
+                    && matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var);
                   let slot = if matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var) {
                     self
                       .resolve_local(&name)
                       .unwrap_or_else(|| self.add_var_local(name.clone(), None, mirror_global))
                   } else {
-                    let slot = self.add_local_with_mirror(name.clone(), None, false);
-                    self.mark_local_tdz(slot);
-                    self.add_lexical_binding(&name);
-                    slot
+                    self
+                      .resolve_local(&name)
+                      .expect("for-loop lexical binding was predeclared")
                   };
                   if matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Const) {
                     self.mark_local_immutable(slot);
@@ -881,6 +912,35 @@ impl Compiler {
           slot
         };
 
+        if let oast::ForStatementLeft::VariableDeclaration(v) = &f.left
+          && matches!(
+            v.kind,
+            oxc_ast::ast::VariableDeclarationKind::Let
+              | oxc_ast::ast::VariableDeclarationKind::Const
+          )
+        {
+          let Some(dec) = v.declarations.first() else {
+            return Err(crate::errors::CompilerError::from(
+              "unsupported empty for-of declaration",
+            ));
+          };
+          let mut names = HashSet::new();
+          self.add_var_names_from_binding(&dec.id, &mut names);
+          let mut names: Vec<_> = names.into_iter().collect();
+          names.sort();
+          for name in names {
+            let slot = self.add_local_with_mirror(name.clone(), None, false);
+            self.mark_local_tdz(slot);
+            self.add_lexical_binding(&name);
+            if matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Const) {
+              self.mark_local_immutable(slot);
+            }
+            self.emit(Op::ResetLocalCell, LINE);
+            self.emit_byte(self.slot_to_u8(slot)?, LINE);
+          }
+        }
+        self.activate_current_scope_lexical_bindings();
+
         // Acquire either the ordinary synchronous iterator record or the
         // async iterator record (including async-from-sync fallback).
         self.compile_expr_oast(&f.right)?;
@@ -901,29 +961,6 @@ impl Compiler {
         );
         self.emit(Op::StoreLocal, LINE);
         self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
-
-        if let oast::ForStatementLeft::VariableDeclaration(v) = &f.left
-          && matches!(
-            v.kind,
-            oxc_ast::ast::VariableDeclarationKind::Let
-              | oxc_ast::ast::VariableDeclarationKind::Const
-          )
-        {
-          let Some(dec) = v.declarations.first() else {
-            return Err(crate::errors::CompilerError::from(
-              "unsupported empty for-of declaration",
-            ));
-          };
-          let mut names = HashSet::new();
-          self.add_var_names_from_binding(&dec.id, &mut names);
-          let mut names: Vec<_> = names.into_iter().collect();
-          names.sort();
-          for name in names {
-            if self.resolve_local(&name).is_none() {
-              self.add_local_with_mirror(name.clone(), None, false);
-            }
-          }
-        }
 
         let thrown_slot = self.alloc_temp_local("forof_thrown");
         let iterator_close_active_slot = self.alloc_temp_local("forof_close_active");
@@ -1137,6 +1174,35 @@ impl Compiler {
           }
         }
 
+        if let OForLeft::VariableDeclaration(v) = &f.left
+          && matches!(
+            v.kind,
+            oxc_ast::ast::VariableDeclarationKind::Let
+              | oxc_ast::ast::VariableDeclarationKind::Const
+          )
+        {
+          let Some(dec) = v.declarations.first() else {
+            return Err(crate::errors::CompilerError::from(
+              "unsupported empty for-in declaration",
+            ));
+          };
+          let mut names = HashSet::new();
+          self.add_var_names_from_binding(&dec.id, &mut names);
+          let mut names: Vec<_> = names.into_iter().collect();
+          names.sort();
+          for name in names {
+            let slot = self.add_local_with_mirror(name.clone(), None, false);
+            self.mark_local_tdz(slot);
+            self.add_lexical_binding(&name);
+            if matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Const) {
+              self.mark_local_immutable(slot);
+            }
+            self.emit(Op::ResetLocalCell, LINE);
+            self.emit_byte(self.slot_to_u8(slot)?, LINE);
+          }
+        }
+        self.activate_current_scope_lexical_bindings();
+
         self.emit_get_builtin_name("forInKeys");
         self.compile_expr_oast(&f.right)?;
         self.emit(Op::Call, LINE);
@@ -1160,29 +1226,6 @@ impl Compiler {
         );
         self.emit(Op::StoreLocal, LINE);
         self.emit_byte(self.slot_to_u8(index_slot)?, LINE);
-
-        if let OForLeft::VariableDeclaration(v) = &f.left
-          && matches!(
-            v.kind,
-            oxc_ast::ast::VariableDeclarationKind::Let
-              | oxc_ast::ast::VariableDeclarationKind::Const
-          )
-        {
-          let Some(dec) = v.declarations.first() else {
-            return Err(crate::errors::CompilerError::from(
-              "unsupported empty for-in declaration",
-            ));
-          };
-          let mut names = HashSet::new();
-          self.add_var_names_from_binding(&dec.id, &mut names);
-          let mut names: Vec<_> = names.into_iter().collect();
-          names.sort();
-          for name in names {
-            if self.resolve_local(&name).is_none() {
-              self.add_local_with_mirror(name.clone(), None, false);
-            }
-          }
-        }
 
         let loop_start = self.current_ip();
 
@@ -1640,18 +1683,28 @@ impl Compiler {
               {
                 return Err(error);
               }
-              self.enter_block_scope_with_vars(&handler.body.body);
+              // The catch parameter and catch body have distinct declarative
+              // environments. A closure created by a parameter initializer
+              // must not capture lexical declarations from the body.
+              self.enter_block_scope();
               if !matches!(param.pattern, OPat::BindingIdentifier(_)) {
                 let mut binding_names = HashSet::new();
                 Self::collect_binding_names(&param.pattern, &mut binding_names);
                 let mut binding_names: Vec<_> = binding_names.into_iter().collect();
                 binding_names.sort();
                 for binding_name in binding_names {
-                  let slot = self.add_local_with_mirror(binding_name, None, false);
+                  let slot = self.add_local_with_mirror(binding_name.clone(), None, false);
                   self.mark_local_tdz(slot);
+                  self.add_lexical_binding(&binding_name);
                 }
               }
               let slot = self.add_local_with_mirror(name, None, false);
+              if !self.locals[slot].starts_with('\0') {
+                self.mark_local_tdz(slot);
+                let binding_name = self.locals[slot].clone();
+                self.add_lexical_binding(&binding_name);
+              }
+              self.activate_current_scope_lexical_bindings();
               self.emit(Op::StoreLocal, LINE);
               self.emit_byte(self.slot_to_u8(slot)?, LINE);
               if !matches!(param.pattern, OPat::BindingIdentifier(_)) {
@@ -1662,9 +1715,11 @@ impl Compiler {
                   oxc_ast::ast::VariableDeclarationKind::Let,
                 )?;
               }
+              self.enter_block_scope_with_vars(&handler.body.body);
               for stmt in &handler.body.body {
                 self.compile_statement_oast_with_mode(stmt, false, Some(try_completion_slot))?;
               }
+              self.exit_scope();
               self.exit_scope();
             } else {
               self.emit(Op::Discard, LINE);

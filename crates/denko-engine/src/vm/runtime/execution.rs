@@ -63,7 +63,9 @@ impl Vm {
       .verify()
       .map_err(|error| RuntimeError::from(format!("Invalid bytecode: {}", error)))?;
     let result = self.run_risc_root(Arc::new(chunk))?;
-    self.persist_root_bindings();
+    if self.current_module_specifier().is_none() {
+      self.persist_root_bindings();
+    }
     Ok(result)
   }
 
@@ -117,6 +119,12 @@ impl Vm {
       })
       .unwrap_or(Value::Undefined);
     self.initialize_root_bindings();
+    // Global declaration instantiation precedes script evaluation. Link the
+    // live root cells now so indirect eval observes lexical declarations from
+    // the currently running script, including their TDZ state.
+    if self.current_module_specifier().is_none() {
+      self.persist_root_bindings();
+    }
     gc::reset_allocation_pressure();
     self.begin_opcode_profile_run();
 
@@ -156,6 +164,7 @@ impl Vm {
   ) {
     while let Some(frame) = self.execution.call_stack.pop() {
       self.execution.active = frame.context;
+      self.leave_function_realm(frame.previous_realm);
     }
     self.execution.active.locals.clear();
     self.execution.active.closure_env = None;
@@ -218,7 +227,7 @@ impl Vm {
       *resume_register = caller_state.resume_register;
       return Ok(None);
     }
-    if self.execution.call_stack.is_empty() {
+    if self.execution.call_stack.is_empty() && self.execution.interpreter_depth == 1 {
       let temp_root_base = self.roots.temporary.len();
       self.roots.temporary.push(result.clone());
       self.roots.kept_alive.clear();
@@ -560,8 +569,43 @@ impl Vm {
               .and_then(|slots| slots.immutable.get(slot))
               .copied()
               .unwrap_or(false);
+            let has_object_environment = self
+              .execution
+              .active
+              .lexical_env
+              .borrow()
+              .has_object_environment();
+            let slot_name = (has_object_environment || was_uninitialized)
+              .then(|| {
+                self
+                  .execution
+                  .active
+                  .slots
+                  .as_ref()
+                  .and_then(|slots| slots.names.get(slot))
+                  .and_then(Clone::clone)
+                  .or_else(|| {
+                    self
+                      .execution
+                      .active
+                      .chunk
+                      .root_slot_names
+                      .get(slot)
+                      .and_then(Clone::clone)
+                  })
+              })
+              .flatten();
+            let wrote_with_environment =
+              if has_object_environment && let Some(name) = slot_name.as_ref() {
+                self.set_with_env_binding_value(name, registers[rd].clone())?
+              } else {
+                false
+              };
             let initializes = immutable && was_uninitialized;
-            if immutable && !initializes {
+            if wrote_with_environment {
+              // The resolved object-environment reference takes precedence
+              // over a same-named immutable binding in an outer environment.
+            } else if immutable && !initializes {
               let sloppy_silent = self
                 .execution
                 .active
@@ -574,58 +618,33 @@ impl Vm {
                 return Err(self.throw_type_error("Assignment to constant variable"));
               }
             } else {
-              let has_object_environment = self
-                .execution
-                .active
-                .lexical_env
-                .borrow()
-                .has_object_environment();
-              let slot_name = (has_object_environment || was_uninitialized)
-                .then(|| {
-                  self
-                    .execution
-                    .active
-                    .slots
-                    .as_ref()
-                    .and_then(|slots| slots.names.get(slot))
-                    .and_then(Clone::clone)
-                    .or_else(|| {
-                      self
-                        .execution
-                        .active
-                        .chunk
-                        .root_slot_names
-                        .get(slot)
-                        .and_then(Clone::clone)
-                    })
-                })
-                .flatten();
-              let wrote_with_environment =
-                if has_object_environment && let Some(name) = slot_name.as_ref() {
-                  self.set_with_env_binding_value(name, registers[rd].clone())?
-                } else {
-                  false
-                };
-              if !wrote_with_environment {
-                *self.execution.active.locals[slot].borrow_mut() = registers[rd].clone();
-                if was_uninitialized && let Some(name) = slot_name {
-                  let _ = self
-                    .execution
-                    .active
-                    .lexical_env
-                    .borrow_mut()
-                    .set_binding_initialized_in_chain(&name, true);
-                }
-                if let Some(arguments_object) = self.execution.active.arguments.object.clone()
-                  && slot < self.execution.active.arguments.mapped_count
+              *self.execution.active.locals[slot].borrow_mut() = registers[rd].clone();
+              if was_uninitialized {
+                let cell = Rc::clone(&self.execution.active.locals[slot]);
+                let _ = self
+                  .execution
+                  .active
+                  .lexical_env
+                  .borrow_mut()
+                  .set_binding_initialized_for_cell_in_chain(&cell, true);
+              }
+              if was_uninitialized && let Some(name) = slot_name {
+                let _ = self
+                  .execution
+                  .active
+                  .lexical_env
+                  .borrow_mut()
+                  .set_binding_initialized_in_chain(&name, true);
+              }
+              if let Some(arguments_object) = self.execution.active.arguments.object.clone()
+                && slot < self.execution.active.arguments.mapped_count
+              {
+                let key = PropertyKey::String(slot.to_string().into());
+                if let Some((PropertyDescriptor::Data { writable: true, .. }, _)) =
+                  self.lookup_property_descriptor(&arguments_object, &key, 0)?
                 {
-                  let key = PropertyKey::String(slot.to_string().into());
-                  if let Some((PropertyDescriptor::Data { writable: true, .. }, _)) =
-                    self.lookup_property_descriptor(&arguments_object, &key, 0)?
-                  {
-                    set_property(&arguments_object, &key, registers[rd].clone())?;
-                    self.bump_object_generation(&arguments_object);
-                  }
+                  set_property(&arguments_object, &key, registers[rd].clone())?;
+                  self.bump_object_generation(&arguments_object);
                 }
               }
             }
@@ -684,26 +703,31 @@ impl Vm {
                   spec.sloppy_immutable_silent,
                 )
               });
+            let environment = self
+              .execution
+              .active
+              .closure_env
+              .as_ref()
+              .ok_or("SetUpvalue without closure environment")?;
+            let cell = {
+              let environment = environment.borrow();
+              environment.get(index).cloned().ok_or_else(|| {
+                format!(
+                  "Bad upvalue index {index} (closure environment has {} entries)",
+                  environment.len()
+                )
+              })?
+            };
+            if matches!(*cell.borrow(), Value::Uninitialized) {
+              return Err(
+                self.throw_reference_error("Cannot access lexical binding before initialization"),
+              );
+            }
             if immutable {
               if self.is_strict_mode() || !sloppy_immutable_silent {
                 return Err(self.throw_type_error("Assignment to constant variable"));
               }
             } else {
-              let environment = self
-                .execution
-                .active
-                .closure_env
-                .as_ref()
-                .ok_or("SetUpvalue without closure environment")?;
-              let cell = {
-                let environment = environment.borrow();
-                environment.get(index).cloned().ok_or_else(|| {
-                  format!(
-                    "Bad upvalue index {index} (closure environment has {} entries)",
-                    environment.len()
-                  )
-                })?
-              };
               *cell.borrow_mut() = registers[rd].clone();
               if let Some(name) = mirror_global_name {
                 let current = cell.borrow().clone();
@@ -869,8 +893,8 @@ impl Vm {
             };
           }
           Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr | Op::Ushr => {
-            let left = self.to_primitive(&registers[rd], Some("number"))?;
-            let right = self.to_primitive(&registers[rs], Some("number"))?;
+            let left = self.to_numeric_value(&registers[rd])?;
+            let right = self.to_numeric_value(&registers[rs])?;
             registers[rd] = match (&left, &right) {
               (Value::BigInt(left), Value::BigInt(right)) => match op {
                 Op::BitAnd => Value::BigInt(left & right),
@@ -1188,7 +1212,7 @@ impl Vm {
               && !proto.is_async
             {
               if proto.is_class_constructor && self.construction.new_target.is_none() {
-                return Err(self.throw_class_constructor_call_error(proto));
+                return Err(self.throw_class_constructor_call_error_for(&callee, proto));
               }
               let call_args = self.prepare_call_args(args, proto)?;
               let receiver = if op == Op::CallBuiltin {
@@ -1255,7 +1279,7 @@ impl Vm {
               && !proto.is_async
             {
               if proto.is_class_constructor && self.construction.new_target.is_none() {
-                return Err(self.throw_class_constructor_call_error(proto));
+                return Err(self.throw_class_constructor_call_error_for(&callee, proto));
               }
               let call_args = self.prepare_call_args(args, proto)?;
               let this_arg = Self::closure_lexical_this(&callee).unwrap_or(Value::Undefined);
@@ -1421,6 +1445,37 @@ impl Vm {
                 true,
               )));
           }
+          Op::PushLexicalEnv => {
+            let name = match &registers[rd] {
+              Value::String(name) => name.to_string(),
+              _ => return Err(RuntimeError::from("lexical binding name must be a string")),
+            };
+            let slot = decode_risc_aux16(word) as usize;
+            let cell = self
+              .execution
+              .active
+              .locals
+              .get(slot)
+              .cloned()
+              .ok_or_else(|| RuntimeError::from("bad lexical environment local slot"))?;
+            let initialized = !matches!(*cell.borrow(), Value::Uninitialized);
+            let immutable = self
+              .execution
+              .active
+              .slots
+              .as_ref()
+              .and_then(|slots| slots.immutable.get(slot))
+              .copied()
+              .unwrap_or(false);
+            let mut environment =
+              EnvironmentRecord::new(Some(Rc::clone(&self.execution.active.lexical_env)));
+            if immutable {
+              environment.create_immutable_binding(name, cell, initialized);
+            } else {
+              environment.create_mutable_lexical_binding(name, cell, initialized);
+            }
+            self.execution.active.lexical_env = Rc::new(RefCell::new(environment));
+          }
           Op::PopEnv => {
             let outer = self.execution.active.lexical_env.borrow().outer();
             self.execution.active.lexical_env =
@@ -1532,7 +1587,68 @@ impl Vm {
     let saved_last_uncaught_exception = self.exceptions.last_uncaught.take();
     let saved_pending_exception = self.exceptions.pending.clone();
     let saved_pending_exception_frame_count = self.exceptions.pending_frame_count;
+    let saved_handlers = std::mem::take(&mut self.exceptions.handlers);
+    let saved_unwound_risc_state = self.exceptions.unwound_risc_state.take();
     let saved_direct_eval_outer = self.execution.direct_eval_outer.clone();
+    // A nested script has its own return boundary. Keep the caller frames
+    // available for direct-eval context such as new.target and super, but
+    // detach their suspended RISC continuations so the nested root Return
+    // cannot resume or pop the caller as though it were an ordinary callee.
+    let saved_frame_risc_states = self
+      .execution
+      .call_stack
+      .iter_mut()
+      .map(|frame| frame.risc_state.take())
+      .collect::<Vec<_>>();
+
+    // `saved_context` and the detached RISC continuations live in Rust locals
+    // while the nested script runs, so make their JavaScript values explicit
+    // GC roots for the duration of the run.
+    self.roots.temporary.extend(
+      saved_context
+        .locals
+        .iter()
+        .map(|cell| cell.borrow().clone()),
+    );
+    self
+      .roots
+      .temporary
+      .push(saved_context.this_value.clone());
+    if let Some(arguments) = &saved_context.arguments.object {
+      self.roots.temporary.push(arguments.clone());
+    }
+    if let Some(yield_star) = &saved_context.yield_star {
+      self
+        .roots
+        .temporary
+        .push(yield_star.iterator.clone());
+      self
+        .roots
+        .temporary
+        .push(yield_star.next_method.clone());
+    }
+    if let Some(env) = &saved_context.closure_env {
+      self.roots.temporary.extend(
+        env
+          .borrow()
+          .iter()
+          .map(|cell| cell.borrow().clone()),
+      );
+    }
+    saved_context
+      .lexical_env
+      .borrow()
+      .collect_binding_values(&mut self.roots.temporary);
+    for state in saved_frame_risc_states.iter().flatten() {
+      self
+        .roots
+        .temporary
+        .extend(state.registers.iter().cloned());
+      self
+        .roots
+        .temporary
+        .extend(state.spills.iter().cloned());
+    }
 
     if direct_eval {
       self.execution.direct_eval_outer =
@@ -1556,21 +1672,73 @@ impl Vm {
     if !direct_eval {
       self.execution.active.lexical_env = Rc::clone(&self.realm_state.global_env);
     }
-    self.roots.temporary.clear();
+    // Retain the caller's temporary roots while nested code runs. A nested
+    // evaluation may trigger GC in another realm; dropping these roots would
+    // allow live caller objects and its realm graph to be swept mid-call.
     self.execution.active.yield_star = None;
-    if self
+    if !direct_eval {
+      self.execution.active.locals.clear();
+      self.execution.active.slots = None;
+    }
+    if !self
       .execution
       .active
       .chunk
       .root_slot_names
       .is_empty()
     {
-      if !direct_eval {
-        self.execution.active.locals.clear();
-        self.execution.active.slots = None;
-      }
-    } else {
       self.initialize_root_bindings();
+    }
+    if direct_eval {
+      let names = self
+        .execution
+        .active
+        .chunk
+        .root_slot_names
+        .clone();
+      let lexical = self
+        .execution
+        .active
+        .chunk
+        .root_lexical_tdz
+        .clone();
+      for (index, maybe_name) in names.into_iter().enumerate() {
+        let Some(name) = maybe_name else {
+          continue;
+        };
+        if lexical.get(index).copied().unwrap_or(false) {
+          continue;
+        }
+        let Some(eval_cell) = self.execution.active.locals.get(index).cloned() else {
+          continue;
+        };
+        let target_cell = saved_context
+          .lexical_env
+          .borrow()
+          .own_binding_cell(&name)
+          .unwrap_or_else(|| Rc::clone(&eval_cell));
+        if !saved_context
+          .lexical_env
+          .borrow()
+          .has_binding(&name)
+        {
+          saved_context
+            .lexical_env
+            .borrow_mut()
+            .create_mutable_binding(name.clone(), Rc::clone(&target_cell), true);
+        }
+        if !Rc::ptr_eq(&target_cell, &eval_cell) {
+          let initial_value = eval_cell.borrow().clone();
+          *target_cell.borrow_mut() = initial_value;
+        }
+        self.execution.active.locals[index] = Rc::clone(&target_cell);
+        self
+          .execution
+          .active
+          .lexical_env
+          .borrow_mut()
+          .create_mutable_binding(name, target_cell, true);
+      }
     }
     if !direct_eval {
       self.execution.active.this_value = self
@@ -1591,7 +1759,7 @@ impl Vm {
     let nested_thrown = self.exceptions.last_uncaught.take();
 
     if !direct_eval {
-      self.persist_root_bindings();
+      self.persist_root_var_bindings();
     }
 
     self.execution.active = saved_context;
@@ -1602,7 +1770,17 @@ impl Vm {
     self.exceptions.last_uncaught = saved_last_uncaught_exception;
     self.exceptions.pending = saved_pending_exception;
     self.exceptions.pending_frame_count = saved_pending_exception_frame_count;
+    self.exceptions.handlers = saved_handlers;
+    self.exceptions.unwound_risc_state = saved_unwound_risc_state;
     self.execution.direct_eval_outer = saved_direct_eval_outer;
+    for (frame, risc_state) in self
+      .execution
+      .call_stack
+      .iter_mut()
+      .zip(saved_frame_risc_states)
+    {
+      frame.risc_state = risc_state;
+    }
 
     result.map_err(|error| NestedRunFailure {
       error,
@@ -1610,15 +1788,60 @@ impl Vm {
     })
   }
 
+  /// Execute a script in the supplied realm without creating a second VM.
+  ///
+  /// Test262's realm host hook can be invoked while another realm is active.
+  /// Keeping the nested execution in this VM preserves the complete root set
+  /// for the shared prototype collector.
+  pub(crate) fn run_nested_in_realm(
+    &mut self,
+    chunk: Chunk,
+    globals: Rc<RefCell<ObjectData>>,
+  ) -> Result<Value, NestedRunFailure> {
+    if Rc::ptr_eq(&globals, &self.realm_state.globals) {
+      return self.run_nested(chunk, false);
+    }
+
+    let Some((intrinsics, global_env)) = crate::runtime_utils::realm_kernel(&globals) else {
+      return Err(NestedRunFailure {
+        error: RuntimeError::from("Realm kernel is not initialized"),
+        thrown: None,
+      });
+    };
+    let temp_root_base = self.roots.temporary.len();
+    self
+      .roots
+      .temporary
+      .push(Value::Object(Rc::clone(&self.realm_state.globals)));
+    let previous_realm = std::mem::replace(
+      &mut self.realm_state,
+      RealmState {
+        realm: crate::realm::Realm {
+          intrinsics: Rc::new(intrinsics),
+          global_object: Rc::clone(&globals),
+        },
+        globals,
+        global_env,
+      },
+    );
+    let result = self.run_nested(chunk, false);
+    self.realm_state = previous_realm;
+    self.roots.temporary.truncate(temp_root_base);
+    result
+  }
+
   // -----------------------------------------------------------------------
   // Opcode helpers (called from the main loop)
   // -----------------------------------------------------------------------
 
   pub(super) fn make_iterator_result(
+    &self,
     value: Value,
     done: bool,
   ) -> Value {
-    let obj = gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
+    let obj = gc::track_object(Rc::new(RefCell::new(ObjectData::with_prototype(
+      self.realm_state.realm.object_prototype(),
+    ))));
     obj.borrow_mut().properties.insert(
       PropertyKey::String("value".to_string().into()),
       PropertyDescriptor::ordinary_data(value),
@@ -1648,6 +1871,7 @@ impl Vm {
     // TypeScript return annotations are erased at runtime.
 
     self.execution.active = frame.context;
+    self.leave_function_realm(frame.previous_realm);
     self.prune_stale_handlers();
 
     Ok(result)

@@ -24,6 +24,91 @@ use oxc_ast::ast as oast;
 
 const LINE: u32 = 1;
 
+fn string_literal_value(source: &str) -> Option<js_string::JsString> {
+  let bytes = source.as_bytes();
+  if bytes.len() < 2 || !matches!(bytes[0], b'\'' | b'"') || bytes[bytes.len() - 1] != bytes[0] {
+    return None;
+  }
+
+  let content = &source[1..source.len() - 1];
+  let bytes = content.as_bytes();
+  let mut units = Vec::with_capacity(content.len());
+  let mut cursor = 0;
+  while cursor < bytes.len() {
+    if bytes[cursor] != b'\\' {
+      let character = content[cursor..].chars().next()?;
+      let mut encoded = [0; 2];
+      units.extend_from_slice(character.encode_utf16(&mut encoded));
+      cursor += character.len_utf8();
+      continue;
+    }
+
+    cursor += 1;
+    let escape = *bytes.get(cursor)?;
+    cursor += 1;
+    match escape {
+      b'b' => units.push(0x0008),
+      b'f' => units.push(0x000C),
+      b'n' => units.push(0x000A),
+      b'r' => units.push(0x000D),
+      b't' => units.push(0x0009),
+      b'v' => units.push(0x000B),
+      b'\n' => {}
+      b'\r' => {
+        if bytes.get(cursor) == Some(&b'\n') {
+          cursor += 1;
+        }
+      }
+      b'x' => {
+        let end = cursor.checked_add(2)?;
+        let value =
+          u16::from_str_radix(std::str::from_utf8(bytes.get(cursor..end)?).ok()?, 16).ok()?;
+        units.push(value);
+        cursor = end;
+      }
+      b'u' if bytes.get(cursor) == Some(&b'{') => {
+        cursor += 1;
+        let end = bytes[cursor..]
+          .iter()
+          .position(|byte| *byte == b'}')?
+          + cursor;
+        let value = u32::from_str_radix(std::str::from_utf8(&bytes[cursor..end]).ok()?, 16).ok()?;
+        let character = char::from_u32(value)?;
+        let mut encoded = [0; 2];
+        units.extend_from_slice(character.encode_utf16(&mut encoded));
+        cursor = end + 1;
+      }
+      b'u' => {
+        let end = cursor.checked_add(4)?;
+        let value =
+          u16::from_str_radix(std::str::from_utf8(bytes.get(cursor..end)?).ok()?, 16).ok()?;
+        units.push(value);
+        cursor = end;
+      }
+      first @ b'0'..=b'7' => {
+        let maximum = if first <= b'3' { 3 } else { 2 };
+        let mut value = u16::from(first - b'0');
+        let mut digits = 1;
+        while digits < maximum
+          && let Some(next @ b'0'..=b'7') = bytes.get(cursor).copied()
+        {
+          value = value * 8 + u16::from(next - b'0');
+          cursor += 1;
+          digits += 1;
+        }
+        units.push(value);
+      }
+      _ => {
+        let character = content[cursor - 1..].chars().next()?;
+        let mut encoded = [0; 2];
+        units.extend_from_slice(character.encode_utf16(&mut encoded));
+        cursor += character.len_utf8() - 1;
+      }
+    }
+  }
+  Some(js_string::JsString::from_utf16(units))
+}
+
 impl super::Compiler {
   /// Compile an expression from the AST into bytecode.
   ///
@@ -119,7 +204,10 @@ impl super::Compiler {
       }
       OExpr::StringLiteral(s) => {
         self.validate_literal_early_errors(expr)?;
-        self.emit_constant(Value::String(s.value.to_string().into()), LINE)
+        let source = &self.source_text[s.span.start as usize..s.span.end as usize];
+        let value = string_literal_value(source)
+          .unwrap_or_else(|| js_string::JsString::new(s.value.as_str()));
+        self.emit_constant(Value::String(value), LINE)
       }
       OExpr::TemplateLiteral(t) => {
         let first = t
@@ -227,6 +315,27 @@ impl super::Compiler {
             oast::ObjectPropertyKind::ObjectProperty(p)
               if matches!(p.kind, oast::PropertyKind::Init) =>
             {
+              let is_proto_setter = !p.computed
+                && !p.method
+                && match &p.key {
+                  oast::PropertyKey::StaticIdentifier(identifier) => identifier.name == "__proto__",
+                  oast::PropertyKey::Identifier(identifier) => identifier.name == "__proto__",
+                  oast::PropertyKey::StringLiteral(literal) => literal.value == "__proto__",
+                  _ => false,
+                };
+              if is_proto_setter {
+                self.emit_get_builtin_name("objectSetPrototypeOf");
+                self.emit(Op::LoadLocal, LINE);
+                self.emit_byte(self.slot_to_u8(home_object_slot)?, LINE);
+                self.compile_expr_oast(&p.value)?;
+                self.emit(Op::Call, LINE);
+                self.emit_byte(2, LINE);
+                self.emit(Op::Discard, LINE);
+                continue;
+              }
+              let assign_function_name = Self::is_anonymous_function_definition(&p.value);
+              let property_key_slot =
+                assign_function_name.then(|| self.alloc_temp_local("object_literal_property_key"));
               self.emit(Op::Copy, LINE);
               self.emit_get_builtin_name("objectDefineProperty");
               self.emit(Op::Exchange, LINE);
@@ -236,7 +345,10 @@ impl super::Compiler {
                   .key
                   .as_expression()
                   .expect("computed property key must be an expression");
+                self.emit_get_builtin_name("toPropertyKey");
                 self.compile_expr_oast(key)?;
+                self.emit(Op::Call, LINE);
+                self.emit_byte(1, LINE);
               } else {
                 let key = match &p.key {
                   oast::PropertyKey::StaticIdentifier(ident) => ident.name.to_string(),
@@ -246,6 +358,12 @@ impl super::Compiler {
                   _ => return Err(crate::errors::CompilerError::from("unsupported object key")),
                 };
                 self.emit_constant(Value::String(key.into()), LINE);
+              }
+              if let Some(key_slot) = property_key_slot {
+                self.emit(Op::StoreLocal, LINE);
+                self.emit_byte(self.slot_to_u8(key_slot)?, LINE);
+                self.emit(Op::LoadLocal, LINE);
+                self.emit_byte(self.slot_to_u8(key_slot)?, LINE);
               }
 
               self.emit_constant(Value::String("value".to_string().into()), LINE);
@@ -275,14 +393,28 @@ impl super::Compiler {
                     _ => "<method>".to_string(),
                   }
                 };
-                let (proto, _env_len) =
+                let (mut proto, _env_len) =
                   self.compile_function(&method_name, None, function, None, true)?;
+                proto.has_prototype_property = proto.is_generator;
+                proto.is_constructor = false;
                 let index = self.chunk.add_function(proto);
                 self.emit(Op::MakeClosure, LINE);
                 self.emit_byte(self.function_index_to_u8(index)?, LINE);
                 self.emit_set_method_home_object(home_object_slot)?;
               } else {
                 self.compile_expr_oast(&p.value)?;
+              }
+              if let Some(key_slot) = property_key_slot {
+                let value_slot = self.alloc_temp_local("object_literal_property_value");
+                self.emit(Op::StoreLocal, LINE);
+                self.emit_byte(self.slot_to_u8(value_slot)?, LINE);
+                self.emit_get_builtin_name("setFunctionNameIfAnonymous");
+                self.emit(Op::LoadLocal, LINE);
+                self.emit_byte(self.slot_to_u8(value_slot)?, LINE);
+                self.emit(Op::LoadLocal, LINE);
+                self.emit_byte(self.slot_to_u8(key_slot)?, LINE);
+                self.emit(Op::Call, LINE);
+                self.emit_byte(2, LINE);
               }
               self.emit_constant(Value::String("writable".to_string().into()), LINE);
               self.emit(Op::True, LINE);
@@ -329,8 +461,16 @@ impl super::Compiler {
                   .key
                   .as_expression()
                   .expect("computed accessor key must be an expression");
+                self.emit_get_builtin_name("toPropertyKey");
                 self.compile_expr_oast(key)?;
+                self.emit(Op::Call, LINE);
+                self.emit_byte(1, LINE);
               }
+              let property_key_slot = self.alloc_temp_local("object_literal_accessor_key");
+              self.emit(Op::StoreLocal, LINE);
+              self.emit_byte(self.slot_to_u8(property_key_slot)?, LINE);
+              self.emit(Op::LoadLocal, LINE);
+              self.emit_byte(self.slot_to_u8(property_key_slot)?, LINE);
 
               let descriptor_prop_name = match p.kind {
                 oast::PropertyKind::Get => "get",
@@ -343,10 +483,14 @@ impl super::Compiler {
                   Value::String(key) => Some(key.to_string_lossy()),
                   _ => None,
                 })
-                .unwrap_or_else(|| "<accessor>".to_string());
+                .map(|name| format!("{descriptor_prop_name} {name}"))
+                .unwrap_or_else(|| "<method>".to_string());
               self.emit_constant(Value::String(descriptor_prop_name.to_string().into()), LINE);
               if let oast::Expression::FunctionExpression(f) = &p.value {
-                let (proto, _env_len) = self.compile_function(&method_name, None, f, None, true)?;
+                let (mut proto, _env_len) =
+                  self.compile_function(&method_name, None, f, None, true)?;
+                proto.has_prototype_property = proto.is_generator;
+                proto.is_constructor = false;
                 let idx = self.chunk.add_function(proto);
                 self.emit(Op::MakeClosure, LINE);
                 self.emit_byte(self.function_index_to_u8(idx)?, LINE);
@@ -354,6 +498,17 @@ impl super::Compiler {
               } else {
                 self.compile_expr_oast(&p.value)?;
               }
+              let value_slot = self.alloc_temp_local("object_literal_accessor_value");
+              self.emit(Op::StoreLocal, LINE);
+              self.emit_byte(self.slot_to_u8(value_slot)?, LINE);
+              self.emit_get_builtin_name("setFunctionNameIfAnonymous");
+              self.emit(Op::LoadLocal, LINE);
+              self.emit_byte(self.slot_to_u8(value_slot)?, LINE);
+              self.emit(Op::LoadLocal, LINE);
+              self.emit_byte(self.slot_to_u8(property_key_slot)?, LINE);
+              self.emit_constant(Value::String(descriptor_prop_name.into()), LINE);
+              self.emit(Op::Call, LINE);
+              self.emit_byte(3, LINE);
               self.emit_constant(Value::String("enumerable".to_string().into()), LINE);
               self.emit(Op::True, LINE);
               self.emit_constant(Value::String("configurable".to_string().into()), LINE);
@@ -435,6 +590,10 @@ impl super::Compiler {
       }
       OExpr::Identifier(id) => {
         let name = id.name.as_str();
+        if name == crate::parser::EVAL_NEW_TARGET_SENTINEL {
+          self.emit(Op::GetNewTarget, LINE);
+          return Ok(());
+        }
         if let Some(error) = Self::strict_identifier_reference_error(self.strict_context, name) {
           return Err(error);
         }
@@ -474,25 +633,48 @@ impl super::Compiler {
                 .as_ref()
                 .is_some_and(|c| c.imports.contains_key(name));
               if is_imported {
-                return Err(Self::imported_binding_assignment_error());
+                self.compile_expr_oast(&a.right)?;
+                self.emit(Op::Discard, LINE);
+                self.emit_get_builtin_name("throwTypeError");
+                self.emit(Op::Call, LINE);
+                self.emit_byte(0, LINE);
+                return Ok(());
               }
+              let with_reference = (self.with_depth > 0 || self.may_capture_with)
+                .then(|| self.emit_resolve_with_identifier(name))
+                .transpose()?;
               self.compile_expr_oast(&a.right)?;
-              self.emit(Op::Copy, LINE);
-              if let Some(slot) = self.resolve_local(name) {
+              if Self::is_anonymous_function_definition(&a.right) {
+                let value_slot = self.alloc_temp_local("assignment_function_name");
                 self.emit(Op::StoreLocal, LINE);
-                self.emit_byte(self.slot_to_u8(slot)?, LINE);
-                if self.local_mirrors_global(slot) {
-                  self.emit(Op::LoadLocal, LINE);
+                self.emit_byte(self.slot_to_u8(value_slot)?, LINE);
+                self.emit_get_builtin_name("setFunctionNameIfAnonymous");
+                self.emit(Op::LoadLocal, LINE);
+                self.emit_byte(self.slot_to_u8(value_slot)?, LINE);
+                self.emit_constant(Value::String(name.into()), LINE);
+                self.emit(Op::Call, LINE);
+                self.emit_byte(2, LINE);
+              }
+              if let Some(reference_slot) = with_reference {
+                self.emit_set_resolved_identifier(reference_slot, name)?;
+              } else {
+                self.emit(Op::Copy, LINE);
+                if let Some(slot) = self.resolve_local(name) {
+                  self.emit(Op::StoreLocal, LINE);
                   self.emit_byte(self.slot_to_u8(slot)?, LINE);
+                  if self.local_mirrors_global(slot) {
+                    self.emit(Op::LoadLocal, LINE);
+                    self.emit_byte(self.slot_to_u8(slot)?, LINE);
+                    self.emit_set_global_name(name);
+                  }
+                  self.emit_sync_local_module_export(name, slot)?;
+                } else if let Some(upvalue) = self.resolve_upvalue(name) {
+                  self.emit(Op::SetUpvalue, LINE);
+                  self.emit_byte(upvalue, LINE);
+                  self.emit_sync_upvalue_module_export(upvalue)?;
+                } else {
                   self.emit_set_global_name(name);
                 }
-                self.emit_sync_local_module_export(name, slot)?;
-              } else if let Some(upvalue) = self.resolve_upvalue(name) {
-                self.emit(Op::SetUpvalue, LINE);
-                self.emit_byte(upvalue, LINE);
-                self.emit_sync_upvalue_module_export(upvalue)?;
-              } else {
-                self.emit_set_global_name(name);
               }
             }
             oast::SimpleAssignmentTarget::StaticMemberExpression(m) => {
@@ -552,7 +734,14 @@ impl super::Compiler {
               if is_imported {
                 return Err(Self::imported_binding_assignment_error());
               }
-              self.emit_get_binding(name);
+              let with_reference = (self.with_depth > 0 || self.may_capture_with)
+                .then(|| self.emit_resolve_with_identifier(name))
+                .transpose()?;
+              if let Some(reference) = with_reference {
+                self.emit_get_resolved_identifier(reference, name)?;
+              } else {
+                self.emit_get_binding(name);
+              }
               self.compile_expr_oast(&a.right)?;
               match a.operator {
                 oast::AssignmentOperator::Addition => self.emit(Op::Add, LINE),
@@ -570,7 +759,12 @@ impl super::Compiler {
                 _ => {}
               }
               self.emit(Op::Copy, LINE);
-              self.store_assignment_identifier(name)?;
+              if let Some(reference) = with_reference {
+                self.emit_set_resolved_identifier(reference, name)?;
+                self.emit(Op::Discard, LINE);
+              } else {
+                self.store_assignment_identifier(name)?;
+              }
             }
             oast::SimpleAssignmentTarget::StaticMemberExpression(m) => {
               if matches!(&m.object, OExpr::Super(_)) {
@@ -1011,7 +1205,14 @@ impl super::Compiler {
         match &u.argument {
           OTarget::AssignmentTargetIdentifier(id) => {
             let name = id.name.as_str();
-            self.emit_get_binding(name);
+            let with_reference = (self.with_depth > 0 || self.may_capture_with)
+              .then(|| self.emit_resolve_with_identifier(name))
+              .transpose()?;
+            if let Some(reference) = with_reference {
+              self.emit_get_resolved_identifier(reference, name)?;
+            } else {
+              self.emit_get_binding(name);
+            }
             self.emit(Op::Neg, LINE);
             self.emit(Op::Neg, LINE);
             if !u.prefix {
@@ -1025,7 +1226,12 @@ impl super::Compiler {
             if u.prefix {
               self.emit(Op::Copy, LINE);
             }
-            self.store_assignment_identifier(name)?;
+            if let Some(reference) = with_reference {
+              self.emit_set_resolved_identifier(reference, name)?;
+              self.emit(Op::Discard, LINE);
+            } else {
+              self.store_assignment_identifier(name)?;
+            }
           }
           OTarget::StaticMemberExpression(m) => {
             let (object_slot, key_slot) = self.compile_static_member_reference(m)?;
@@ -1357,6 +1563,19 @@ impl super::Compiler {
         }
       }
       OExpr::CallExpression(c) => {
+        if !c.optional
+          && !c
+            .arguments
+            .iter()
+            .any(|argument| matches!(argument, oast::Argument::SpreadElement(_)))
+          && matches!(&c.callee, OExpr::Identifier(identifier) if identifier.name == "eval")
+        {
+          self.emit_get_builtin_name("callEvalIdentifier");
+          self.compile_expr_oast(&c.callee)?;
+          let arg_count = self.compile_call_arguments(&c.arguments)?;
+          self.emit_call_with_arg_count(Op::Call, arg_count + 1)?;
+          return Ok(());
+        }
         if self.compile_spread_call_tail(c)? {
           return Ok(());
         }

@@ -35,6 +35,7 @@ pub(crate) fn is_registered_symbol(id: &SymbolId) -> bool {
 pub(crate) struct TextAndSymbolIntrinsics {
   pub(crate) string_constructor: Value,
   pub(crate) string_prototype: Value,
+  pub(crate) string_iterator_prototype: Value,
   pub(crate) boolean_constructor: Value,
   pub(crate) boolean_prototype: Value,
   pub(crate) symbol_constructor: Value,
@@ -668,66 +669,111 @@ pub(crate) fn install_string_boolean_symbol_builtins(
     PKey::String("toString".to_string().into()),
     PropertyDescriptor::builtin_data(string_to_string),
   );
-  let string_iterator_function_proto = Rc::clone(function_proto_map);
-  let string_iterator_object_proto = Rc::clone(object_proto_map);
+  const ITERATED_STRING: &str = "[[IteratedString]]";
+  const STRING_ITERATOR_NEXT_INDEX: &str = "[[StringIteratorNextIndex]]";
+  let string_iterator_proto = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
+    Rc::clone(object_proto_map),
+  ))));
+  let string_iterator_next = builtin_object(
+    Rc::new(|vm, args| {
+      let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+      let Value::Object(iterator) = &receiver else {
+        return Err(
+          vm.throw_type_error("String Iterator.prototype.next called on incompatible receiver"),
+        );
+      };
+      let (iterated, index) = {
+        let iterator = iterator.borrow();
+        let Some(iterated) = iterator.internal_slot(ITERATED_STRING).cloned() else {
+          return Err(
+            vm.throw_type_error("String Iterator.prototype.next called on incompatible receiver"),
+          );
+        };
+        let index = iterator
+          .internal_slot(STRING_ITERATOR_NEXT_INDEX)
+          .and_then(|value| match value {
+            Value::Number(index) => index.trunc().to_usize(),
+            _ => None,
+          })
+          .unwrap_or(0);
+        (iterated, index)
+      };
+
+      let iterator_result = |value, done| {
+        let mut result = ObjectData::with_prototype(vm.realm().object_prototype());
+        result.properties.insert(
+          PKey::String("value".into()),
+          PropertyDescriptor::ordinary_data(value),
+        );
+        result.properties.insert(
+          PKey::String("done".into()),
+          PropertyDescriptor::ordinary_data(Value::Bool(done)),
+        );
+        Value::Object(Rc::new(RefCell::new(result)))
+      };
+
+      let Value::String(string) = iterated else {
+        return Ok(iterator_result(Value::Undefined, true));
+      };
+      let Some(point) = string.code_point_at(index, true) else {
+        iterator
+          .borrow_mut()
+          .set_internal_slot(ITERATED_STRING, Value::Undefined);
+        return Ok(iterator_result(Value::Undefined, true));
+      };
+      let next_index = index + point.width();
+      iterator.borrow_mut().set_internal_slot(
+        STRING_ITERATOR_NEXT_INDEX,
+        Value::Number(usize_to_f64(next_index)),
+      );
+      Ok(iterator_result(
+        Value::String(
+          string
+            .slice(index..next_index)
+            .expect("string iterator code point is within bounds"),
+        ),
+        false,
+      ))
+    }),
+    function_proto_map,
+  );
+  set_builtin_name(&string_iterator_next, "next");
+  set_builtin_length(&string_iterator_next, 0.0);
+  string_iterator_proto
+    .borrow_mut()
+    .properties
+    .insert(
+      PKey::String("next".into()),
+      PropertyDescriptor::builtin_data(string_iterator_next),
+    );
+  string_iterator_proto
+    .borrow_mut()
+    .properties
+    .insert(
+      PKey::Symbol(SymbolId::well_known_to_string_tag()),
+      PropertyDescriptor::Data {
+        value: Value::String("String Iterator".into()),
+        writable: false,
+        enumerable: false,
+        configurable: true,
+      },
+    );
+  let string_iterator_proto_for_instances = Rc::clone(&string_iterator_proto);
   let string_iterator = builtin_object(
     Rc::new(move |vm, args| {
       let undefined = Value::Undefined;
       let receiver = args.first().unwrap_or(&undefined);
       require_object_coercible(vm, receiver)?;
       let string = vm.to_string(receiver)?;
-      let mut characters = Vec::new();
-      let mut string_index = 0;
-      while let Some(point) = string.code_point_at(string_index, true) {
-        characters.push(
-          string
-            .slice(string_index..string_index + point.width())
-            .expect("code point width is within the string"),
-        );
-        string_index += point.width();
-      }
-      let position = Rc::new(RefCell::new(0usize));
       let iterator = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
-        Rc::clone(&string_iterator_object_proto),
+        Rc::clone(&string_iterator_proto_for_instances),
       ))));
-
-      let next_characters = characters;
-      let next_position = Rc::clone(&position);
-      let next = builtin_object(
-        Rc::new(move |_vm, _args| {
-          let mut index = next_position.borrow_mut();
-          let result = Rc::new(RefCell::new(ObjectData::new()));
-          let value = next_characters
-            .get(*index)
-            .cloned()
-            .map_or(Value::Undefined, Value::String);
-          let done = *index >= next_characters.len();
-          if !done {
-            *index += 1;
-          }
-          result.borrow_mut().properties.insert(
-            PKey::String("value".to_string().into()),
-            PropertyDescriptor::ordinary_data(value),
-          );
-          result.borrow_mut().properties.insert(
-            PKey::String("done".to_string().into()),
-            PropertyDescriptor::ordinary_data(Value::Bool(done)),
-          );
-          Ok(Value::Object(result))
-        }),
-        &string_iterator_function_proto,
-      );
-      iterator.borrow_mut().properties.insert(
-        PKey::String("next".to_string().into()),
-        PropertyDescriptor::builtin_data(next),
-      );
-      iterator.borrow_mut().properties.insert(
-        PKey::Symbol(SymbolId::well_known_iterator()),
-        PropertyDescriptor::builtin_data(builtin_object(
-          Rc::new(|_vm, args| Ok(args.first().cloned().unwrap_or(Value::Undefined))),
-          &string_iterator_function_proto,
-        )),
-      );
+      iterator
+        .borrow_mut()
+        .set_internal_slot(ITERATED_STRING, Value::String(string));
+      iterator
+        .borrow_mut()
+        .set_internal_slot(STRING_ITERATOR_NEXT_INDEX, Value::Number(0.0));
       Ok(Value::Object(iterator))
     }),
     function_proto_map,
@@ -1507,7 +1553,7 @@ pub(crate) fn install_string_boolean_symbol_builtins(
         let receiver = args.first().unwrap_or(&undefined);
         require_object_coercible(vm, receiver)?;
         let regexp = args.get(1).cloned().unwrap_or(Value::Undefined);
-        if !matches!(regexp, Value::Null | Value::Undefined) {
+        if regexp.is_object() {
           let method = vm.get_property_host(&regexp, &PKey::Symbol(symbol.clone()))?;
           if !matches!(method, Value::Null | Value::Undefined) {
             if !Vm::is_callable_value(&method) {
@@ -1516,12 +1562,13 @@ pub(crate) fn install_string_boolean_symbol_builtins(
             return vm.call_value_with_this(&method, &regexp, std::slice::from_ref(receiver));
           }
         }
+        let string = Value::String(vm.to_string(receiver)?);
         let constructor = vm
           .get_global("RegExp")
           .unwrap_or(Value::Undefined);
         let created = vm.call_value_with_this(&constructor, &Value::Undefined, &[regexp])?;
         let method = vm.get_property_host(&created, &PKey::Symbol(symbol.clone()))?;
-        vm.call_value_with_this(&method, &created, std::slice::from_ref(receiver))
+        vm.call_value_with_this(&method, &created, std::slice::from_ref(&string))
       }),
       function_proto_map,
     );
@@ -1542,7 +1589,7 @@ pub(crate) fn install_string_boolean_symbol_builtins(
       require_object_coercible(vm, receiver)?;
       let search = args.get(1).cloned().unwrap_or(Value::Undefined);
       let replacement = args.get(2).cloned().unwrap_or(Value::Undefined);
-      if !matches!(search, Value::Null | Value::Undefined) {
+      if search.is_object() {
         let replacer =
           vm.get_property_host(&search, &PKey::Symbol(SymbolId::well_known_replace()))?;
         if !matches!(replacer, Value::Undefined | Value::Null) {
@@ -1617,7 +1664,7 @@ pub(crate) fn install_string_boolean_symbol_builtins(
           );
         }
       }
-      if !matches!(search, Value::Null | Value::Undefined) {
+      if search.is_object() {
         let replacer =
           vm.get_property_host(&search, &PKey::Symbol(SymbolId::well_known_replace()))?;
         if !matches!(replacer, Value::Undefined | Value::Null) {
@@ -1709,7 +1756,7 @@ pub(crate) fn install_string_boolean_symbol_builtins(
           );
         }
       }
-      if !matches!(regexp, Value::Null | Value::Undefined) {
+      if regexp.is_object() {
         let matcher =
           vm.get_property_host(&regexp, &PKey::Symbol(SymbolId::well_known_match_all()))?;
         if !matches!(matcher, Value::Undefined | Value::Null) {
@@ -1747,7 +1794,7 @@ pub(crate) fn install_string_boolean_symbol_builtins(
       require_object_coercible(vm, receiver)?;
       let separator = args.get(1).unwrap_or(&Value::Undefined);
       let limit_arg = args.get(2).cloned().unwrap_or(Value::Undefined);
-      if !matches!(separator, Value::Null | Value::Undefined) {
+      if separator.is_object() {
         let splitter =
           vm.get_property_host(separator, &PKey::Symbol(SymbolId::well_known_split()))?;
         if !matches!(splitter, Value::Null | Value::Undefined) {
@@ -1895,6 +1942,7 @@ pub(crate) fn install_string_boolean_symbol_builtins(
   TextAndSymbolIntrinsics {
     string_constructor: string_ctor_val,
     string_prototype: Value::Object(string_proto_map),
+    string_iterator_prototype: Value::Object(string_iterator_proto),
     boolean_constructor: boolean_ctor_val,
     boolean_prototype: Value::Object(boolean_proto_map),
     symbol_constructor: symbol_ctor_val,

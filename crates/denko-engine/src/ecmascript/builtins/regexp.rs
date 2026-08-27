@@ -245,13 +245,17 @@ fn regexp_builtin_match(
   this: &Value,
   subject: js_string::JsString,
 ) -> Result<Value, RuntimeError> {
-  let global = vm.get_property_host(this, &PropertyKey::String("global".into()))?;
-  let global = vm.to_boolean(&global);
+  let flags = vm.get_property_host(this, &PropertyKey::String("flags".into()))?;
+  let flags = vm.to_string(&flags)?;
+  let global = flags
+    .code_units()
+    .any(|unit| unit == u16::from(b'g'));
+  let unicode = flags
+    .code_units()
+    .any(|unit| unit == u16::from(b'u') || unit == u16::from(b'v'));
   if !global {
     return regexp_exec(vm, this, &subject);
   }
-  let unicode = vm.get_property_host(this, &PropertyKey::String("unicode".into()))?;
-  let unicode = vm.to_boolean(&unicode);
   drop(vm.set_property_host(this, &Value::String("lastIndex".into()), Value::Number(0.0))?);
   let mut matches = Vec::new();
   loop {
@@ -289,7 +293,7 @@ fn regexp_builtin_search(
   if !crate::same_value(&previous_last_index, &Value::Number(0.0)) {
     drop(vm.set_property_host(this, &Value::String("lastIndex".into()), Value::Number(0.0))?);
   }
-  let result = regexp_exec(vm, this, &subject);
+  let result = regexp_exec(vm, this, &subject)?;
   let current_last_index = vm.get_property_host(this, &PropertyKey::String("lastIndex".into()))?;
   if !crate::same_value(&current_last_index, &previous_last_index) {
     drop(vm.set_property_host(
@@ -298,7 +302,6 @@ fn regexp_builtin_search(
       previous_last_index,
     )?);
   }
-  let result = result?;
   if matches!(result, Value::Null) {
     return Ok(Value::Number(-1.0));
   }
@@ -319,14 +322,14 @@ fn regexp_builtin_replace(
     end: usize,
   }
 
-  let global = vm.get_property_host(this, &PropertyKey::String("global".into()))?;
-  let global = vm.to_boolean(&global);
-  let unicode = if global {
-    let unicode = vm.get_property_host(this, &PropertyKey::String("unicode".into()))?;
-    vm.to_boolean(&unicode)
-  } else {
-    false
-  };
+  let flags = vm.get_property_host(this, &PropertyKey::String("flags".into()))?;
+  let flags = vm.to_string(&flags)?;
+  let global = flags
+    .code_units()
+    .any(|unit| unit == u16::from(b'g'));
+  let unicode = flags
+    .code_units()
+    .any(|unit| unit == u16::from(b'u') || unit == u16::from(b'v'));
   let functional_replace = Vm::is_callable_value(&replacement);
   let replacement_string = if functional_replace {
     None
@@ -492,7 +495,7 @@ fn regexp_builtin_split(
   vm: &mut Vm,
   this: &Value,
   subject: js_string::JsString,
-  limit: u32,
+  limit: Value,
 ) -> Result<Value, RuntimeError> {
   if !this.is_object() {
     return Err(vm.throw_type_error("RegExp.prototype[Symbol.split] requires an object"));
@@ -532,6 +535,11 @@ fn regexp_builtin_split(
     builder.finish()
   };
   let splitter = vm.construct_value(&constructor, &[this.clone(), Value::String(new_flags)])?;
+  let limit = if matches!(limit, Value::Undefined) {
+    u32::MAX
+  } else {
+    vm.to_uint32_value(&limit)?
+  };
 
   if limit == 0 {
     return Ok(array_from_values(Vec::new()));
@@ -646,6 +654,52 @@ fn regexp_test(
   }
 }
 
+fn regexp_compile(
+  vm: &mut Vm,
+  args: &[Value],
+) -> Result<Value, RuntimeError> {
+  let this = args.first().cloned().unwrap_or(Value::Undefined);
+  let Value::Object(object) = &this else {
+    return Err(vm.throw_type_error("RegExp.prototype.compile called on incompatible receiver"));
+  };
+  if object.borrow().regexp_matcher.is_none() {
+    return Err(vm.throw_type_error("RegExp object has no [[RegExpMatcher]]"));
+  }
+
+  let pattern = args.get(1).cloned().unwrap_or(Value::Undefined);
+  let flags = args.get(2).cloned().unwrap_or(Value::Undefined);
+  let (source, flags) = if let Value::Object(pattern_object) = &pattern
+    && let Some(matcher) = pattern_object.borrow().regexp_matcher.clone()
+  {
+    if !matches!(flags, Value::Undefined) {
+      return Err(vm.throw_type_error("flags must be undefined when compiling a RegExp"));
+    }
+    (matcher.source().clone(), matcher.flags().to_string())
+  } else {
+    let source = if matches!(pattern, Value::Undefined) {
+      js_string::JsString::empty()
+    } else {
+      vm.to_string(&pattern)?
+    };
+    let flags = if matches!(flags, Value::Undefined) {
+      String::new()
+    } else {
+      vm.to_string(&flags)?.to_string_lossy()
+    };
+    (source, flags)
+  };
+
+  let matcher = regex_js::Regex::from_js(&source, &flags)
+    .map_err(|error| syntax_error(vm, format!("Invalid regular expression: {error}")))?;
+  object.borrow_mut().regexp_matcher = Some(matcher);
+  drop(vm.set_property_host(
+    &this,
+    &Value::String("lastIndex".into()),
+    Value::Number(0.0),
+  )?);
+  Ok(this)
+}
+
 fn regexp_match(
   vm: &mut Vm,
   args: &[Value],
@@ -680,10 +734,7 @@ fn regexp_split(
 ) -> Result<Value, RuntimeError> {
   let this = args.first().cloned().unwrap_or(Value::Undefined);
   let subject = vm.to_string(args.get(1).unwrap_or(&Value::Undefined))?;
-  let limit = match args.get(2) {
-    None | Some(Value::Undefined) => u32::MAX,
-    Some(limit) => vm.to_uint32_value(limit)?,
-  };
+  let limit = args.get(2).cloned().unwrap_or(Value::Undefined);
   regexp_builtin_split(vm, &this, subject, limit)
 }
 
@@ -1073,6 +1124,7 @@ pub(crate) fn create_regexp_intrinsics(
   methods.method("toString", 0, regexp_to_string);
   methods.method("exec", 1, regexp_exec_method);
   methods.method("test", 1, regexp_test);
+  methods.method("compile", 2, regexp_compile);
   methods.named_method(
     PKey::Symbol(SymbolId::well_known_match()),
     "[Symbol.match]",

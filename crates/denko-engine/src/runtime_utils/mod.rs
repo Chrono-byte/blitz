@@ -95,6 +95,7 @@ pub(crate) fn set_builtin_name(
 
 /// The maximum array length as a floating-point value.
 const MAX_ARRAY_LENGTH_F: f64 = 4294967295.0_f64;
+const MAX_SAFE_INTEGER_F: f64 = 9007199254740991.0_f64;
 
 /// Clears the slot types in a chunk and its nested function chunks.
 pub fn clear_slot_types_in_chunk(chunk: bytecode::Chunk) -> bytecode::Chunk {
@@ -208,13 +209,13 @@ pub(crate) fn to_length(
   if num.is_nan() || num <= 0.0_f64 {
     return Ok(0);
   }
-  if !num.is_finite() {
-    return Err(vm.throw_range_error("Invalid array length"));
+  if num == f64::INFINITY {
+    return MAX_SAFE_INTEGER_F
+      .to_usize()
+      .ok_or_else(|| vm.throw_range_error("Invalid length"));
   }
   let int_len = num.trunc();
-  if int_len > MAX_ARRAY_LENGTH_F {
-    return Err(vm.throw_range_error("Invalid array length"));
-  }
+  let int_len = int_len.min(MAX_SAFE_INTEGER_F);
 
   int_len
     .to_usize()

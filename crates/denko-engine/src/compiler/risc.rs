@@ -877,6 +877,14 @@ impl RiscBuilder {
             line,
           );
         }
+        Op::PushLexicalEnv => {
+          let source = load_location(&mut lowered, plan.get(instruction.input(0)?)?, 0, line);
+          emit(
+            &mut lowered,
+            encode_risc_aux16(instruction.op, source, instruction.operand_u16()),
+            line,
+          );
+        }
         Op::Yield | Op::YieldStar | Op::AwaitPromise => {
           let destination = plan.get(instruction.output()?)?;
           let source = load_location(&mut lowered, plan.get(instruction.input(0)?)?, 0, line);
@@ -1104,6 +1112,7 @@ fn risc_executor_supports(op: Op) -> bool {
       | Op::GetAsyncIterator
       | Op::Return
       | Op::PushWithEnv
+      | Op::PushLexicalEnv
       | Op::PopEnv
       | Op::GeneratorInitDone
       | Op::Yield
@@ -1353,6 +1362,7 @@ fn operation_shape(
     | Op::SetGlobal
     | Op::SetUpvalue
     | Op::PushWithEnv
+    | Op::PushLexicalEnv
     | Op::SetModuleExport
     | Op::Throw => ValueShape::new(1, false),
 

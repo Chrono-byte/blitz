@@ -495,6 +495,9 @@ impl Vm {
     {
       return Ok(src.to_string());
     }
+    if matches!(value, Value::Proxy(_)) {
+      return Ok("function () { [native code] }".to_string());
+    }
     Ok(self.format_native_function_source(value))
   }
 
@@ -547,6 +550,19 @@ impl Vm {
         let prim = self.to_primitive(v, Some("number"))?;
         self.to_number_value(&prim)
       }
+    }
+  }
+
+  /// Apply ECMAScript `ToNumeric`, preserving BigInt values and converting
+  /// every other primitive to Number.
+  pub fn to_numeric_value(
+    &mut self,
+    value: &Value,
+  ) -> Result<Value, RuntimeError> {
+    let primitive = self.to_primitive(value, Some("number"))?;
+    match primitive {
+      Value::BigInt(_) => Ok(primitive),
+      _ => Ok(Value::Number(self.to_number_value(&primitive)?)),
     }
   }
 
@@ -747,6 +763,9 @@ impl Vm {
 
     if let (Value::String(left), Value::String(right)) = (&left, &right) {
       return Ok(Some(left.cmp(right).is_lt()));
+    }
+    if matches!(left, Value::Symbol(..)) || matches!(right, Value::Symbol(..)) {
+      return Err(self.throw_type_error("Cannot convert Symbol to number"));
     }
 
     Ok(

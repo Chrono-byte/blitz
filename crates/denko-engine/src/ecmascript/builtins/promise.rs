@@ -182,6 +182,198 @@ fn settled_result_object(
   Value::Object(Rc::new(RefCell::new(result)))
 }
 
+fn keyed_result_object(entries: &[(PropertyKey, Option<Value>)]) -> Value {
+  let mut result = ObjectData::with_prototype(Value::Null);
+  for (key, value) in entries {
+    result.properties.insert(
+      key.clone(),
+      PropertyDescriptor::ordinary_data(value.clone().unwrap_or(Value::Undefined)),
+    );
+  }
+  Value::Object(Rc::new(RefCell::new(result)))
+}
+
+fn perform_promise_all_keyed(
+  vm: &mut Vm,
+  args: &[Value],
+  function_prototype: &Rc<RefCell<ObjectData>>,
+  object_prototype: &Rc<RefCell<ObjectData>>,
+  settled: bool,
+) -> Result<Value, RuntimeError> {
+  let offset = static_builtin_arg_offset(vm, args, "Promise");
+  let promises = args
+    .get(offset)
+    .cloned()
+    .unwrap_or(Value::Undefined);
+  let constructor = vm.this_value();
+  let capability = new_promise_capability(vm, &constructor, function_prototype)?;
+
+  if !promises.is_object() {
+    let (error, thrown) = type_error_completion(vm, "Promise keyed argument is not an object");
+    return reject_capability(vm, &capability, abrupt_reason(&error, thrown));
+  }
+  let promise_resolve = match vm
+    .capture_completion(|vm| get_method(vm, &constructor, &PropertyKey::String("resolve".into())))
+  {
+    Ok(Some(resolve)) => resolve,
+    Ok(None) => {
+      let (error, thrown) =
+        type_error_completion(vm, "Promise constructor resolve is not callable");
+      return reject_capability(vm, &capability, abrupt_reason(&error, thrown));
+    }
+    Err((error, thrown)) => {
+      return reject_capability(vm, &capability, abrupt_reason(&error, thrown));
+    }
+  };
+  let keys = match vm.capture_completion(|vm| vm.own_property_keys_value(&promises)) {
+    Ok(keys) => keys,
+    Err((error, thrown)) => {
+      return reject_capability(vm, &capability, abrupt_reason(&error, thrown));
+    }
+  };
+  let entries: Rc<RefCell<Vec<(PropertyKey, Option<Value>)>>> = Rc::new(RefCell::new(Vec::new()));
+  let remaining = Rc::new(RefCell::new(1usize));
+
+  for key in keys {
+    let descriptor = match vm.capture_completion(|vm| vm.get_own_property_value(&promises, &key)) {
+      Ok(descriptor) => descriptor,
+      Err((error, thrown)) => {
+        return reject_capability(vm, &capability, abrupt_reason(&error, thrown));
+      }
+    };
+    let enumerable = descriptor.is_some_and(|descriptor| match descriptor {
+      PropertyDescriptor::Data { enumerable, .. }
+      | PropertyDescriptor::Accessor { enumerable, .. } => enumerable,
+    });
+    if !enumerable {
+      continue;
+    }
+    let value = match vm.capture_completion(|vm| vm.get_property_host(&promises, &key)) {
+      Ok(value) => value,
+      Err((error, thrown)) => {
+        return reject_capability(vm, &capability, abrupt_reason(&error, thrown));
+      }
+    };
+    let index = entries.borrow().len();
+    entries.borrow_mut().push((key, None));
+    *remaining.borrow_mut() += 1;
+    let next_promise = match vm
+      .capture_completion(|vm| vm.call_value_with_this(&promise_resolve, &constructor, &[value]))
+    {
+      Ok(promise) => promise,
+      Err((error, thrown)) => {
+        return reject_capability(vm, &capability, abrupt_reason(&error, thrown));
+      }
+    };
+    let then = match vm.capture_completion(|vm| {
+      vm.get_property_host(&next_promise, &PropertyKey::String("then".into()))
+    }) {
+      Ok(then) if Vm::is_callable_value(&then) => then,
+      Ok(_) => {
+        let (error, thrown) =
+          type_error_completion(vm, "Promise resolve result then is not callable");
+        return reject_capability(vm, &capability, abrupt_reason(&error, thrown));
+      }
+      Err((error, thrown)) => {
+        return reject_capability(vm, &capability, abrupt_reason(&error, thrown));
+      }
+    };
+
+    let already_called = Rc::new(RefCell::new(false));
+    let fulfilled_entries = Rc::clone(&entries);
+    let fulfilled_remaining = Rc::clone(&remaining);
+    let fulfilled_resolve = capability.resolve.clone();
+    let fulfilled_called = Rc::clone(&already_called);
+    let fulfilled_object_prototype = Rc::clone(object_prototype);
+    let on_fulfilled = builtin_object(
+      Rc::new(move |vm, args| {
+        if *fulfilled_called.borrow() {
+          return Ok(Value::Undefined);
+        }
+        *fulfilled_called.borrow_mut() = true;
+        let offset = usize::from(args.len() > 1);
+        let value = args
+          .get(offset)
+          .cloned()
+          .unwrap_or(Value::Undefined);
+        let value = if settled {
+          settled_result_object(&fulfilled_object_prototype, "fulfilled", "value", value)
+        } else {
+          value
+        };
+        fulfilled_entries.borrow_mut()[index].1 = Some(value);
+        let mut remaining = fulfilled_remaining.borrow_mut();
+        *remaining = remaining.saturating_sub(1);
+        if *remaining == 0 {
+          let result = keyed_result_object(&fulfilled_entries.borrow());
+          vm.call_value_with_this(&fulfilled_resolve, &Value::Undefined, &[result])?;
+        }
+        Ok(Value::Undefined)
+      }),
+      function_prototype,
+    );
+    set_builtin_length(&on_fulfilled, 1.0);
+    set_builtin_name(&on_fulfilled, "");
+
+    let on_rejected = if settled {
+      let rejected_entries = Rc::clone(&entries);
+      let rejected_remaining = Rc::clone(&remaining);
+      let rejected_resolve = capability.resolve.clone();
+      let rejected_object_prototype = Rc::clone(object_prototype);
+      let rejected_called = Rc::clone(&already_called);
+      let function = builtin_object(
+        Rc::new(move |vm, args| {
+          if *rejected_called.borrow() {
+            return Ok(Value::Undefined);
+          }
+          *rejected_called.borrow_mut() = true;
+          let offset = usize::from(args.len() > 1);
+          let reason = args
+            .get(offset)
+            .cloned()
+            .unwrap_or(Value::Undefined);
+          rejected_entries.borrow_mut()[index].1 = Some(settled_result_object(
+            &rejected_object_prototype,
+            "rejected",
+            "reason",
+            reason,
+          ));
+          let mut remaining = rejected_remaining.borrow_mut();
+          *remaining = remaining.saturating_sub(1);
+          if *remaining == 0 {
+            let result = keyed_result_object(&rejected_entries.borrow());
+            vm.call_value_with_this(&rejected_resolve, &Value::Undefined, &[result])?;
+          }
+          Ok(Value::Undefined)
+        }),
+        function_prototype,
+      );
+      set_builtin_length(&function, 1.0);
+      set_builtin_name(&function, "");
+      function
+    } else {
+      capability.reject.clone()
+    };
+    if let Err((error, thrown)) = vm.capture_completion(|vm| {
+      vm.call_value_with_this(&then, &next_promise, &[on_fulfilled, on_rejected])
+    }) {
+      return reject_capability(vm, &capability, abrupt_reason(&error, thrown));
+    }
+  }
+
+  let mut remaining = remaining.borrow_mut();
+  *remaining = remaining.saturating_sub(1);
+  if *remaining == 0 {
+    let result = keyed_result_object(&entries.borrow());
+    if let Err((error, thrown)) = vm.capture_completion(|vm| {
+      vm.call_value_with_this(&capability.resolve, &Value::Undefined, &[result])
+    }) {
+      return reject_capability(vm, &capability, abrupt_reason(&error, thrown));
+    }
+  }
+  Ok(capability.promise)
+}
+
 fn aggregate_error(
   vm: &mut Vm,
   errors: Vec<Option<Value>>,
@@ -223,6 +415,12 @@ pub(crate) fn create_promise_intrinsics(
       let new_target = vm
         .pending_constructor_new_target()
         .unwrap_or_else(|| vm.this_value());
+      let prototype = vm.get_property_host(&new_target, &PropertyKey::prototype())?;
+      let prototype = if prototype.is_object() {
+        prototype
+      } else {
+        vm.promise_prototype_value()
+      };
 
       let promise = crate::gc::track_promise(Rc::new(RefCell::new(PromiseState::Pending {
         on_fulfilled: Vec::new(),
@@ -295,12 +493,6 @@ pub(crate) fn create_promise_intrinsics(
         reject_pending_promise(vm, &promise, reason);
       }
 
-      let prototype = vm.get_property_host(&new_target, &PropertyKey::prototype())?;
-      let prototype = if prototype.is_object() {
-        prototype
-      } else {
-        vm.promise_prototype_value()
-      };
       Ok(vm.promise_value_with_prototype(promise, prototype))
     })
   };
@@ -309,6 +501,9 @@ pub(crate) fn create_promise_intrinsics(
     PKey::String("prototype".to_string().into()),
     PropertyDescriptor::builtin_prototype(Value::Object(Rc::clone(&promise_proto_map))),
   );
+  promise_ctor_map
+    .borrow_mut()
+    .set_internal_slot("[[DefersInstanceAllocation]]", Value::Bool(true));
   let promise_ctor_val = Value::BuiltinObject(promise_ctor_fn, Rc::clone(&promise_ctor_map));
   set_builtin_name(&promise_ctor_val, "Promise");
   set_builtin_length(&promise_ctor_val, 1.0);
@@ -516,13 +711,9 @@ pub(crate) fn create_promise_intrinsics(
         let undefined = Value::Undefined;
         let this = args.first().unwrap_or(&undefined);
         let on_rejected = args.get(1).cloned().unwrap_or(Value::Undefined);
-        if let Value::Promise(..) = this {
-          let then_method =
-            vm.get_property_host(this, &PropertyKey::String("then".to_string().into()))?;
-          vm.call_value_with_this(&then_method, this, &[Value::Undefined, on_rejected])
-        } else {
-          Err(vm.throw_type_error("Promise.prototype.catch called on non-promise"))
-        }
+        let then_method =
+          vm.get_property_host(this, &PropertyKey::String("then".to_string().into()))?;
+        vm.call_value_with_this(&then_method, this, &[Value::Undefined, on_rejected])
       }),
       function_proto_map,
     )),
@@ -1073,6 +1264,48 @@ pub(crate) fn create_promise_intrinsics(
   promise_ctor_map.borrow_mut().properties.insert(
     PKey::String("allSettled".to_string().into()),
     PropertyDescriptor::builtin_data(promise_all_settled),
+  );
+
+  let all_keyed_function_prototype = Rc::clone(function_proto_map);
+  let all_keyed_object_prototype = Rc::clone(object_proto_map);
+  let all_keyed = builtin_object(
+    Rc::new(move |vm, args| {
+      perform_promise_all_keyed(
+        vm,
+        args,
+        &all_keyed_function_prototype,
+        &all_keyed_object_prototype,
+        false,
+      )
+    }),
+    function_proto_map,
+  );
+  set_builtin_length(&all_keyed, 1.0);
+  set_builtin_name(&all_keyed, "allKeyed");
+  promise_ctor_map.borrow_mut().properties.insert(
+    PKey::String("allKeyed".into()),
+    PropertyDescriptor::builtin_data(all_keyed),
+  );
+
+  let all_settled_keyed_function_prototype = Rc::clone(function_proto_map);
+  let all_settled_keyed_object_prototype = Rc::clone(object_proto_map);
+  let all_settled_keyed = builtin_object(
+    Rc::new(move |vm, args| {
+      perform_promise_all_keyed(
+        vm,
+        args,
+        &all_settled_keyed_function_prototype,
+        &all_settled_keyed_object_prototype,
+        true,
+      )
+    }),
+    function_proto_map,
+  );
+  set_builtin_length(&all_settled_keyed, 1.0);
+  set_builtin_name(&all_settled_keyed, "allSettledKeyed");
+  promise_ctor_map.borrow_mut().properties.insert(
+    PKey::String("allSettledKeyed".into()),
+    PropertyDescriptor::builtin_data(all_settled_keyed),
   );
 
   let promise_any_function_proto = Rc::clone(function_proto_map);

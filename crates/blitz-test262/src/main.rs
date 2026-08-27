@@ -3047,7 +3047,7 @@ fn main() {
     }
   }
 
-  let files_to_run = if let Some(file_list) = &opts.file_list {
+  let candidate_files = if let Some(file_list) = &opts.file_list {
     match load_file_list(file_list) {
       Ok(files) => files,
       Err(msg) => {
@@ -3064,15 +3064,16 @@ fn main() {
       }
     }
   } else {
-    select_files_to_run(
-      files,
-      &opts.filters,
-      &opts.anti_filters,
-      &opts.anti_segments,
-      &opts.es_versions,
-      opts.limit,
-    )
+    files
   };
+  let files_to_run = select_files_to_run(
+    candidate_files,
+    &opts.filters,
+    &opts.anti_filters,
+    &opts.anti_segments,
+    &opts.es_versions,
+    opts.limit,
+  );
   if let Some(manifest) = &opts.write_manifest {
     if let Err(msg) = write_manifest(manifest, &test_root, &files_to_run) {
       eprintln!("{}", msg);

@@ -10,6 +10,7 @@ pub(crate) struct FoundationIntrinsics {
   pub object_constructor_properties: Rc<RefCell<ObjectData>>,
   pub generator_prototype: Rc<RefCell<ObjectData>>,
   pub generator_function_prototype: Rc<RefCell<ObjectData>>,
+  pub async_function_prototype: Rc<RefCell<ObjectData>>,
   pub throw_type_error: Value,
 }
 
@@ -36,6 +37,9 @@ pub(crate) fn create_foundation() -> FoundationIntrinsics {
   let generator_function_prototype = Rc::new(RefCell::new(ObjectData::with_prototype(
     Value::Object(Rc::clone(&function_prototype)),
   )));
+  let async_function_prototype = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
+    Rc::clone(&function_prototype),
+  ))));
   generator_prototype
     .borrow_mut()
     .properties
@@ -43,6 +47,18 @@ pub(crate) fn create_foundation() -> FoundationIntrinsics {
       PropertyKey::Symbol(crate::value::SymbolId::well_known_to_string_tag()),
       PropertyDescriptor::Data {
         value: Value::String("Generator".into()),
+        writable: false,
+        enumerable: false,
+        configurable: true,
+      },
+    );
+  async_function_prototype
+    .borrow_mut()
+    .properties
+    .insert(
+      PropertyKey::Symbol(crate::value::SymbolId::well_known_to_string_tag()),
+      PropertyDescriptor::Data {
+        value: Value::String("AsyncFunction".into()),
         writable: false,
         enumerable: false,
         configurable: true,
@@ -119,7 +135,12 @@ pub(crate) fn create_foundation() -> FoundationIntrinsics {
     .properties
     .insert(
       PropertyKey::prototype(),
-      PropertyDescriptor::builtin_prototype(Value::Object(Rc::clone(&generator_prototype))),
+      PropertyDescriptor::Data {
+        value: Value::Object(Rc::clone(&generator_prototype)),
+        writable: false,
+        enumerable: false,
+        configurable: true,
+      },
     );
   generator_prototype
     .borrow_mut()
@@ -138,6 +159,17 @@ pub(crate) fn create_foundation() -> FoundationIntrinsics {
     Rc::new(|vm, _args| Err(vm.throw_type_error("ThrowTypeError"))),
     &function_prototype,
   );
+  for name in ["caller", "arguments"] {
+    function_prototype.borrow_mut().properties.insert(
+      PropertyKey::String(name.into()),
+      PropertyDescriptor::Accessor {
+        get: Some(throw_type_error.clone()),
+        set: Some(throw_type_error.clone()),
+        enumerable: false,
+        configurable: false,
+      },
+    );
+  }
 
   let object_constructor_properties = Rc::new(RefCell::new(ObjectData::with_prototype(
     Value::Object(Rc::clone(&function_prototype)),
@@ -157,6 +189,7 @@ pub(crate) fn create_foundation() -> FoundationIntrinsics {
     object_constructor_properties,
     generator_prototype,
     generator_function_prototype,
+    async_function_prototype,
     throw_type_error,
   }
 }

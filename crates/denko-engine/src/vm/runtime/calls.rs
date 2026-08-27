@@ -7,7 +7,7 @@ use crate::gc;
 use crate::runtime_utils::{strict_equal, to_length, usize_to_decimal_string, usize_to_f64};
 use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, SharedValue, Value};
 use crate::vm::Vm;
-use crate::vm::state::{ArgumentsState, ExecutionContext, Frame, SlotMetadata};
+use crate::vm::state::{ArgumentsState, ExecutionContext, Frame, RealmState, SlotMetadata};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -16,18 +16,66 @@ mod arguments;
 mod generators;
 
 impl Vm {
-  fn function_realm_globals(constructor: &Value) -> Option<Value> {
+  pub(crate) fn function_realm_globals(constructor: &Value) -> Option<Value> {
     match constructor {
-      Value::Closure { props, .. } | Value::BuiltinObject(_, props) => props
+      Value::Closure { props, .. } => props
         .borrow()
-        .properties
-        .get(&PropertyKey::String("[[RealmGlobals]]".into()))
-        .and_then(|descriptor| match descriptor {
-          PropertyDescriptor::Data { value, .. } => Some(value.clone()),
-          PropertyDescriptor::Accessor { .. } => None,
-        }),
+        .internal_slot("[[RealmGlobals]]")
+        .cloned(),
+      Value::BuiltinObject(_, props) => {
+        let (bound_target, realm_globals) = {
+          let props = props.borrow();
+          (
+            props
+              .internal_slot("[[BoundTargetFunction]]")
+              .cloned(),
+            props.internal_slot("[[RealmGlobals]]").cloned(),
+          )
+        };
+        bound_target
+          .as_ref()
+          .and_then(Self::function_realm_globals)
+          .or(realm_globals)
+      }
       Value::Proxy(proxy) => Self::function_realm_globals(&proxy.borrow().target),
       _ => None,
+    }
+  }
+
+  fn enter_function_realm(
+    &mut self,
+    callee: &Value,
+  ) -> Option<RealmState> {
+    if matches!(callee, Value::Proxy(_)) {
+      return None;
+    }
+    let Value::Object(globals) = Self::function_realm_globals(callee)? else {
+      return None;
+    };
+    if Rc::ptr_eq(&globals, &self.realm_state.globals) {
+      return None;
+    }
+    let (intrinsics, global_env) = crate::runtime_utils::realm_kernel(&globals)?;
+    let realm = crate::realm::Realm {
+      intrinsics: Rc::new(intrinsics),
+      global_object: Rc::clone(&globals),
+    };
+    Some(std::mem::replace(
+      &mut self.realm_state,
+      RealmState {
+        realm,
+        globals,
+        global_env,
+      },
+    ))
+  }
+
+  pub(super) fn leave_function_realm(
+    &mut self,
+    previous: Option<RealmState>,
+  ) {
+    if let Some(previous) = previous {
+      self.realm_state = previous;
     }
   }
 
@@ -57,7 +105,7 @@ impl Vm {
     self.to_object_value(value)
   }
 
-  fn prototype_from_constructor(
+  pub(crate) fn prototype_from_constructor(
     &mut self,
     constructor: &Value,
     intrinsic: &str,
@@ -124,6 +172,17 @@ impl Vm {
     ))
   }
 
+  pub(super) fn throw_class_constructor_call_error_for(
+    &mut self,
+    callee: &Value,
+    proto: &FunctionProto,
+  ) -> RuntimeError {
+    let previous_realm = self.enter_function_realm(callee);
+    let error = self.throw_class_constructor_call_error(proto);
+    self.leave_function_realm(previous_realm);
+    error
+  }
+
   pub fn call_value_with_this(
     &mut self,
     callee: &Value,
@@ -162,6 +221,10 @@ impl Vm {
     args: &[Value],
   ) -> Result<Value, RuntimeError> {
     let temp_root_base = self.roots.temporary.len();
+    self
+      .roots
+      .temporary
+      .push(Value::Object(Rc::clone(&self.realm_state.globals)));
     self.roots.temporary.push(callee.clone());
     self.roots.temporary.extend(args.iter().cloned());
 
@@ -383,22 +446,25 @@ impl Vm {
             .new_target
             .clone()
             .unwrap_or_else(|| callee.clone());
-          let proto = match self.get_property_value(
-            &proto_source,
-            &PropertyKey::String("prototype".to_string().into()),
-          ) {
+          let intrinsic_name = props
+            .borrow()
+            .properties
+            .get(&PropertyKey::String("name".into()))
+            .and_then(|descriptor| match descriptor {
+              PropertyDescriptor::Data {
+                value: Value::String(name),
+                ..
+              } => Some(name.to_string_lossy()),
+              _ => None,
+            })
+            .unwrap_or_else(|| "Object".to_string());
+          let instance_proto = match self.prototype_from_constructor(&proto_source, &intrinsic_name)
+          {
             Ok(proto) => proto,
             Err(error) => {
               self.roots.temporary.truncate(temp_root_base);
               return Err(error);
             }
-          };
-          let instance_proto = match proto {
-            Value::Object(_)
-            | Value::Array(..)
-            | Value::Closure { .. }
-            | Value::BuiltinObject(_, _) => proto,
-            _ => Value::Null,
           };
           let instance_obj = gc::track_object(Rc::new(RefCell::new(ObjectData::with_prototype(
             instance_proto,
@@ -513,12 +579,9 @@ impl Vm {
       return Err(self.throw_reference_error("Super constructor may only be called once"));
     }
 
-    let super_constructor = self
-      .get_property_value(
-        &callee,
-        &PropertyKey::String("[[SuperConstructor]]".to_string().into()),
-      )
-      .unwrap_or_else(|_| self.get_prototype(&callee));
+    // GetSuperConstructor observes the constructor object's current
+    // [[Prototype]], including later Object.setPrototypeOf mutations.
+    let super_constructor = self.get_prototype(&callee);
     if matches!(super_constructor, Value::Null | Value::Undefined) {
       return Err(self.throw_type_error("Class extends value does not have a valid constructor"));
     }
@@ -552,6 +615,10 @@ impl Vm {
     match callee {
       Value::Builtin(f) | Value::BuiltinObject(f, _) => {
         let temp_root_base = self.roots.temporary.len();
+        self
+          .roots
+          .temporary
+          .push(Value::Object(Rc::clone(&self.realm_state.globals)));
         self.roots.temporary.push(callee.clone());
         self.roots.temporary.extend(args.iter().cloned());
 
@@ -561,7 +628,9 @@ impl Vm {
         let prev_closure_env = self.execution.active.closure_env.clone();
         let prev_slots = self.execution.active.slots.clone();
         let prev_lexical_env = Rc::clone(&self.execution.active.lexical_env);
+        let previous_realm = self.enter_function_realm(callee);
         let result = self.invoke_builtin(f, args);
+        self.leave_function_realm(previous_realm);
         self.execution.builtin_this_arg_prepended = prev_builtin_this;
         self.execution.active.this_value = prev_this;
         self.execution.active.closure_env = prev_closure_env;
@@ -602,10 +671,15 @@ impl Vm {
     args: &[Value],
   ) -> Result<Value, RuntimeError> {
     let temp_root_base = self.roots.temporary.len();
+    self
+      .roots
+      .temporary
+      .push(Value::Object(Rc::clone(&self.realm_state.globals)));
     self.roots.temporary.push(callee.clone());
     let this_arg_owned = this_arg.clone();
     self.roots.temporary.push(this_arg_owned.clone());
     self.roots.temporary.extend(args.iter().cloned());
+    let previous_realm = self.enter_function_realm(callee);
     let result = (|| -> Result<Value, RuntimeError> {
       match callee {
         Value::Proxy(proxy) => {
@@ -689,7 +763,9 @@ impl Vm {
           let prev_closure_env = self.execution.active.closure_env.clone();
           let prev_slots = self.execution.active.slots.clone();
           let prev_lexical_env = Rc::clone(&self.execution.active.lexical_env);
+          let previous_realm = self.enter_function_realm(callee);
           let result = self.invoke_builtin(f, &call_args);
+          self.leave_function_realm(previous_realm);
           self.execution.builtin_this_arg_prepended = prev_builtin_this;
           self.execution.active.this_value = prev_this;
           self.execution.active.closure_env = prev_closure_env;
@@ -775,6 +851,7 @@ impl Vm {
         }
       }
     })();
+    self.leave_function_realm(previous_realm);
     self.roots.temporary.truncate(temp_root_base);
     result
   }
@@ -857,11 +934,30 @@ impl Vm {
           .get(idx)
           .copied()
           .unwrap_or(false);
-        fn_env.borrow_mut().create_mutable_binding(
-          name.clone(),
-          Rc::clone(&self.execution.active.locals[idx]),
-          initialized,
-        );
+        let cell = Rc::clone(&self.execution.active.locals[idx]);
+        if proto
+          .slot_immutable
+          .get(idx)
+          .copied()
+          .unwrap_or(false)
+        {
+          fn_env
+            .borrow_mut()
+            .create_immutable_binding(name.clone(), cell, initialized);
+        } else if proto
+          .lexical_tdz
+          .get(idx)
+          .copied()
+          .unwrap_or(false)
+        {
+          fn_env
+            .borrow_mut()
+            .create_mutable_lexical_binding(name.clone(), cell, initialized);
+        } else {
+          fn_env
+            .borrow_mut()
+            .create_mutable_binding(name.clone(), cell, initialized);
+        }
       }
     }
     self.execution.active.lexical_env = fn_env;
@@ -916,9 +1012,17 @@ impl Vm {
           );
         }
         if proto.is_strict {
-          let poison = Value::Builtin(Rc::new(|vm, _args| {
-            Err(vm.throw_type_error("Access to strict arguments callee/caller is forbidden"))
-          }));
+          let poison = self
+            .realm_state
+            .realm
+            .intrinsics
+            .throw_type_error
+            .clone()
+            .unwrap_or_else(|| {
+              Value::Builtin(Rc::new(|vm, _args| {
+                Err(vm.throw_type_error("Access to strict arguments callee/caller is forbidden"))
+              }))
+            });
           props.borrow_mut().properties.insert(
             PropertyKey::String("callee".to_string().into()),
             PropertyDescriptor::Accessor {
@@ -973,6 +1077,7 @@ impl Vm {
     this_value: Value,
     callee: Value,
   ) -> Result<(), RuntimeError> {
+    let previous_realm = self.enter_function_realm(&callee);
     let new_target = self.construction.new_target.take();
     let lexical_env = Rc::clone(&self.execution.active.lexical_env);
     let caller_context = std::mem::replace(
@@ -999,6 +1104,7 @@ impl Vm {
       context: caller_context,
       risc_state: None,
       callee: callee.clone(),
+      previous_realm,
       // Arrow functions capture the surrounding [[NewTarget]], while an
       // ordinary nested call starts with no [[NewTarget]].
       new_target,

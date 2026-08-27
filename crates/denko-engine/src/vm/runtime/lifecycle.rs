@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use crate::bytecode::{Chunk, OP_COUNT, Op};
-use crate::environment::EnvironmentRecord;
 use crate::errors::RuntimeError;
 use crate::gc;
 use crate::module::ModuleLoader;
@@ -56,8 +55,9 @@ impl Vm {
   ) -> Self {
     let gc_registration = gc::VmGcRegistration::new();
     let intrinsics = crate::runtime_utils::install_minimal_kernel_constructors(&globals);
+    let (_, global_env) = crate::runtime_utils::realm_kernel(&globals)
+      .expect("realm kernel must exist after installing constructors");
     let realm = Realm::with_globals(Rc::clone(&globals));
-    let global_env = Rc::new(RefCell::new(EnvironmentRecord::new(None)));
     let mut vm = Self {
       realm_state: RealmState {
         realm,
@@ -462,10 +462,21 @@ impl Vm {
   ///
   /// `new.target` is valid inside any function-like execution context.
   /// `super` is valid only when the current frame has a home object.
-  pub(crate) fn current_eval_context_flags(&self) -> (bool, bool) {
+  pub(crate) fn current_eval_context_flags(&self) -> (bool, bool, bool) {
+    let has_home_object = self.current_method_home_object().is_some();
+    let allows_super_call = has_home_object
+      && self
+        .execution
+        .call_stack
+        .last()
+        .is_some_and(|frame| match &frame.callee {
+          Value::Closure { proto, .. } => proto.is_constructor,
+          _ => false,
+        });
     (
-      self.execution.active.closure_env.is_some(),
-      self.current_method_home_object().is_some(),
+      self.execution.active.chunk.allow_new_target,
+      has_home_object,
+      allows_super_call,
     )
   }
 

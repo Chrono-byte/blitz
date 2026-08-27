@@ -640,6 +640,25 @@ impl Vm {
       }
       return Ok(false);
     }
+    if is_byte_view(obj) && canonical_numeric_index_from_key(key).is_some() {
+      return Ok(
+        byte_view_index_from_key(key)
+          .and_then(|index| byte_view_index_value(obj, index))
+          .is_some(),
+      );
+    }
+    if let Value::Object(data) = obj
+      && let PropertyKey::String(name) = key
+      && data
+        .borrow()
+        .module_namespace_exports
+        .as_ref()
+        .is_some_and(|exports| exports.contains_key(name))
+    {
+      // [[HasProperty]] tests the namespace's export-name set. It must not
+      // read the live binding, which may still be uninitialized.
+      return Ok(true);
+    }
     if self.get_own_property_value(obj, key)?.is_some() {
       return Ok(true);
     }
@@ -1394,7 +1413,10 @@ fn set_object_prototype(
 ) -> bool {
   match value {
     Value::Object(data) => data.borrow_mut().set_prototype_value(prototype),
-    Value::Array(_, props) | Value::Closure { props, .. } | Value::BuiltinObject(_, props) => {
+    Value::Array(_, props)
+    | Value::Closure { props, .. }
+    | Value::BuiltinObject(_, props)
+    | Value::Promise(_, props) => {
       props.borrow_mut().set_prototype_value(prototype);
     }
     _ => return false,

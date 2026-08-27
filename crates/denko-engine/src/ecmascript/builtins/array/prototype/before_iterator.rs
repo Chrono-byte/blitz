@@ -12,6 +12,15 @@ pub(in crate::ecmascript::builtins::array) fn install_before_iterator(
   let array_proto_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::with_prototype(
     Value::Object(Rc::clone(object_proto_map)),
   )));
+  array_proto_map.borrow_mut().properties.insert(
+    PKey::String("length".into()),
+    PropertyDescriptor::Data {
+      value: Value::Number(0.0),
+      writable: true,
+      enumerable: false,
+      configurable: false,
+    },
+  );
   let for_each_fn = builtin_object(
     Rc::new(|vm, args| {
       let receiver = vm.to_object_value(args.first().cloned().unwrap_or(Value::Undefined))?;
@@ -717,14 +726,18 @@ pub(in crate::ecmascript::builtins::array) fn install_before_iterator(
         let result = array_species_create(vm, &receiver, 0)?;
         let mut next_index = 0usize;
         for value in std::iter::once(receiver.clone()).chain(args.iter().skip(1).cloned()) {
-          let spreadable = vm.get_property_host(
-            &value,
-            &PKey::Symbol(SymbolId::well_known_is_concat_spreadable()),
-          )?;
-          let spreadable = if matches!(spreadable, Value::Undefined) {
-            is_array_or_throw(vm, &value)?
+          let spreadable = if value.is_object() {
+            let spreadable = vm.get_property_host(
+              &value,
+              &PKey::Symbol(SymbolId::well_known_is_concat_spreadable()),
+            )?;
+            if matches!(spreadable, Value::Undefined) {
+              is_array_or_throw(vm, &value)?
+            } else {
+              vm.to_boolean(&spreadable)
+            }
           } else {
-            vm.to_boolean(&spreadable)
+            false
           };
           if spreadable {
             let length = array_like_length(vm, &value)?;

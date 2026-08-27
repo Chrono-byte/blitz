@@ -474,10 +474,24 @@ pub(crate) fn create_date_intrinsics(
     let timestamp = match supplied {
       0 => now(),
       1 => {
-        let primitive = vm.to_primitive(&args[offset], None)?;
-        match primitive {
-          Value::String(string) => parse_iso_date(string.as_str_lossy()),
-          other => time_clip(vm.to_number_value(&other)?),
+        let date_value = match &args[offset] {
+          Value::Object(object) => object
+            .borrow()
+            .internal_slot(DATE_SLOT)
+            .and_then(|value| match value {
+              Value::Number(number) => Some(*number),
+              _ => None,
+            }),
+          _ => None,
+        };
+        if let Some(date_value) = date_value {
+          date_value
+        } else {
+          let primitive = vm.to_primitive(&args[offset], None)?;
+          match primitive {
+            Value::String(string) => parse_iso_date(string.as_str_lossy()),
+            other => time_clip(vm.to_number_value(&other)?),
+          }
         }
       }
       _ => {
@@ -743,6 +757,7 @@ pub(crate) fn create_date_intrinsics(
     1,
     Rc::new(|vm, args| {
       let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+      let _ = date_number(vm, &receiver)?;
       let value = time_clip(number_argument(vm, args, 1, f64::NAN)?);
       set_date_number(vm, &receiver, value)
     }),

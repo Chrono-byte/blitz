@@ -8,6 +8,7 @@ pub(crate) mod date;
 pub(crate) mod errors;
 pub(crate) mod function;
 pub(crate) mod globals;
+pub(crate) mod intl;
 pub(crate) mod json;
 mod json_parse;
 pub(crate) mod math;

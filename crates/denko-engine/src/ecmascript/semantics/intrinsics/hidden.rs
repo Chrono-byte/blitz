@@ -2,7 +2,10 @@
 use super::*;
 
 /// Installs hidden internal builtins required for ECMAScript semantics.
-pub(crate) fn install_hidden_builtins(intrinsics: &mut Intrinsics) {
+pub(crate) fn install_hidden_builtins(
+  intrinsics: &mut Intrinsics,
+  intrinsic_eval: Value,
+) {
   intrinsics.hidden_builtins.insert(
     "importMeta".to_string(),
     Value::Builtin(Rc::new(|vm, _args| {
@@ -27,45 +30,102 @@ pub(crate) fn install_hidden_builtins(intrinsics: &mut Intrinsics) {
       Err(vm.throw_type_error("Cannot assign to imported binding"))
     })),
   );
+  let direct_eval: BuiltinFn = Rc::new(|vm, args| {
+    let src = match args.first() {
+      Some(Value::String(s)) => s.as_str_lossy(),
+      Some(other) => return Ok(other.clone()),
+      None => return Ok(Value::Undefined),
+    };
+    let inherited_strict = vm.active_strict_mode();
+    let eval_src = if inherited_strict {
+      // The strict directive is an implementation detail, not part of the
+      // caller-provided eval source. Seed completion with `undefined` so an
+      // empty declaration or block does not expose the artificial directive.
+      crate::js!(format(script), "'use strict'; void 0;\n{src}")
+    } else {
+      src.to_string()
+    };
+    let (allow_new_target, allow_super, allow_super_call) = vm.current_eval_context_flags();
+    let (chunk, declaration_only) = crate::typecheck::with_strict_override(None, || {
+      compiler::with_compile_context_override(Some((allow_new_target, allow_super)), || {
+        let session = Parser::parse_eval_source(&eval_src, allow_new_target)
+          .map_err(|e| syntax_error(vm, format!("eval parse: {}", e)))?;
+        if !allow_super_call
+          && compiler::Compiler::statements_contain_direct_super_call(&session.program().body)
+        {
+          return Err(syntax_error(
+            vm,
+            "super() is only valid in a constructor".to_string(),
+          ));
+        }
+        let declaration_only = session.program().body.iter().all(|statement| {
+          matches!(
+            statement,
+            oxc_ast::ast::Statement::FunctionDeclaration(_)
+              | oxc_ast::ast::Statement::EmptyStatement(_)
+          )
+        }) && (!inherited_strict || session.program().directives.len() == 1);
+        let chunk = compiler::compile_repl_session(&session)
+          .map_err(|e| syntax_error(vm, format!("eval compile: {}", e)))?;
+        Ok::<_, crate::errors::RuntimeError>((chunk, declaration_only))
+      })
+    })?;
+    if !chunk.root_strict
+      && let Some(name) = vm.direct_eval_lexical_conflict_name(&chunk)
+    {
+      return Err(syntax_error(
+        vm,
+        format!("redeclaration of lexical binding `{}`", name),
+      ));
+    }
+    if !chunk.root_strict
+      && vm.direct_eval_uses_global_var_environment()
+      && let Some(name) = vm.global_function_declaration_conflict_name(&chunk)
+    {
+      return Err(vm.throw_type_error(&format!("cannot declare global function `{}`", name,)));
+    }
+    match vm.run_nested(chunk, true) {
+      Ok(value) => Ok(if declaration_only {
+        Value::Undefined
+      } else {
+        value
+      }),
+      Err(failure) => {
+        if let Some(thrown) = failure.thrown {
+          Err(vm.throw_exception(thrown))
+        } else {
+          Err(failure.error)
+        }
+      }
+    }
+  });
   intrinsics.hidden_builtins.insert(
     "directEval".to_string(),
-    Value::Builtin(Rc::new(|vm, args| {
-      let src = match args.first() {
-        Some(Value::String(s)) => s.as_str_lossy(),
-        Some(other) => return Ok(other.clone()),
-        None => return Ok(Value::Undefined),
-      };
-      let eval_src = if vm.active_strict_mode() {
-        crate::js!(format(script), "'use strict';\n{src}")
+    Value::Builtin(Rc::clone(&direct_eval)),
+  );
+  let intrinsic_eval_for_test = intrinsic_eval.clone();
+  intrinsics.hidden_builtins.insert(
+    "isIntrinsicEval".to_string(),
+    Value::Builtin(Rc::new(move |_vm, args| {
+      Ok(Value::Bool(crate::runtime_utils::strict_equal(
+        args.first().unwrap_or(&Value::Undefined),
+        &intrinsic_eval_for_test,
+      )))
+    })),
+  );
+  intrinsics.hidden_builtins.insert(
+    "callEvalIdentifier".to_string(),
+    Value::Builtin(Rc::new(move |vm, args| {
+      let callee = args.first().cloned().unwrap_or(Value::Undefined);
+      let direct = crate::runtime_utils::strict_equal(&callee, &intrinsic_eval);
+      if direct {
+        direct_eval(vm, args.get(1..).unwrap_or_default())
       } else {
-        src.to_string()
-      };
-      let (allow_new_target, allow_super) = vm.current_eval_context_flags();
-      let chunk = crate::typecheck::with_strict_override(None, || {
-        compiler::with_compile_context_override(Some((allow_new_target, allow_super)), || {
-          let session = Parser::parse_source(&eval_src)
-            .map_err(|e| syntax_error(vm, format!("eval parse: {}", e)))?;
-          compiler::compile_repl_session(&session)
-            .map_err(|e| syntax_error(vm, format!("eval compile: {}", e)))
-        })
-      })?;
-      if !chunk.root_strict
-        && let Some(name) = vm.direct_eval_lexical_conflict_name(&chunk)
-      {
-        return Err(syntax_error(
-          vm,
-          format!("redeclaration of lexical binding `{}`", name),
-        ));
-      }
-      match vm.run_nested(chunk, true) {
-        Ok(value) => Ok(value),
-        Err(failure) => {
-          if let Some(thrown) = failure.thrown {
-            Err(vm.throw_exception(thrown))
-          } else {
-            Err(failure.error)
-          }
-        }
+        vm.call_value_with_this(
+          &callee,
+          &Value::Undefined,
+          args.get(1..).unwrap_or_default(),
+        )
       }
     })),
   );
@@ -78,11 +138,45 @@ pub(crate) fn install_hidden_builtins(intrinsics: &mut Intrinsics) {
     })),
   );
   intrinsics.hidden_builtins.insert(
+    "resolveWithBindingObject".to_string(),
+    Value::Builtin(Rc::new(|vm, args| {
+      let name = vm.to_string(args.first().unwrap_or(&Value::Undefined))?;
+      Ok(
+        vm.resolve_with_binding_object(name.as_str_lossy())?
+          .unwrap_or(Value::Undefined),
+      )
+    })),
+  );
+  intrinsics.hidden_builtins.insert(
+    "getResolvedIdentifier".to_string(),
+    Value::Builtin(Rc::new(|vm, args| {
+      let binding_object = args.first().cloned().unwrap_or(Value::Undefined);
+      let name = vm.to_string(args.get(1).unwrap_or(&Value::Undefined))?;
+      vm.get_resolved_identifier(&binding_object, name.as_str_lossy())
+    })),
+  );
+  intrinsics.hidden_builtins.insert(
+    "setResolvedIdentifier".to_string(),
+    Value::Builtin(Rc::new(|vm, args| {
+      let binding_object = args.first().cloned().unwrap_or(Value::Undefined);
+      let name = vm.to_string(args.get(1).unwrap_or(&Value::Undefined))?;
+      let value = args.get(2).cloned().unwrap_or(Value::Undefined);
+      vm.set_resolved_identifier(&binding_object, name.as_str_lossy(), value)
+    })),
+  );
+  intrinsics.hidden_builtins.insert(
     "toPropertyKey".to_string(),
     Value::Builtin(Rc::new(|vm, args| {
       let value = args.first().cloned().unwrap_or(Value::Undefined);
-      let key = vm.to_property_key(&value)?;
-      Ok(crate::ecmascript::semantics::property_key_to_value(&key))
+      let primitive = if value.is_object() {
+        vm.to_primitive(&value, Some("string"))?
+      } else {
+        value
+      };
+      match primitive {
+        Value::Symbol(_, _) => Ok(primitive),
+        _ => Ok(Value::String(vm.to_string(&primitive)?)),
+      }
     })),
   );
   intrinsics.hidden_builtins.insert(
@@ -136,6 +230,24 @@ pub(crate) fn install_hidden_builtins(intrinsics: &mut Intrinsics) {
     "getIterator".to_string(),
     Value::Builtin(Rc::new(|vm, args| {
       vm.get_sync_iterator(args.first().cloned().unwrap_or(Value::Undefined))
+    })),
+  );
+  intrinsics.hidden_builtins.insert(
+    "iteratorDestructuringStep".to_string(),
+    Value::Builtin(Rc::new(|vm, args| {
+      let iterator = args.first().cloned().unwrap_or(Value::Undefined);
+      let result = vm.iterator_next(iterator)?;
+      let done = vm.get_property_host(&result, &PropertyKey::String("done".to_string().into()))?;
+      if vm.to_boolean(&done) {
+        Ok(array_from_values(vec![
+          Value::Undefined,
+          Value::Bool(false),
+        ]))
+      } else {
+        let value =
+          vm.get_property_host(&result, &PropertyKey::String("value".to_string().into()))?;
+        Ok(array_from_values(vec![value, Value::Bool(true)]))
+      }
     })),
   );
   intrinsics.hidden_builtins.insert(
@@ -193,9 +305,9 @@ pub(crate) fn install_hidden_builtins(intrinsics: &mut Intrinsics) {
             (props_ref.properties.contains_key(&key), current)
           };
           if !has_name
-            || current
-              .as_ref()
-              .is_some_and(|s| s == "<anonymous>" || s == "<arrow>" || s == "<method>")
+            || current.as_ref().is_some_and(|s| {
+              s.is_empty() || s == "<anonymous>" || s == "<arrow>" || s == "<method>"
+            })
           {
             props.borrow_mut().properties.insert(
               PropertyKey::String("name".to_string().into()),
@@ -225,9 +337,9 @@ pub(crate) fn install_hidden_builtins(intrinsics: &mut Intrinsics) {
             (props_ref.properties.contains_key(&key), current)
           };
           if !has_name
-            || current
-              .as_ref()
-              .is_some_and(|s| s == "<anonymous>" || s == "<arrow>" || s == "<method>")
+            || current.as_ref().is_some_and(|s| {
+              s.is_empty() || s == "<anonymous>" || s == "<arrow>" || s == "<method>"
+            })
           {
             props.borrow_mut().properties.insert(
               PropertyKey::String("name".to_string().into()),
@@ -264,6 +376,9 @@ pub(crate) fn install_hidden_builtins(intrinsics: &mut Intrinsics) {
       }
       let target = args[0].clone();
       let proto = args[1].clone();
+      if !matches!(proto, Value::Null) && !proto.is_object() {
+        return Ok(target);
+      }
       match &target {
         Value::Object(obj) => {
           obj.borrow_mut().set_prototype_value(proto);

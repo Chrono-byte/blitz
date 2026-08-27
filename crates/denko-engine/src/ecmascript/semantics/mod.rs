@@ -101,19 +101,21 @@ pub(crate) fn get_substitution(
             .expect("match end is within the subject"),
         );
       }
-      Some(digit) if (u16::from(b'1')..=u16::from(b'9')).contains(&digit) => {
+      Some(digit) if (u16::from(b'0')..=u16::from(b'9')).contains(&digit) => {
         cursor += 1;
         let mut index = usize::from(digit - u16::from(b'0'));
+        let mut consumed_two_digits = false;
         if let Some(next) = units.get(cursor).copied()
           && (u16::from(b'0')..=u16::from(b'9')).contains(&next)
         {
           let two_digit = index * 10 + usize::from(next - u16::from(b'0'));
-          if two_digit <= captures.len() {
+          if two_digit > 0 && two_digit <= captures.len() {
             cursor += 1;
             index = two_digit;
+            consumed_two_digits = true;
           }
         }
-        if index <= captures.len() {
+        if (consumed_two_digits || digit != u16::from(b'0')) && index <= captures.len() {
           if let Some(capture) = &captures[index - 1] {
             output.push_string(capture);
           }
