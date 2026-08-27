@@ -17,6 +17,7 @@
     "typecheck:effect": "tsc -p fixtures/tsconfig.effect-foundation.json",
     "typecheck": "tsc --noEmit && pnpm run typecheck:effect",
     "test:effect": "node --experimental-strip-types scripts/test.ts",
+    "test:effect-v4": "node --experimental-strip-types scripts/test-effect-v4.ts",
     "test:stdlib": "node --experimental-strip-types scripts/test-stdlib.ts",
     "test:punycode": "node --experimental-strip-types scripts/test-punycode.ts",
     "test:string-decoder": "node --experimental-strip-types scripts/test-string-decoder.ts",
@@ -30,6 +31,7 @@
   "devDependencies": {
     "@types/node": "24.3.0",
     "effect": "3.16.7",
+    "effect-v4": "npm:effect@4.0.0-rc.112",
     "esbuild": "0.25.9",
     "rollup": "4.50.1",
     "typescript": "5.9.2"
