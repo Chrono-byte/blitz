@@ -434,6 +434,11 @@ impl RuntimeHandle {
     &mut self,
     vm: &mut Vm,
   ) -> Result<(), RuntimeError> {
+    // Promise-driven runtimes (including Effect) register their first
+    // scheduler task from a microtask queued during entry evaluation. Drain
+    // that queue before checking host liveness so the newly referenced timer
+    // or event resource is visible to the event loop.
+    vm.flush_microtasks()?;
     while self.run_once(vm)? {}
     Ok(())
   }
