@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MPL-2.0
 
+use crate::binding::BindingCell;
 use crate::gc;
 use crate::module::ModuleLoader;
-use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, SharedValue, SymbolId, Value};
+use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value};
 use crate::vm::Vm;
 use indexmap::IndexMap;
 use js_string::JsString;
@@ -179,10 +180,10 @@ impl Vm {
   pub fn install_module_exports(
     &mut self,
     module_index: usize,
-    mut exports: HashMap<String, SharedValue>,
+    mut exports: HashMap<String, BindingCell>,
   ) {
     let namespace = build_module_namespace_object(&exports);
-    exports.insert("*".to_string(), Rc::new(RefCell::new(namespace)));
+    exports.insert("*".to_string(), BindingCell::new(namespace));
     // Ensure table is large enough
     while self.modules.table.len() <= module_index {
       self.modules.table.push(HashMap::new());
@@ -199,7 +200,7 @@ impl Vm {
   pub(crate) fn ensure_module_exports(
     &mut self,
     module_index: usize,
-    exports: HashMap<String, SharedValue>,
+    exports: HashMap<String, BindingCell>,
   ) {
     let installed = self
       .modules
@@ -221,7 +222,7 @@ impl Vm {
       .table
       .get(module_index)
       .and_then(|exports| exports.get("*"))
-      .map(|slot| slot.borrow().clone())
+      .map(BindingCell::value)
   }
 }
 
@@ -231,7 +232,7 @@ impl Vm {
 /// wildcard export. Namespace export properties are materialized by the
 /// module-namespace exotic internal methods rather than stored as ordinary
 /// descriptors.
-pub(crate) fn build_module_namespace_object(exports: &HashMap<String, SharedValue>) -> Value {
+pub(crate) fn build_module_namespace_object(exports: &HashMap<String, BindingCell>) -> Value {
   let namespace = gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
   let mut names: Vec<JsString> = exports
     .keys()

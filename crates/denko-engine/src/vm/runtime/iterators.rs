@@ -484,8 +484,8 @@ impl Vm {
     let finally = handler.finally.expect("checked above");
     ensure_slot(&mut self.execution.active.locals, finally.return_slot);
     ensure_slot(&mut self.execution.active.locals, finally.did_return_slot);
-    *self.execution.active.locals[finally.return_slot].borrow_mut() = value;
-    *self.execution.active.locals[finally.did_return_slot].borrow_mut() = Value::Bool(true);
+    self.execution.active.locals[finally.return_slot].set(value);
+    self.execution.active.locals[finally.did_return_slot].set(Value::Bool(true));
     self.execution.active.lexical_env = handler.saved_lexical_env;
     self.execution.active.ip = finally.finalizer_ip;
     self.execution.active.yield_star = None;

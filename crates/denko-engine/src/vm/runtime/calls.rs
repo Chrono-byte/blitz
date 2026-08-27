@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: MPL-2.0
+use crate::binding::BindingCell;
 use crate::bytecode::FunctionProto;
 use crate::ecmascript::semantics::properties::own_property_descriptor;
 use crate::environment::EnvironmentRecord;
 use crate::errors::RuntimeError;
 use crate::gc;
 use crate::runtime_utils::{strict_equal, to_length, usize_to_decimal_string, usize_to_f64};
-use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, SharedValue, Value};
+use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
 use crate::vm::Vm;
 use crate::vm::state::{ArgumentsState, ExecutionContext, Frame, RealmState, SlotMetadata};
 use std::cell::RefCell;
@@ -220,13 +221,13 @@ impl Vm {
     callee: &Value,
     args: &[Value],
   ) -> Result<Value, RuntimeError> {
-    let temp_root_base = self.roots.temporary.len();
+    let temp_root_base = self.memory.temporary.len();
     self
-      .roots
+      .memory
       .temporary
       .push(Value::Object(Rc::clone(&self.realm_state.globals)));
-    self.roots.temporary.push(callee.clone());
-    self.roots.temporary.extend(args.iter().cloned());
+    self.memory.temporary.push(callee.clone());
+    self.memory.temporary.extend(args.iter().cloned());
 
     if !callee.is_constructable() {
       if crate::trace::enabled() {
@@ -265,7 +266,7 @@ impl Vm {
           crate::trace::value_string(&format!("[trace]     const[{}]", i), &value);
         }
       }
-      self.roots.temporary.truncate(temp_root_base);
+      self.memory.temporary.truncate(temp_root_base);
       return Err(self.throw_type_error(&format!(
         "Construct: not a constructor (actual={})",
         callee.type_name()
@@ -308,7 +309,7 @@ impl Vm {
           }
           Ok(trap_result)
         })();
-        self.roots.temporary.truncate(temp_root_base);
+        self.memory.temporary.truncate(temp_root_base);
         result
       }
       Value::Closure { .. } => {
@@ -328,7 +329,7 @@ impl Vm {
           let instance_proto = match self.prototype_from_constructor(&proto_source, "Object") {
             Ok(proto) => proto,
             Err(error) => {
-              self.roots.temporary.truncate(temp_root_base);
+              self.memory.temporary.truncate(temp_root_base);
               return Err(error);
             }
           };
@@ -368,7 +369,7 @@ impl Vm {
           | Value::Promise(..) => result,
           Value::Undefined if is_derived_constructor => {
             let Some(this_obj) = initialized_this else {
-              self.roots.temporary.truncate(temp_root_base);
+              self.memory.temporary.truncate(temp_root_base);
               return Err(self.throw_reference_error(
                 "Must call super constructor before returning from derived constructor",
               ));
@@ -376,7 +377,7 @@ impl Vm {
             this_obj
           }
           _ if is_derived_constructor => {
-            self.roots.temporary.truncate(temp_root_base);
+            self.memory.temporary.truncate(temp_root_base);
             return Err(self.throw_type_error("Derived constructor returned a non-object value"));
           }
           _ => instance,
@@ -394,7 +395,7 @@ impl Vm {
         } else {
           self.construction.recent_return_value = None;
         }
-        self.roots.temporary.truncate(temp_root_base);
+        self.memory.temporary.truncate(temp_root_base);
         Ok(result)
       }
       Value::BuiltinObject(_, props) => {
@@ -428,7 +429,7 @@ impl Vm {
           self.construction.new_target = Some(active_new_target);
           let result = self.construct_value(&target, &combined);
           self.construction.new_target = prev_new_target;
-          self.roots.temporary.truncate(temp_root_base);
+          self.memory.temporary.truncate(temp_root_base);
           return result;
         }
 
@@ -462,7 +463,7 @@ impl Vm {
           {
             Ok(proto) => proto,
             Err(error) => {
-              self.roots.temporary.truncate(temp_root_base);
+              self.memory.temporary.truncate(temp_root_base);
               return Err(error);
             }
           };
@@ -506,7 +507,7 @@ impl Vm {
         } else {
           self.construction.recent_return_value = None;
         }
-        self.roots.temporary.truncate(temp_root_base);
+        self.memory.temporary.truncate(temp_root_base);
         Ok(result)
       }
       Value::Builtin(f) => {
@@ -528,11 +529,11 @@ impl Vm {
             self.construction.recent_return_value = None;
           }
         }
-        self.roots.temporary.truncate(temp_root_base);
+        self.memory.temporary.truncate(temp_root_base);
         result
       }
       _ => {
-        self.roots.temporary.truncate(temp_root_base);
+        self.memory.temporary.truncate(temp_root_base);
         Err(RuntimeError::from(format!(
           "Construct: not a constructor (actual={})",
           callee.type_name()
@@ -614,13 +615,13 @@ impl Vm {
   ) -> Result<Value, RuntimeError> {
     match callee {
       Value::Builtin(f) | Value::BuiltinObject(f, _) => {
-        let temp_root_base = self.roots.temporary.len();
+        let temp_root_base = self.memory.temporary.len();
         self
-          .roots
+          .memory
           .temporary
           .push(Value::Object(Rc::clone(&self.realm_state.globals)));
-        self.roots.temporary.push(callee.clone());
-        self.roots.temporary.extend(args.iter().cloned());
+        self.memory.temporary.push(callee.clone());
+        self.memory.temporary.extend(args.iter().cloned());
 
         let prev_this = std::mem::replace(&mut self.execution.active.this_value, Value::Undefined);
         let prev_builtin_this =
@@ -639,7 +640,7 @@ impl Vm {
 
         let result = (|| {
           let result = result?;
-          self.roots.temporary.push(result.clone());
+          self.memory.temporary.push(result.clone());
           if self.execution.interpreter_depth == 0 {
             self.run_microtasks_if_needed()?;
           }
@@ -655,7 +656,7 @@ impl Vm {
           .then(|| result.clone());
           Ok(result)
         })();
-        self.roots.temporary.truncate(temp_root_base);
+        self.memory.temporary.truncate(temp_root_base);
         result
       }
       _ => self.call_with_this(callee, &Value::Undefined, args),
@@ -670,15 +671,15 @@ impl Vm {
     this_arg: &Value,
     args: &[Value],
   ) -> Result<Value, RuntimeError> {
-    let temp_root_base = self.roots.temporary.len();
+    let temp_root_base = self.memory.temporary.len();
     self
-      .roots
+      .memory
       .temporary
       .push(Value::Object(Rc::clone(&self.realm_state.globals)));
-    self.roots.temporary.push(callee.clone());
+    self.memory.temporary.push(callee.clone());
     let this_arg_owned = this_arg.clone();
-    self.roots.temporary.push(this_arg_owned.clone());
-    self.roots.temporary.extend(args.iter().cloned());
+    self.memory.temporary.push(this_arg_owned.clone());
+    self.memory.temporary.extend(args.iter().cloned());
     let previous_realm = self.enter_function_realm(callee);
     let result = (|| -> Result<Value, RuntimeError> {
       match callee {
@@ -729,15 +730,15 @@ impl Vm {
           self.execution.active.slots = prev_slots;
           self.execution.active.lexical_env = prev_lexical_env;
           let result = result?;
-          let result_root_base = self.roots.temporary.len();
-          self.roots.temporary.push(result.clone());
+          let result_root_base = self.memory.temporary.len();
+          self.memory.temporary.push(result.clone());
           let post_call = (|| {
             if self.execution.interpreter_depth == 0 {
               self.run_microtasks_if_needed()?;
             }
             Ok::<(), RuntimeError>(())
           })();
-          self.roots.temporary.truncate(result_root_base);
+          self.memory.temporary.truncate(result_root_base);
           post_call?;
           if matches!(
             result,
@@ -772,15 +773,15 @@ impl Vm {
           self.execution.active.slots = prev_slots;
           self.execution.active.lexical_env = prev_lexical_env;
           let result = result?;
-          let result_root_base = self.roots.temporary.len();
-          self.roots.temporary.push(result.clone());
+          let result_root_base = self.memory.temporary.len();
+          self.memory.temporary.push(result.clone());
           let post_call = (|| {
             if self.execution.interpreter_depth == 0 {
               self.run_microtasks_if_needed()?;
             }
             Ok::<(), RuntimeError>(())
           })();
-          self.roots.temporary.truncate(result_root_base);
+          self.memory.temporary.truncate(result_root_base);
           post_call?;
           if matches!(
             result,
@@ -802,7 +803,7 @@ impl Vm {
           }
           let call_args = self.prepare_call_args(args.to_vec(), proto)?;
           let closure_env = match callee {
-            Value::Closure { env, .. } => Rc::clone(env),
+            Value::Closure { env, .. } => env.clone(),
             _ => {
               return Err(self.throw_type_error("callee is not a closure"));
             }
@@ -852,7 +853,7 @@ impl Vm {
       }
     })();
     self.leave_function_realm(previous_realm);
-    self.roots.temporary.truncate(temp_root_base);
+    self.memory.temporary.truncate(temp_root_base);
     result
   }
 
@@ -862,12 +863,12 @@ impl Vm {
   pub(super) fn configure_call_frame(
     &mut self,
     proto: &Rc<FunctionProto>,
-    closure_env: &Rc<RefCell<Vec<SharedValue>>>,
+    closure_env: &crate::closure_environment::ClosureEnvironment,
     call_args: Vec<Value>,
     mut this_value: Value,
     callee: Value,
   ) -> Result<(), RuntimeError> {
-    self.execution.pending_closure_env = Some(Rc::clone(closure_env));
+    self.execution.pending_closure_env = Some(closure_env.clone());
     if !proto.is_strict {
       if matches!(this_value, Value::Undefined | Value::Null) {
         this_value = Self::function_realm_globals(&callee)
@@ -885,7 +886,7 @@ impl Vm {
 
     self.execution.active.chunk = Arc::clone(&proto.chunk);
     self.execution.active.ip = 0;
-    self.execution.active.closure_env = Some(Rc::clone(closure_env));
+    self.execution.active.closure_env = Some(closure_env.clone());
     self.execution.active.slots = Some(SlotMetadata {
       names: proto.slot_names.clone(),
       immutable: proto.slot_immutable.clone(),
@@ -912,7 +913,7 @@ impl Vm {
     }
     self.execution.active.locals = local_values
       .into_iter()
-      .map(|value| Rc::new(RefCell::new(value)))
+      .map(BindingCell::new)
       .collect();
     let captured_lexical_env = match &callee {
       Value::Closure { props, .. } => props
@@ -933,7 +934,7 @@ impl Vm {
           .get(idx)
           .copied()
           .unwrap_or(false);
-        let cell = Rc::clone(&self.execution.active.locals[idx]);
+        let cell = self.execution.active.locals[idx].clone();
         if proto
           .slot_immutable
           .get(idx)
@@ -971,14 +972,14 @@ impl Vm {
           "[trace] configure_call_frame gen slot={} name='{}' value={}",
           idx,
           name,
-          slot.borrow().type_name()
+          slot.value().type_name()
         );
       }
     }
     if let Some(slot) = proto.self_binding_slot
       && slot < self.execution.active.locals.len()
     {
-      *self.execution.active.locals[slot].borrow_mut() = callee.clone();
+      self.execution.active.locals[slot].set(callee.clone());
     }
     if let Some(slot) = proto.arguments_slot
       && slot < self.execution.active.locals.len()
@@ -992,7 +993,7 @@ impl Vm {
         let args_obj = self.build_mapped_arguments_object(proto, callee, &args_for_arguments);
         self.execution.active.arguments.object = Some(args_obj.clone());
         self.execution.active.arguments.mapped_count = mapped_count;
-        self.execution.active.locals[slot] = Rc::new(RefCell::new(args_obj));
+        self.execution.active.locals[slot] = BindingCell::new(args_obj);
       } else {
         let props: Rc<RefCell<ObjectData>> =
           gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
@@ -1059,7 +1060,7 @@ impl Vm {
         self.install_arguments_iterator_property(&props);
         self.execution.active.arguments.object = None;
         self.execution.active.arguments.mapped_count = 0;
-        self.execution.active.locals[slot] = Rc::new(RefCell::new(Value::Object(props)));
+        self.execution.active.locals[slot] = BindingCell::new(Value::Object(props));
       }
     }
     self.execution.pending_closure_env = None;
@@ -1071,7 +1072,7 @@ impl Vm {
   pub(super) fn push_call_frame(
     &mut self,
     proto: &Rc<FunctionProto>,
-    closure_env: &Rc<RefCell<Vec<SharedValue>>>,
+    closure_env: &crate::closure_environment::ClosureEnvironment,
     call_args: Vec<Value>,
     this_value: Value,
     callee: Value,

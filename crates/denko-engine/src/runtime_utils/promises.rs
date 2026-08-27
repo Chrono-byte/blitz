@@ -531,7 +531,7 @@ pub(crate) fn shadowrealm_import_value(
         .get(export_clone.as_str_lossy())
         .cloned()
         .ok_or_else(|| format!("export {} not found", export_clone))?;
-      Ok(slot.borrow().clone())
+      Ok(slot.value())
     })();
 
     match result {

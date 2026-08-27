@@ -160,7 +160,7 @@ impl Vm {
         match (&data.module_namespace_exports, &key) {
           (Some(exports), PropertyKey::String(name)) => exports
             .get(name)
-            .map(|binding| binding.borrow().clone()),
+            .map(crate::binding::BindingCell::value),
           _ => None,
         }
       };
@@ -542,7 +542,7 @@ impl Vm {
       && let Some(value) = sync_arguments_value
       && let Some(cell) = self.execution.active.locals.get(index)
     {
-      *cell.borrow_mut() = value;
+      cell.set(value);
     }
     Ok(true)
   }

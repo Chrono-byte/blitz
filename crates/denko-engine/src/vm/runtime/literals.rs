@@ -231,7 +231,9 @@ impl Vm {
     }
     let closure = Value::Closure {
       proto: Rc::clone(&closure_proto),
-      env: gc::track_env(Rc::new(RefCell::new(env_cells))),
+      env: self
+        .memory
+        .allocate_closure_environment(env_cells),
       lexical_this: if closure_proto.captures_this {
         Some(Box::new(self.execution.active.this_value.clone()))
       } else {

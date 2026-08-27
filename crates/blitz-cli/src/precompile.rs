@@ -116,29 +116,6 @@ struct GraphInput {
   declared_dependencies: Option<Vec<String>>,
 }
 
-#[derive(Clone, Copy)]
-struct BindingKey(*const RefCell<denko::Value>);
-
-impl std::hash::Hash for BindingKey {
-  fn hash<H: std::hash::Hasher>(
-    &self,
-    state: &mut H,
-  ) {
-    self.0.hash(state);
-  }
-}
-
-impl PartialEq for BindingKey {
-  fn eq(
-    &self,
-    other: &Self,
-  ) -> bool {
-    std::ptr::eq(self.0, other.0)
-  }
-}
-
-impl Eq for BindingKey {}
-
 pub(crate) fn run(
   args: PrecompileArgs,
   conditions: Vec<String>,
@@ -580,7 +557,7 @@ fn precompile_graph(
               export.exported_name, record.specifier
             )
           })?;
-        binding_ids.insert(BindingKey(Rc::as_ptr(slot)), export.binding_id);
+        binding_ids.insert(slot.identity(), export.binding_id);
       }
     }
   }
@@ -589,7 +566,7 @@ fn precompile_graph(
     let mut exports = record.exports.iter().collect::<Vec<_>>();
     exports.sort_by(|left, right| left.0.cmp(right.0));
     for (_, slot) in exports {
-      let key = BindingKey(Rc::as_ptr(slot));
+      let key = slot.identity();
       if let std::collections::hash_map::Entry::Vacant(entry) = binding_ids.entry(key) {
         entry.insert(next_binding_id);
         next_binding_id = next_binding_id
@@ -629,7 +606,7 @@ fn precompile_graph(
       .into_iter()
       .map(|(name, slot)| {
         let binding_id = binding_ids
-          .get(&BindingKey(Rc::as_ptr(slot)))
+          .get(&slot.identity())
           .copied()
           .ok_or_else(|| format!("export {name} in {} has no binding ID", record.specifier))?;
         Ok(PrelinkedExport {
@@ -654,7 +631,7 @@ fn precompile_graph(
       .into_iter()
       .map(|(name, slot)| {
         let binding_id = binding_ids
-          .get(&BindingKey(Rc::as_ptr(slot)))
+          .get(&slot.identity())
           .copied()
           .ok_or_else(|| {
             format!(

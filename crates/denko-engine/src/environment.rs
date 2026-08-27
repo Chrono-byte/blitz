@@ -9,14 +9,15 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use crate::binding::BindingCell;
 use crate::errors::RuntimeError;
-use crate::value::{SharedValue, Value};
+use crate::value::Value;
 
 #[derive(Clone, Debug)]
 /// A single lexical binding entry inside an environment record.
 pub struct Binding {
   /// Shared storage cell for the binding value.
-  pub cell: SharedValue,
+  pub cell: BindingCell,
   /// Whether assignment is permitted after initialization.
   pub mutable: bool,
   /// Whether the binding has been initialized.
@@ -89,7 +90,7 @@ impl EnvironmentRecord {
   pub fn create_mutable_binding(
     &mut self,
     name: String,
-    cell: SharedValue,
+    cell: BindingCell,
     initialized: bool,
   ) {
     self.bindings.insert(
@@ -107,7 +108,7 @@ impl EnvironmentRecord {
   pub fn create_mutable_lexical_binding(
     &mut self,
     name: String,
-    cell: SharedValue,
+    cell: BindingCell,
     initialized: bool,
   ) {
     self.bindings.insert(
@@ -125,7 +126,7 @@ impl EnvironmentRecord {
   pub fn create_immutable_binding(
     &mut self,
     name: String,
-    cell: SharedValue,
+    cell: BindingCell,
     initialized: bool,
   ) {
     self.bindings.insert(
@@ -160,7 +161,7 @@ impl EnvironmentRecord {
   ) -> bool {
     if let Some(binding) = self.bindings.get_mut(name) {
       binding.initialized = initialized;
-      let cell = Rc::clone(&binding.cell);
+      let cell = binding.cell.clone();
       if let Some(outer) = &self.outer {
         outer
           .borrow_mut()
@@ -179,11 +180,11 @@ impl EnvironmentRecord {
   fn set_binding_initialized_for_cell(
     &mut self,
     name: &str,
-    cell: &SharedValue,
+    cell: &BindingCell,
     initialized: bool,
   ) {
     if let Some(binding) = self.bindings.get_mut(name)
-      && Rc::ptr_eq(&binding.cell, cell)
+      && binding.cell.same_storage(cell)
     {
       binding.initialized = initialized;
     }
@@ -197,13 +198,13 @@ impl EnvironmentRecord {
   /// Mark the binding backed by `cell` initialized anywhere in this chain.
   pub fn set_binding_initialized_for_cell_in_chain(
     &mut self,
-    cell: &SharedValue,
+    cell: &BindingCell,
     initialized: bool,
   ) -> bool {
     if let Some(binding) = self
       .bindings
       .values_mut()
-      .find(|binding| Rc::ptr_eq(&binding.cell, cell))
+      .find(|binding| binding.cell.same_storage(cell))
     {
       binding.initialized = initialized;
       return true;
@@ -238,11 +239,11 @@ impl EnvironmentRecord {
   pub fn own_binding_cell(
     &self,
     name: &str,
-  ) -> Option<SharedValue> {
+  ) -> Option<BindingCell> {
     self
       .bindings
       .get(name)
-      .map(|binding| Rc::clone(&binding.cell))
+      .map(|binding| binding.cell.clone())
   }
 
   /// Return mutability and initialization state for an own binding.
@@ -271,7 +272,7 @@ impl EnvironmentRecord {
           "ReferenceError: Cannot access lexical binding before initialization",
         ));
       }
-      return Ok(Some(binding.cell.borrow().clone()));
+      return Ok(Some(binding.cell.value()));
     }
     Ok(None)
   }
@@ -312,7 +313,7 @@ impl EnvironmentRecord {
           name
         )));
       }
-      *binding.cell.borrow_mut() = value;
+      binding.cell.set(value);
       binding.initialized = true;
       return Ok(true);
     }
@@ -333,7 +334,7 @@ impl EnvironmentRecord {
     values: &mut Vec<Value>,
   ) {
     for binding in self.bindings.values() {
-      values.push(binding.cell.borrow().clone());
+      values.push(binding.cell.value());
     }
     if let Some(outer) = &self.outer {
       outer.borrow().collect_binding_values(values);
@@ -348,7 +349,7 @@ mod tests {
   #[test]
   fn uninitialized_binding_read_throws() {
     let mut env = EnvironmentRecord::new(None);
-    let cell = Rc::new(RefCell::new(Value::Uninitialized));
+    let cell = BindingCell::new(Value::Uninitialized);
     env.create_mutable_binding("x".to_string(), cell, false);
     let err = env
       .get_binding_value("x")
@@ -363,7 +364,7 @@ mod tests {
   #[test]
   fn immutable_binding_cannot_be_reassigned() {
     let mut env = EnvironmentRecord::new(None);
-    let cell = Rc::new(RefCell::new(Value::Number(1.0)));
+    let cell = BindingCell::new(Value::Number(1.0));
     env.create_immutable_binding("x".to_string(), cell, true);
     let err = env
       .set_mutable_binding("x", Value::Number(2.0))

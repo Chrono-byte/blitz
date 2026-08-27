@@ -183,12 +183,9 @@ fn compile(request: CompileRequest) -> CompileCompletion {
     .and_then(|semantic| VerifiedTypedFunction::specialize_numeric_binary(&semantic))
     .map_err(map_ir_error)
     .and_then(|typed| {
-      (typed
-        .numeric_binary_signature()
-        .map(|signature| signature.0)
-        == Some(expected_operation))
-      .then_some(typed)
-      .ok_or(RejectionReason::InvalidIr)
+      (typed.numeric_operation() == Some(expected_operation))
+        .then_some(typed)
+        .ok_or(RejectionReason::InvalidIr)
     })
     .and_then(|typed| emit_numeric_binary(&typed).map_err(map_artifact_error));
   match result {

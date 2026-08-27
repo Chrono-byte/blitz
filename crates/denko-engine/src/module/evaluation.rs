@@ -189,7 +189,7 @@ impl ModuleLoader {
     module_path: &Path,
     export_name: &str,
     resolve_set: &mut HashSet<(String, String)>,
-  ) -> Result<Option<SharedValue>, BundlerError> {
+  ) -> Result<Option<BindingCell>, BundlerError> {
     let module_path =
       std::fs::canonicalize(module_path).unwrap_or_else(|_| module_path.to_path_buf());
     let rec_rc = match self.map.get(&module_path) {
@@ -238,7 +238,7 @@ impl ModuleLoader {
       }
     }
 
-    let mut found: Option<SharedValue> = None;
+    let mut found: Option<BindingCell> = None;
     for source_spec in star_exports {
       let dep_rec_rc = self.construct_from_importer(&base_dir, importer, &source_spec)?;
       let dep_path = dep_rec_rc.borrow().path.clone();
@@ -247,7 +247,7 @@ impl ModuleLoader {
         match &found {
           None => found = Some(slot),
           Some(existing) => {
-            if !Rc::ptr_eq(existing, &slot) {
+            if !existing.same_storage(&slot) {
               return Ok(None);
             }
           }

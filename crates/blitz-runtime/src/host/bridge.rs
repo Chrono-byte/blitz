@@ -214,7 +214,7 @@ pub(super) fn effect_function(
     .get(name)
     .cloned()
     .ok_or_else(|| RuntimeError::from(format!("effect/Effect has no {name} export")))?;
-  Ok(slot.borrow().clone())
+  Ok(slot.value())
 }
 
 fn effect_sync(

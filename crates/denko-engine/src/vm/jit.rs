@@ -4,6 +4,7 @@
 //! The interpreter and future JIT share these stable, VM-PC keyed identities and
 //! feedback records. Generated machine code must never be the owner of feedback.
 use crate::value::Value;
+mod abi;
 pub(crate) mod artifact;
 pub(crate) mod ir;
 pub(crate) mod native;
@@ -265,6 +266,10 @@ impl FunctionId {
   pub(crate) const fn new(value: u64) -> Self {
     Self(value)
   }
+
+  const fn get(self) -> u64 {
+    self.0
+  }
 }
 
 pub(crate) type VmPc = usize;
@@ -436,6 +441,28 @@ pub(crate) struct DirectCallInputs<'a> {
   pub(crate) arguments: &'a [Value],
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum DirectCallOutcome {
+  Returned(Value),
+  Fallback,
+}
+
+pub(crate) struct BaselineInvocation<'a> {
+  pub(crate) vm: *mut crate::vm::state::Vm,
+  pub(crate) start_pc: VmPc,
+  pub(crate) registers: &'a mut [Value],
+  pub(crate) arguments: &'a [Value],
+  pub(crate) locals: &'a mut [crate::binding::BindingCell],
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum BaselineOutcome {
+  Unavailable,
+  Returned(Value),
+  Interpret { resume_pc: VmPc },
+  Invalidated { resume_pc: VmPc },
+}
+
 impl DirectCallTarget {
   pub(crate) fn leaf(&self) -> DirectLeaf {
     self.leaf
@@ -448,23 +475,22 @@ impl DirectCallTarget {
   pub(crate) fn call(
     &self,
     inputs: DirectCallInputs<'_>,
-  ) -> Result<Value, String> {
+  ) -> Result<DirectCallOutcome, String> {
     let arguments = inputs.arguments;
     if matches!(self.leaf, DirectLeaf::NumericBinary(_)) {
-      let compact_arguments = [
-        compact_direct_argument(arguments.first()),
-        compact_direct_argument(arguments.get(1)),
-      ];
+      let compact_arguments = abi::NumericArguments::from_values(arguments);
       let mut frame = native::CompactDirectCallFrame {
         result_bits: 0,
         arguments: compact_arguments.as_ptr(),
-        argument_count: arguments.len(),
+        argument_count: compact_arguments.argument_count(),
       };
       let exit = unsafe { self.code.call_compact_direct_frame(&mut frame) };
       if native::decode_exit(exit)? != native::JitExit::Return {
-        return Err("typed numeric call requested interpreter fallback".to_string());
+        return Ok(DirectCallOutcome::Fallback);
       }
-      return Ok(Value::Number(f64::from_bits(frame.result_bits)));
+      return abi::decode_numeric_result(frame.result_bits)
+        .map(DirectCallOutcome::Returned)
+        .map_err(|_| "native numeric call returned a reserved value encoding".to_string());
     }
     let mut result = Value::Undefined;
     let mut frame = native::DirectCallFrame {
@@ -474,17 +500,10 @@ impl DirectCallTarget {
     };
     let exit = unsafe { self.code.call_direct_frame(&mut frame) };
     if native::decode_exit(exit)? != native::JitExit::Return {
-      return Err("direct leaf returned a non-return exit".to_string());
+      return Ok(DirectCallOutcome::Fallback);
     }
-    Ok(result)
+    Ok(DirectCallOutcome::Returned(result))
   }
-}
-
-fn compact_direct_argument(value: Option<&Value>) -> u64 {
-  value
-    .and_then(|value| crate::value::tagged::TaggedValue::try_from(value).ok())
-    .unwrap_or(crate::value::tagged::TaggedValue::UNDEFINED)
-    .to_bits()
 }
 
 #[derive(Default)]
@@ -984,31 +1003,64 @@ impl JitRuntime {
     true
   }
 
-  pub(crate) fn execute(
+  pub(crate) fn invoke_baseline(
     &self,
     function: FunctionId,
-    frame: *mut native::JitFrame,
-  ) -> Option<native::JitExitCode> {
-    let code = self
-      .code
-      .get(&function)?
-      .iter()
-      .find(|code| code.state == JitCodeState::Valid && !code.native_blocks.is_empty())?;
-    // SAFETY: the frame is owned by the caller for the duration of dispatch.
-    let mut next_pc = unsafe { (*frame).vm_pc };
+    invocation: BaselineInvocation<'_>,
+  ) -> Result<BaselineOutcome, String> {
+    let BaselineInvocation {
+      vm,
+      start_pc,
+      registers,
+      arguments,
+      locals,
+    } = invocation;
+    let mut result = Value::Undefined;
+    let mut frame = native::JitFrame {
+      vm,
+      function_id: function.get(),
+      vm_pc: start_pc,
+      registers: registers.as_mut_ptr(),
+      register_count: registers.len(),
+      result: &mut result,
+      arguments: arguments.as_ptr(),
+      argument_count: arguments.len(),
+      locals: locals.as_mut_ptr(),
+      local_count: locals.len(),
+    };
+    let code = self.code.get(&function).and_then(|versions| {
+      versions
+        .iter()
+        .find(|code| code.state == JitCodeState::Valid && !code.native_blocks.is_empty())
+    });
+    let Some(code) = code else {
+      return Ok(BaselineOutcome::Unavailable);
+    };
+    let mut next_pc = frame.vm_pc;
     if !code.native_blocks.contains_key(&next_pc) {
       next_pc = code.preferred_entry;
     }
-    loop {
+    let exit = loop {
       let Some(block) = code.native_blocks.get(&next_pc) else {
-        unsafe { (*frame).vm_pc = next_pc };
-        return Some(native::JIT_EXIT_INTERPRETER);
+        frame.vm_pc = next_pc;
+        break native::JitExit::ResumeInterpreter;
       };
-      let exit = unsafe { block.code.call_frame(frame) };
+      let exit = unsafe { block.code.call_frame(&mut frame) };
       if exit != native::JIT_EXIT_NEXT_BLOCK {
-        return Some(exit);
+        break native::decode_exit(exit)?;
       }
-      next_pc = unsafe { (*frame).vm_pc };
+      next_pc = frame.vm_pc;
+    };
+    match exit {
+      native::JitExit::Return => Ok(BaselineOutcome::Returned(result)),
+      native::JitExit::ResumeInterpreter => Ok(BaselineOutcome::Interpret {
+        resume_pc: frame.vm_pc,
+      }),
+      native::JitExit::Invalidated => Ok(BaselineOutcome::Invalidated {
+        resume_pc: frame.vm_pc,
+      }),
+      native::JitExit::NextBlock => Err("unresolved baseline block exit".to_string()),
+      native::JitExit::Exception => Err("baseline JIT reported an exception".to_string()),
     }
   }
 
@@ -1059,10 +1111,31 @@ pub(crate) enum BaselineState {
 
 #[cfg(test)]
 mod tests {
-  use super::{native::JitFrame, *};
+  use super::native::JitFrame;
+  use super::*;
   use crate::bytecode::{Chunk, Constant, Op, encode_risc_cond_jump};
   use crate::value::Value;
   use std::sync::Arc;
+
+  fn invoke(
+    runtime: &JitRuntime,
+    function: FunctionId,
+    registers: &mut [Value],
+  ) -> BaselineOutcome {
+    let mut locals = [];
+    runtime
+      .invoke_baseline(
+        function,
+        BaselineInvocation {
+          vm: std::ptr::null_mut(),
+          start_pc: 0,
+          registers,
+          arguments: &[],
+          locals: &mut locals,
+        },
+      )
+      .expect("baseline invocation")
+  }
 
   #[cfg(all(unix, target_arch = "x86_64"))]
   #[test]
@@ -1086,21 +1159,10 @@ mod tests {
     for (condition, expected) in [(Value::Bool(false), 7.0), (Value::Bool(true), 42.0)] {
       let mut registers: [Value; 16] = std::array::from_fn(|_| Value::Undefined);
       registers[0] = condition;
-      let mut result = Value::Undefined;
-      let mut frame = JitFrame {
-        vm: std::ptr::null_mut(),
-        function_id: 1,
-        vm_pc: 0,
-        registers: registers.as_mut_ptr(),
-        register_count: registers.len(),
-        result: &mut result,
-        arguments: std::ptr::null(),
-        argument_count: 0,
-        locals: std::ptr::null_mut(),
-        local_count: 0,
-      };
-      assert_eq!(runtime.execute(function, &mut frame), Some(0));
-      assert!(matches!(result, Value::Number(value) if value == expected));
+      assert!(matches!(
+        invoke(&runtime, function, &mut registers),
+        BaselineOutcome::Returned(Value::Number(value)) if value == expected
+      ));
     }
   }
 
@@ -1121,21 +1183,10 @@ mod tests {
       .expect("install blocks");
     assert!(runtime.code[&function][0].native_blocks.len() >= 2);
     let mut registers: [Value; 16] = std::array::from_fn(|_| Value::Undefined);
-    let mut result = Value::Undefined;
-    let mut frame = JitFrame {
-      vm: std::ptr::null_mut(),
-      function_id: 1,
-      vm_pc: 0,
-      registers: registers.as_mut_ptr(),
-      register_count: registers.len(),
-      result: &mut result,
-      arguments: std::ptr::null(),
-      argument_count: 0,
-      locals: std::ptr::null_mut(),
-      local_count: 0,
-    };
-    assert_eq!(runtime.execute(function, &mut frame), Some(0));
-    assert!(matches!(result, Value::Number(value) if value == 42.0));
+    assert_eq!(
+      invoke(&runtime, function, &mut registers),
+      BaselineOutcome::Returned(Value::Number(42.0))
+    );
   }
 
   #[cfg(all(unix, target_arch = "x86_64"))]
@@ -1173,21 +1224,10 @@ mod tests {
     runtime
       .link_direct(function, version, 0, 1)
       .expect("link blocks");
-    let mut result = Value::Undefined;
-    let mut frame = JitFrame {
-      vm: std::ptr::null_mut(),
-      function_id: 1,
-      vm_pc: 0,
-      registers: std::ptr::null_mut(),
-      register_count: 0,
-      result: &mut result,
-      arguments: std::ptr::null(),
-      argument_count: 0,
-      locals: std::ptr::null_mut(),
-      local_count: 0,
-    };
-    assert_eq!(runtime.execute(function, &mut frame), Some(0));
-    assert!(matches!(result, Value::Number(value) if value == 42.0));
+    assert_eq!(
+      invoke(&runtime, function, &mut []),
+      BaselineOutcome::Returned(Value::Number(42.0))
+    );
   }
 
   #[cfg(all(unix, target_arch = "x86_64"))]
@@ -1220,21 +1260,10 @@ mod tests {
         direct_call: None,
       }],
     );
-    let mut result = Value::Undefined;
-    let mut frame = JitFrame {
-      vm: std::ptr::null_mut(),
-      function_id: 1,
-      vm_pc: 0,
-      registers: std::ptr::null_mut(),
-      register_count: 0,
-      result: &mut result,
-      arguments: std::ptr::null(),
-      argument_count: 0,
-      locals: std::ptr::null_mut(),
-      local_count: 0,
-    };
-    assert_eq!(runtime.execute(function, &mut frame), Some(0));
-    assert!(matches!(result, Value::Number(value) if value == 42.0));
+    assert_eq!(
+      invoke(&runtime, function, &mut []),
+      BaselineOutcome::Returned(Value::Number(42.0))
+    );
   }
 
   #[test]

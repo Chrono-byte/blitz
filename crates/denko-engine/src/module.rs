@@ -49,6 +49,7 @@ mod tests;
 
 pub use compilation::evaluate_entry_shared;
 
+use crate::binding::BindingCell;
 use crate::bytecode::Chunk;
 use crate::compiler::ModuleContext;
 use crate::errors::BundlerError;
@@ -56,7 +57,7 @@ use crate::gc;
 use crate::parser::ParserSession;
 use crate::prelinked::PrelinkedModuleGraph;
 use crate::resolver::resolve_specifier_with_conditions;
-use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, SharedValue, Value};
+use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
 use crate::vm::Vm;
 
 use oxc_span::SourceType;
@@ -634,9 +635,9 @@ pub struct ModuleRecord {
   /// Assigned numeric module index used by the VM module table. Set during instantiation.
   pub module_index: Option<usize>,
   /// Export slots: mapping export name -> shared slot.
-  pub exports: HashMap<String, SharedValue>,
+  pub exports: HashMap<String, BindingCell>,
   /// Import bindings: local name -> exporter slot
-  pub imports: HashMap<String, SharedValue>,
+  pub imports: HashMap<String, BindingCell>,
   /// Import metadata: local name -> (module_index, exported_name)
   pub import_sources: HashMap<String, (usize, String)>,
   /// Indirect export metadata: exported name -> (imported name, source specifier)
@@ -796,7 +797,7 @@ struct RegisteredPrelinkedGraph {
   graph: Arc<PrelinkedModuleGraph>,
   declarations: HashMap<String, String>,
   host_module_bindings: HashMap<u32, Vec<(u32, Value)>>,
-  binding_slots: Option<Vec<SharedValue>>,
+  binding_slots: Option<Vec<BindingCell>>,
 }
 
 /// ModuleLoader holds a per-VM module map and implements Construction,

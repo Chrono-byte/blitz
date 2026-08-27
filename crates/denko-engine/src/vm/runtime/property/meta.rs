@@ -233,7 +233,7 @@ impl Vm {
           .module_namespace_exports
           .as_ref()
           .and_then(|exports| exports.get(name))
-          .is_some_and(|binding| matches!(*binding.borrow(), Value::Uninitialized))
+          .is_some_and(crate::binding::BindingCell::is_uninitialized)
       {
         return Err(
           self.throw_reference_error("Cannot access module binding before initialization"),

@@ -14,7 +14,7 @@
 //!   preserving their observable job ordering.
 use crate::bytecode::FunctionProto;
 use crate::runtime_utils::{reject_pending_promise, resolve_promise_with_value};
-use crate::value::{ObjectData, PromiseState, SharedValue, Value};
+use crate::value::{ObjectData, PromiseState, Value};
 use crate::vm::state::*;
 use std::cell::RefCell;
 use std::future::Future;
@@ -42,7 +42,7 @@ impl Vm {
     &mut self,
     value: Value,
   ) {
-    self.roots.kept_alive.push(value);
+    self.memory.kept_alive.push(value);
   }
 
   /// Schedule cleanup for a FinalizationRegistry whose target became unreachable.
@@ -176,7 +176,7 @@ impl Vm {
       let caller_handlers = std::mem::take(&mut self.exceptions.handlers);
       let result = job(self);
       self.exceptions.handlers = caller_handlers;
-      self.roots.kept_alive.clear();
+      self.memory.kept_alive.clear();
       self.maybe_collect_garbage_prototype();
       if let Err(err) = result {
         let exc_val = Value::String(format!("{}", err).into());
@@ -208,7 +208,7 @@ impl Vm {
       let caller_handlers = std::mem::take(&mut self.exceptions.handlers);
       let result = job(self);
       self.exceptions.handlers = caller_handlers;
-      self.roots.kept_alive.clear();
+      self.memory.kept_alive.clear();
       self.maybe_collect_garbage_prototype();
       if let Err(err) = result {
         // Record the last uncaught exception so callers or host hooks
@@ -330,7 +330,7 @@ impl Vm {
   pub(super) fn invoke_async_closure(
     &mut self,
     proto: &Rc<FunctionProto>,
-    env: &Rc<RefCell<Vec<SharedValue>>>,
+    env: &crate::closure_environment::ClosureEnvironment,
     call_args: Vec<Value>,
     this_arg: Value,
     callee: &Value,

@@ -9,9 +9,9 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::{Rc, Weak};
 
+use crate::binding::BindingCell;
 use crate::value::{
-  ArrayData, ObjectData, PromiseState, PropertyDescriptor, ProxyData, SharedValue, Value, WeakKey,
-  WeakValue,
+  ArrayData, ObjectData, PromiseState, PropertyDescriptor, ProxyData, Value, WeakKey, WeakValue,
 };
 
 /// Result of a prototype GC collection cycle.
@@ -46,6 +46,16 @@ pub enum GcDeferredReason {
 /// Snapshot of the prototype collector's tracked heap usage.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct GcHeapSnapshot {
+  /// Object/property bags allocated through the collector gateway.
+  pub allocated_objects: usize,
+  /// Array backing stores allocated through the collector gateway.
+  pub allocated_arrays: usize,
+  /// Proxy backing stores allocated through the collector gateway.
+  pub allocated_proxies: usize,
+  /// Closure environments allocated through the collector gateway.
+  pub allocated_envs: usize,
+  /// Promise states allocated through the collector gateway.
+  pub allocated_promises: usize,
   /// Tracked object/property bags still strongly alive.
   pub live_objects: usize,
   /// Tracked array backing stores still strongly alive.
@@ -75,8 +85,19 @@ struct HeapRegistry {
   objects: Vec<Weak<RefCell<ObjectData>>>,
   arrays: Vec<Weak<RefCell<ArrayData>>>,
   proxies: Vec<Weak<RefCell<ProxyData>>>,
-  envs: Vec<Weak<RefCell<Vec<SharedValue>>>>,
+  envs: Vec<crate::closure_environment::WeakClosureEnvironment>,
   promises: Vec<Weak<RefCell<PromiseState>>>,
+  allocated_objects: usize,
+  allocated_arrays: usize,
+  allocated_proxies: usize,
+  allocated_envs: usize,
+  allocated_promises: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum EnvironmentIdentity {
+  Closure(crate::vm::state::arena::ArenaHandle),
+  Lexical(usize),
 }
 
 thread_local! {
@@ -159,7 +180,11 @@ pub fn reset_allocation_pressure() {
 /// Register an object property bag with the collector.
 pub fn track_object(obj: Rc<RefCell<ObjectData>>) -> Rc<RefCell<ObjectData>> {
   {
-    HEAP.with(|heap| push_weak(&mut heap.borrow_mut().objects, &obj));
+    HEAP.with(|heap| {
+      let mut heap = heap.borrow_mut();
+      push_weak(&mut heap.objects, &obj);
+      heap.allocated_objects = heap.allocated_objects.saturating_add(1);
+    });
     bump_allocation_pressure();
   }
   obj
@@ -168,7 +193,11 @@ pub fn track_object(obj: Rc<RefCell<ObjectData>>) -> Rc<RefCell<ObjectData>> {
 /// Register an array backing store with the collector.
 pub fn track_array(arr: Rc<RefCell<ArrayData>>) -> Rc<RefCell<ArrayData>> {
   {
-    HEAP.with(|heap| push_weak(&mut heap.borrow_mut().arrays, &arr));
+    HEAP.with(|heap| {
+      let mut heap = heap.borrow_mut();
+      push_weak(&mut heap.arrays, &arr);
+      heap.allocated_arrays = heap.allocated_arrays.saturating_add(1);
+    });
     bump_allocation_pressure();
   }
   arr
@@ -177,25 +206,34 @@ pub fn track_array(arr: Rc<RefCell<ArrayData>>) -> Rc<RefCell<ArrayData>> {
 /// Register a proxy backing store with the collector.
 pub fn track_proxy(proxy: Rc<RefCell<ProxyData>>) -> Rc<RefCell<ProxyData>> {
   {
-    HEAP.with(|heap| push_weak(&mut heap.borrow_mut().proxies, &proxy));
+    HEAP.with(|heap| {
+      let mut heap = heap.borrow_mut();
+      push_weak(&mut heap.proxies, &proxy);
+      heap.allocated_proxies = heap.allocated_proxies.saturating_add(1);
+    });
     bump_allocation_pressure();
   }
   proxy
 }
 
-/// Register a closure environment vector with the collector.
-pub fn track_env(env: Rc<RefCell<Vec<SharedValue>>>) -> Rc<RefCell<Vec<SharedValue>>> {
-  {
-    HEAP.with(|heap| push_weak(&mut heap.borrow_mut().envs, &env));
-    bump_allocation_pressure();
-  }
-  env
+/// Register a VM-owned closure environment with the collector.
+pub(crate) fn register_closure_environment(env: &crate::closure_environment::ClosureEnvironment) {
+  HEAP.with(|heap| {
+    let mut heap = heap.borrow_mut();
+    heap.envs.push(env.downgrade());
+    heap.allocated_envs = heap.allocated_envs.saturating_add(1);
+  });
+  bump_allocation_pressure();
 }
 
 /// Register a promise state with the collector.
 pub fn track_promise(promise: Rc<RefCell<PromiseState>>) -> Rc<RefCell<PromiseState>> {
   {
-    HEAP.with(|heap| push_weak(&mut heap.borrow_mut().promises, &promise));
+    HEAP.with(|heap| {
+      let mut heap = heap.borrow_mut();
+      push_weak(&mut heap.promises, &promise);
+      heap.allocated_promises = heap.allocated_promises.saturating_add(1);
+    });
     bump_allocation_pressure();
   }
   promise
@@ -211,6 +249,11 @@ pub fn heap_snapshot() -> GcHeapSnapshot {
     snapshot.tracked_proxy_slots = heap.proxies.len();
     snapshot.tracked_env_slots = heap.envs.len();
     snapshot.tracked_promise_slots = heap.promises.len();
+    snapshot.allocated_objects = heap.allocated_objects;
+    snapshot.allocated_arrays = heap.allocated_arrays;
+    snapshot.allocated_proxies = heap.allocated_proxies;
+    snapshot.allocated_envs = heap.allocated_envs;
+    snapshot.allocated_promises = heap.allocated_promises;
     snapshot.live_objects = heap
       .objects
       .iter()
@@ -243,14 +286,14 @@ pub fn heap_snapshot() -> GcHeapSnapshot {
 
 /// Prototype collector entry point.
 pub fn collect(roots: &[Value]) -> GcStats {
-  let env_roots: &[Rc<RefCell<Vec<SharedValue>>>] = &[];
+  let env_roots: &[crate::closure_environment::ClosureEnvironment] = &[];
   collect_with_env_roots(roots, env_roots)
 }
 
 /// Prototype collector entry point with explicit closure-environment roots.
 pub fn collect_with_env_roots(
   roots: &[Value],
-  env_roots: &[Rc<RefCell<Vec<SharedValue>>>],
+  env_roots: &[crate::closure_environment::ClosureEnvironment],
 ) -> GcStats {
   if !collection_is_safe() {
     return GcStats {
@@ -266,7 +309,7 @@ pub fn collect_with_env_roots(
         let mut marked_objects: HashSet<usize> = HashSet::new();
         let mut marked_arrays: HashSet<usize> = HashSet::new();
         let mut marked_proxies: HashSet<usize> = HashSet::new();
-        let mut marked_envs: HashSet<usize> = HashSet::new();
+        let mut marked_envs: HashSet<EnvironmentIdentity> = HashSet::new();
         let mut marked_promises: HashSet<usize> = HashSet::new();
 
         for root in roots {
@@ -378,8 +421,8 @@ pub fn collect_with_env_roots(
           let mut swept_envs = Vec::new();
           for weak in heap.envs.drain(..) {
             if let Some(env) = weak.upgrade() {
-              let ptr = Rc::as_ptr(&env) as usize;
-              if marked_envs.contains(&ptr) {
+              let ptr = env.identity();
+              if marked_envs.contains(&EnvironmentIdentity::Closure(ptr)) {
                 new_envs.push(weak);
               } else {
                 stats.swept_envs += 1;
@@ -429,7 +472,7 @@ fn mark_value(
   marked_objects: &mut HashSet<usize>,
   marked_arrays: &mut HashSet<usize>,
   marked_proxies: &mut HashSet<usize>,
-  marked_envs: &mut HashSet<usize>,
+  marked_envs: &mut HashSet<EnvironmentIdentity>,
   marked_promises: &mut HashSet<usize>,
 ) {
   match value {
@@ -494,12 +537,12 @@ fn mark_value(
       props,
       ..
     } => {
-      let env_ptr = Rc::as_ptr(env) as usize;
-      if marked_envs.insert(env_ptr) {
+      let env_ptr = env.identity();
+      if marked_envs.insert(EnvironmentIdentity::Closure(env_ptr)) {
         let cells: Vec<Value> = env
           .borrow()
           .iter()
-          .map(|cell| cell.borrow().clone())
+          .map(BindingCell::value)
           .collect();
         for cell in cells {
           mark_value(
@@ -605,7 +648,7 @@ fn mark_object(
   marked_objects: &mut HashSet<usize>,
   marked_arrays: &mut HashSet<usize>,
   marked_proxies: &mut HashSet<usize>,
-  marked_envs: &mut HashSet<usize>,
+  marked_envs: &mut HashSet<EnvironmentIdentity>,
   marked_promises: &mut HashSet<usize>,
 ) {
   let ptr = Rc::as_ptr(obj) as usize;
@@ -830,7 +873,7 @@ fn mark_ephemeron_values(
   marked_objects: &mut HashSet<usize>,
   marked_arrays: &mut HashSet<usize>,
   marked_proxies: &mut HashSet<usize>,
-  marked_envs: &mut HashSet<usize>,
+  marked_envs: &mut HashSet<EnvironmentIdentity>,
   marked_promises: &mut HashSet<usize>,
 ) {
   loop {
@@ -928,21 +971,21 @@ fn prune_dead_ephemerons(
 }
 
 fn mark_env(
-  env: &Rc<RefCell<Vec<SharedValue>>>,
+  env: &crate::closure_environment::ClosureEnvironment,
   marked_objects: &mut HashSet<usize>,
   marked_arrays: &mut HashSet<usize>,
   marked_proxies: &mut HashSet<usize>,
-  marked_envs: &mut HashSet<usize>,
+  marked_envs: &mut HashSet<EnvironmentIdentity>,
   marked_promises: &mut HashSet<usize>,
 ) {
-  let ptr = Rc::as_ptr(env) as usize;
-  if !marked_envs.insert(ptr) {
+  let ptr = env.identity();
+  if !marked_envs.insert(EnvironmentIdentity::Closure(ptr)) {
     return;
   }
   let cells: Vec<Value> = env
     .borrow()
     .iter()
-    .map(|cell| cell.borrow().clone())
+    .map(BindingCell::value)
     .collect();
   for cell in cells {
     mark_value(
@@ -961,11 +1004,11 @@ fn mark_environment_record(
   marked_objects: &mut HashSet<usize>,
   marked_arrays: &mut HashSet<usize>,
   marked_proxies: &mut HashSet<usize>,
-  marked_envs: &mut HashSet<usize>,
+  marked_envs: &mut HashSet<EnvironmentIdentity>,
   marked_promises: &mut HashSet<usize>,
 ) {
   let ptr = Rc::as_ptr(env) as usize;
-  if !marked_envs.insert(ptr) {
+  if !marked_envs.insert(EnvironmentIdentity::Lexical(ptr)) {
     return;
   }
   let mut values = Vec::new();
@@ -1008,13 +1051,11 @@ fn clear_array(arr: &Rc<RefCell<ArrayData>>) {
   arr.borrow_mut().clear();
 }
 
-fn clear_env(env: &Rc<RefCell<Vec<SharedValue>>>) {
-  // Break closure cycles by dropping the captured values once the
-  // environment is determined to be unreachable.
-  env.borrow_mut().clear();
+fn clear_env(env: &crate::closure_environment::ClosureEnvironment) {
+  env.reclaim();
 }
 
-fn clear_env_aggressively(env: &Rc<RefCell<Vec<SharedValue>>>) {
+fn clear_env_aggressively(env: &crate::closure_environment::ClosureEnvironment) {
   clear_env(env);
 }
 
@@ -1024,18 +1065,30 @@ fn clear_promise(state: &Rc<RefCell<PromiseState>>) {
 
 #[cfg(test)]
 mod tests {
-  #![allow(clippy::unreachable)]
   use super::*;
 
   use crate::bytecode::{Chunk, FunctionProto};
 
-  use crate::value::SharedValue;
+  use crate::binding::BindingCell;
 
   use oxc_span::Span;
 
   use std::sync::Arc;
 
-  fn make_dummy_closure(env: Rc<RefCell<Vec<SharedValue>>>) -> Value {
+  fn tracked_env() -> crate::closure_environment::ClosureEnvironment {
+    let env = crate::closure_environment::ClosureEnvironment::new(Vec::new());
+    register_closure_environment(&env);
+    env
+  }
+
+  fn closure_properties(value: &Value) -> Option<Weak<RefCell<ObjectData>>> {
+    match value {
+      Value::Closure { props, .. } => Some(Rc::downgrade(props)),
+      _ => None,
+    }
+  }
+
+  fn make_dummy_closure(env: crate::closure_environment::ClosureEnvironment) -> Value {
     let proto = Rc::new(FunctionProto {
       name: "gc_test".to_string(),
       span: Span::new(0, 0),
@@ -1099,18 +1152,15 @@ mod tests {
 
   #[test]
   fn regular_collect_breaks_closure_env_cycles() {
-    let env = track_env(Rc::new(RefCell::new(Vec::new())));
-    let closure = make_dummy_closure(Rc::clone(&env));
-    let weak_props = match &closure {
-      Value::Closure { props, .. } => Rc::downgrade(props),
-      _ => unreachable!("dummy closure must be a closure"),
-    };
+    let env = tracked_env();
+    let closure = make_dummy_closure(env.clone());
+    let weak_props = closure_properties(&closure).expect("dummy closure properties");
 
     env
       .borrow_mut()
-      .push(Rc::new(RefCell::new(closure.clone())));
+      .push(BindingCell::new(closure.clone()));
 
-    let weak_env = Rc::downgrade(&env);
+    let weak_env = env.downgrade();
 
     drop(closure);
     drop(env);
@@ -1124,18 +1174,15 @@ mod tests {
 
   #[test]
   fn aggressive_collect_breaks_closure_env_cycles() {
-    let env = track_env(Rc::new(RefCell::new(Vec::new())));
-    let closure = make_dummy_closure(Rc::clone(&env));
-    let weak_props = match &closure {
-      Value::Closure { props, .. } => Rc::downgrade(props),
-      _ => unreachable!("dummy closure must be a closure"),
-    };
+    let env = tracked_env();
+    let closure = make_dummy_closure(env.clone());
+    let weak_props = closure_properties(&closure).expect("dummy closure properties");
 
     env
       .borrow_mut()
-      .push(Rc::new(RefCell::new(closure.clone())));
+      .push(BindingCell::new(closure.clone()));
 
-    let weak_env = Rc::downgrade(&env);
+    let weak_env = env.downgrade();
 
     drop(closure);
     drop(env);
@@ -1148,18 +1195,15 @@ mod tests {
 
   #[test]
   fn aggressive_collect_respects_roots() {
-    let env = track_env(Rc::new(RefCell::new(Vec::new())));
-    let closure = make_dummy_closure(Rc::clone(&env));
-    let weak_props = match &closure {
-      Value::Closure { props, .. } => Rc::downgrade(props),
-      _ => unreachable!("dummy closure must be a closure"),
-    };
+    let env = tracked_env();
+    let closure = make_dummy_closure(env.clone());
+    let weak_props = closure_properties(&closure).expect("dummy closure properties");
 
     env
       .borrow_mut()
-      .push(Rc::new(RefCell::new(closure.clone())));
+      .push(BindingCell::new(closure.clone()));
 
-    let weak_env = Rc::downgrade(&env);
+    let weak_env = env.downgrade();
 
     drop(env);
 
@@ -1173,18 +1217,25 @@ mod tests {
   fn allocation_pressure_tracks_heap_allocations() {
     reset_allocation_pressure();
     assert_eq!(allocation_pressure(), 0);
+    let before = heap_snapshot();
 
     let _obj = track_object(Rc::new(RefCell::new(ObjectData::new())));
     let _arr = track_array(Rc::new(RefCell::new(ArrayData::from(
       Vec::<Option<Value>>::new(),
     ))));
-    let _env = track_env(Rc::new(RefCell::new(Vec::new())));
+    let _env = tracked_env();
     let _promise = track_promise(Rc::new(RefCell::new(PromiseState::Pending {
       on_fulfilled: Vec::new(),
       on_rejected: Vec::new(),
     })));
 
     assert!(allocation_pressure() >= 4);
+    let after = heap_snapshot();
+    assert_eq!(after.allocated_objects, before.allocated_objects + 1);
+    assert_eq!(after.allocated_arrays, before.allocated_arrays + 1);
+    assert_eq!(after.allocated_envs, before.allocated_envs + 1);
+    assert_eq!(after.allocated_promises, before.allocated_promises + 1);
+    assert_eq!(after.allocated_proxies, before.allocated_proxies);
 
     reset_allocation_pressure();
     assert_eq!(allocation_pressure(), 0);

@@ -2,7 +2,7 @@
 
 //! Inert native artifacts produced away from the VM thread.
 
-use super::ir::VerifiedTypedFunction;
+use super::ir::{ExitOutcome, ResumePoint, TypedValue, VerifiedTypedFunction};
 use super::native::RuntimeHelperId;
 
 pub(crate) const NATIVE_ARTIFACT_ABI: AbiRevision = AbiRevision(1);
@@ -96,62 +96,145 @@ pub(crate) enum ArtifactError {
 pub(crate) fn emit_numeric_binary(
   function: &VerifiedTypedFunction
 ) -> Result<NativeArtifact, ArtifactError> {
-  let (operation, left, right) = function
-    .numeric_binary_signature()
-    .ok_or(ArtifactError::UnsupportedTypedFunction)?;
-  if left != 0 || right != 1 {
-    return Err(ArtifactError::UnsupportedTypedFunction);
-  }
-  let mut bytes = vec![
-    0x48, 0x83, 0x7F, 0x10, 0x02, // cmp qword [rdi+16], 2
-    0x72, 0, // jb guard_failure
-    0x48, 0x8B, 0x4F, 0x08, // mov rcx, [rdi+8]
-    0x48, 0x8B, 0x01, // mov rax, [rcx]
-    0x48, 0x89, 0xC2, // mov rdx, rax
-    0x48, 0xC1, 0xEA, 0x30, // shr rdx, 48
-    0x66, 0x81, 0xE2, 0xFF, 0x7F, // and dx, 0x7fff (ignore IEEE sign)
-    0x66, 0x81, 0xFA, 0xF9, 0x7F, // cmp dx, 0x7ff9
-    0x73, 0, // jae guard_failure
-    0x66, 0x48, 0x0F, 0x6E, 0xC0, // movq xmm0, rax
-    0x48, 0x8B, 0x41, 0x08, // mov rax, [rcx+8]
-    0x48, 0x89, 0xC2, // mov rdx, rax
-    0x48, 0xC1, 0xEA, 0x30, // shr rdx, 48
-    0x66, 0x81, 0xE2, 0xFF, 0x7F, // and dx, 0x7fff (ignore IEEE sign)
-    0x66, 0x81, 0xFA, 0xF9, 0x7F, // cmp dx, 0x7ff9
-    0x73, 0, // jae guard_failure
-    0x66, 0x48, 0x0F, 0x6E, 0xC8, // movq xmm1, rax
-    0xF2, 0x0F, 0, 0xC1, // scalar binary operation xmm0, xmm1
-    0x66, 0x48, 0x0F, 0x7E, 0xC0, // movq rax, xmm0
-    0x48, 0x89, 0x07, // mov [rdi], rax
-    0x31, 0xC0, // xor eax, eax
-    0xC3, // ret
-  ];
-  let operation_opcode = bytes
-    .windows(4)
-    .position(|window| window == [0xF2, 0x0F, 0, 0xC1])
-    .ok_or(ArtifactError::InvalidContract)?
-    + 2;
-  bytes[operation_opcode] = match operation {
+  let lowering = NumericBinaryLowering::from_verified(function)?;
+  let mut code = ShortBranchCode::default();
+  code.emit(&[0x48, 0x83, 0x7F, 0x10, 0x02]); // cmp qword [rdi+16], 2
+  code.guard_branch(0x72); // jb guard_failure
+  code.emit(&[0x48, 0x8B, 0x4F, 0x08]); // mov rcx, [rdi+8]
+  code.emit_number_argument(0, 0xC0)?;
+  code.emit_number_argument(1, 0xC8)?;
+  code.emit(&[0xF2, 0x0F]);
+  code.emit(&[match lowering.operation {
     super::NumericBinaryOp::Add => 0x58,
     super::NumericBinaryOp::Subtract => 0x5C,
     super::NumericBinaryOp::Multiply => 0x59,
-  };
-  let guard_branches = [6, 32, 60];
-  let guard_failure = bytes.len();
-  bytes.extend_from_slice(&[
+  }]);
+  code.emit(&[0xC1]); // scalar binary operation xmm0, xmm1
+  code.emit(&[0x66, 0x48, 0x0F, 0x7E, 0xC0]); // movq rax, xmm0
+  code.emit(&[0x48, 0x89, 0x07]); // mov [rdi], rax
+  code.emit(&[0x31, 0xC0, 0xC3]); // return JIT_EXIT_RETURN
+  code.bind_guard_failure()?;
+  code.emit(&[
     0xB8, 1, 0, 0, 0, // mov eax, JIT_EXIT_INTERPRETER
     0xC3,
   ]);
-  for branch_index in guard_branches {
-    bytes[branch_index] = relative_i8(branch_index, guard_failure)?;
-  }
   Ok(NativeArtifact {
     target: TargetIsa::SysVx86_64,
     abi: NATIVE_ARTIFACT_ABI,
     entry: CodeOffset(0),
-    bytes: bytes.into_boxed_slice(),
+    bytes: code.finish().into_boxed_slice(),
     relocations: Box::new([]),
   })
+}
+
+#[cfg(all(unix, target_arch = "x86_64"))]
+struct NumericBinaryLowering {
+  operation: super::NumericBinaryOp,
+}
+
+#[cfg(all(unix, target_arch = "x86_64"))]
+impl NumericBinaryLowering {
+  fn from_verified(function: &VerifiedTypedFunction) -> Result<Self, ArtifactError> {
+    let mut guards = Vec::new();
+    let mut binary = None;
+    for (value_index, value) in function.values().iter().enumerate() {
+      match *value {
+        TypedValue::GuardedNumberArgument { index, failure } => {
+          guards.push((value_index, index, failure));
+        }
+        TypedValue::F64Binary {
+          operation,
+          left,
+          right,
+        } => {
+          if binary.is_some() {
+            return Err(ArtifactError::UnsupportedTypedFunction);
+          }
+          binary = Some((value_index, operation, left.index(), right.index()));
+        }
+      }
+    }
+    let [
+      (left_value, 0, left_failure),
+      (right_value, 1, right_failure),
+    ] = guards.as_slice()
+    else {
+      return Err(ArtifactError::UnsupportedTypedFunction);
+    };
+    let Some((result_value, operation, left, right)) = binary else {
+      return Err(ArtifactError::UnsupportedTypedFunction);
+    };
+    let Some(exit) = function.exits().get(*left_failure as usize) else {
+      return Err(ArtifactError::InvalidContract);
+    };
+    if left != *left_value
+      || right != *right_value
+      || left_failure != right_failure
+      || function.return_value().index() != result_value
+      || exit.outcome != ExitOutcome::Interpret
+      || exit.resume != ResumePoint::FunctionEntry
+    {
+      return Err(ArtifactError::UnsupportedTypedFunction);
+    }
+    Ok(Self { operation })
+  }
+}
+
+#[cfg(all(unix, target_arch = "x86_64"))]
+#[derive(Default)]
+struct ShortBranchCode {
+  bytes: Vec<u8>,
+  guard_fixups: Vec<usize>,
+}
+
+#[cfg(all(unix, target_arch = "x86_64"))]
+impl ShortBranchCode {
+  fn emit(
+    &mut self,
+    bytes: &[u8],
+  ) {
+    self.bytes.extend_from_slice(bytes);
+  }
+
+  fn guard_branch(
+    &mut self,
+    opcode: u8,
+  ) {
+    self.bytes.push(opcode);
+    self.guard_fixups.push(self.bytes.len());
+    self.bytes.push(0);
+  }
+
+  fn emit_number_argument(
+    &mut self,
+    index: u8,
+    xmm_move: u8,
+  ) -> Result<(), ArtifactError> {
+    match index {
+      0 => self.emit(&[0x48, 0x8B, 0x01]),       // mov rax, [rcx]
+      1 => self.emit(&[0x48, 0x8B, 0x41, 0x08]), // mov rax, [rcx+8]
+      _ => return Err(ArtifactError::UnsupportedTypedFunction),
+    }
+    self.emit(&[0x48, 0x89, 0xC2, 0x48, 0xC1, 0xEA, 0x30]); // high word into dx
+    self.emit(&[0x66, 0x81, 0xE2, 0xFF, 0x7F]); // ignore IEEE sign
+    self.emit(&[0x66, 0x81, 0xFA]);
+    self.emit(&super::abi::FIRST_NON_NUMBER_HIGH_WORD.to_le_bytes());
+    self.guard_branch(0x73); // jae guard_failure
+    self.emit(&[0x66, 0x48, 0x0F, 0x6E, xmm_move]); // movq xmm, rax
+    Ok(())
+  }
+
+  fn bind_guard_failure(&mut self) -> Result<(), ArtifactError> {
+    let target = self.bytes.len();
+    for fixup in self.guard_fixups.drain(..) {
+      self.bytes[fixup] = relative_i8(fixup, target)?;
+    }
+    Ok(())
+  }
+
+  fn finish(self) -> Vec<u8> {
+    self.bytes
+  }
 }
 
 #[cfg(all(unix, target_arch = "x86_64"))]
@@ -223,17 +306,19 @@ mod tests {
   #[cfg(all(unix, target_arch = "x86_64"))]
   #[test]
   fn installed_artifact_adds_numbers_and_rejects_other_values() {
+    use crate::value::Value;
+    use crate::vm::jit::abi::NumericArguments;
     use crate::vm::jit::native::{
       CompactDirectCallFrame, JIT_EXIT_INTERPRETER, JIT_EXIT_RETURN, NativeCode,
     };
 
     let code = NativeCode::install_artifact(artifact().validate().expect("valid artifact"))
       .expect("native installation");
-    let numbers = [2.0f64.to_bits(), 3.0f64.to_bits()];
+    let numbers = NumericArguments::from_values(&[Value::Number(2.0), Value::Number(3.0)]);
     let mut frame = CompactDirectCallFrame {
       result_bits: 0,
       arguments: numbers.as_ptr(),
-      argument_count: numbers.len(),
+      argument_count: numbers.argument_count(),
     };
     assert_eq!(
       unsafe { code.call_compact_direct_frame(&mut frame) },
@@ -249,12 +334,9 @@ mod tests {
     );
     assert_eq!(f64::from_bits(frame.result_bits), 1.0);
 
-    let mixed = [
-      crate::value::tagged::TaggedValue::UNDEFINED.to_bits(),
-      3.0f64.to_bits(),
-    ];
+    let mixed = NumericArguments::from_values(&[Value::Undefined, Value::Number(3.0)]);
     frame.arguments = mixed.as_ptr();
-    frame.argument_count = mixed.len();
+    frame.argument_count = mixed.argument_count();
     assert_eq!(
       unsafe { code.call_compact_direct_frame(&mut frame) },
       JIT_EXIT_INTERPRETER

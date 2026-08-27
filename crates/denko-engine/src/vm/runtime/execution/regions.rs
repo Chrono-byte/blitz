@@ -21,7 +21,7 @@ impl Vm {
         .active
         .locals
         .get(region.index_slot)
-        .is_some_and(|cell| Rc::strong_count(cell) != 1)
+        .is_some_and(|cell| cell.strong_count() != 1)
       || [
         region.index_slot,
         region.call_temporary_slot,
@@ -47,7 +47,7 @@ impl Vm {
         .active
         .locals
         .get(slot)
-        .and_then(|cell| match *cell.borrow() {
+        .and_then(|cell| match cell.value() {
           Value::Number(value) => Some(value),
           _ => None,
         })
@@ -66,7 +66,7 @@ impl Vm {
       .active
       .locals
       .get(region.array_slot)
-      .map(|cell| cell.borrow().clone());
+      .map(BindingCell::value);
     let Some(Value::Array(elements, properties)) = receiver else {
       return Ok(false);
     };
@@ -165,9 +165,9 @@ impl Vm {
       &mut self.execution.active.locals,
       region.increment_temporary_slot,
     );
-    *self.execution.active.locals[region.increment_temporary_slot].borrow_mut() =
-      Value::Number(prepared.index);
-    *self.execution.active.locals[region.index_slot].borrow_mut() = Value::Number(prepared.index);
+    self.execution.active.locals[region.increment_temporary_slot]
+      .set(Value::Number(prepared.index));
+    self.execution.active.locals[region.index_slot].set(Value::Number(prepared.index));
     registers[region.index_register] = Value::Number(prepared.index);
     registers[region.limit_register] = Value::Number(region.limit);
     registers[0] = Value::Number(usize_to_f64(new_length));
@@ -208,7 +208,7 @@ impl Vm {
         .active
         .locals
         .get(region.index_slot)
-        .is_some_and(|cell| Rc::strong_count(cell) != 1)
+        .is_some_and(|cell| cell.strong_count() != 1)
       || [
         region.index_slot,
         region.accumulator_slot,
@@ -234,7 +234,7 @@ impl Vm {
         .active
         .locals
         .get(slot)
-        .and_then(|cell| match *cell.borrow() {
+        .and_then(|cell| match cell.value() {
           Value::Number(value) => Some(value),
           _ => None,
         })
@@ -267,7 +267,7 @@ impl Vm {
       .active
       .locals
       .get(region.array_slot)
-      .map(|cell| cell.borrow().clone());
+      .map(BindingCell::value);
     let Some(Value::Array(elements, properties)) = receiver else {
       return Ok(false);
     };
@@ -318,11 +318,9 @@ impl Vm {
       ));
     }
     ensure_slot(&mut self.execution.active.locals, region.temporary_slot);
-    *self.execution.active.locals[region.temporary_slot].borrow_mut() =
-      Value::Number(prepared.index);
-    *self.execution.active.locals[region.accumulator_slot].borrow_mut() =
-      Value::Number(prepared.accumulator);
-    *self.execution.active.locals[region.index_slot].borrow_mut() = Value::Number(prepared.index);
+    self.execution.active.locals[region.temporary_slot].set(Value::Number(prepared.index));
+    self.execution.active.locals[region.accumulator_slot].set(Value::Number(prepared.accumulator));
+    self.execution.active.locals[region.index_slot].set(Value::Number(prepared.index));
     registers[region.previous_index_register] = Value::Number(prepared.index - 1.0);
     registers[region.next_index_register] = Value::Number(prepared.index);
     registers[region.step_register] = Value::Number(1.0);
@@ -363,7 +361,7 @@ impl Vm {
         .active
         .locals
         .get(region.index_slot)
-        .is_some_and(|cell| Rc::strong_count(cell) != 1)
+        .is_some_and(|cell| cell.strong_count() != 1)
       || [
         region.index_slot,
         region.accumulator_slot,
@@ -390,7 +388,7 @@ impl Vm {
         .active
         .locals
         .get(slot)
-        .and_then(|cell| match *cell.borrow() {
+        .and_then(|cell| match cell.value() {
           Value::Number(value) => Some(value),
           _ => None,
         })
@@ -423,7 +421,7 @@ impl Vm {
       .active
       .locals
       .get(region.receiver_slot)
-      .map(|cell| cell.borrow().clone());
+      .map(BindingCell::value);
     let Some(Value::Object(object)) = receiver else {
       return Ok(false);
     };
@@ -490,12 +488,11 @@ impl Vm {
       &mut self.execution.active.locals,
       region.arithmetic_temporary_slot,
     );
-    *self.execution.active.locals[region.call_temporary_slot].borrow_mut() = receiver.clone();
-    *self.execution.active.locals[region.arithmetic_temporary_slot].borrow_mut() =
-      Value::Number(prepared.index);
-    *self.execution.active.locals[region.accumulator_slot].borrow_mut() =
-      Value::Number(prepared.accumulator);
-    *self.execution.active.locals[region.index_slot].borrow_mut() = Value::Number(prepared.index);
+    self.execution.active.locals[region.call_temporary_slot].set(receiver.clone());
+    self.execution.active.locals[region.arithmetic_temporary_slot]
+      .set(Value::Number(prepared.index));
+    self.execution.active.locals[region.accumulator_slot].set(Value::Number(prepared.accumulator));
+    self.execution.active.locals[region.index_slot].set(Value::Number(prepared.index));
     registers[0] = Value::Number(addend);
     registers[1] = receiver;
     registers[2] = Value::Number(region.left_argument);
@@ -541,7 +538,7 @@ impl Vm {
         .active
         .locals
         .get(region.index_slot)
-        .is_some_and(|cell| Rc::strong_count(cell) != 1)
+        .is_some_and(|cell| cell.strong_count() != 1)
       || [
         region.index_slot,
         region.accumulator_slot,
@@ -568,7 +565,7 @@ impl Vm {
         .active
         .locals
         .get(slot)
-        .and_then(|cell| match *cell.borrow() {
+        .and_then(|cell| match cell.value() {
           Value::Number(value) => Some(value),
           _ => None,
         })
@@ -601,7 +598,7 @@ impl Vm {
       .active
       .locals
       .get(region.receiver_slot)
-      .map(|cell| cell.borrow().clone());
+      .map(BindingCell::value);
     let Some(Value::Object(object)) = receiver else {
       return Ok(false);
     };
@@ -684,12 +681,11 @@ impl Vm {
       &mut self.execution.active.locals,
       region.arithmetic_temporary_slot,
     );
-    *self.execution.active.locals[region.call_temporary_slot].borrow_mut() = receiver.clone();
-    *self.execution.active.locals[region.arithmetic_temporary_slot].borrow_mut() =
-      Value::Number(prepared.index);
-    *self.execution.active.locals[region.accumulator_slot].borrow_mut() =
-      Value::Number(prepared.accumulator);
-    *self.execution.active.locals[region.index_slot].borrow_mut() = Value::Number(prepared.index);
+    self.execution.active.locals[region.call_temporary_slot].set(receiver.clone());
+    self.execution.active.locals[region.arithmetic_temporary_slot]
+      .set(Value::Number(prepared.index));
+    self.execution.active.locals[region.accumulator_slot].set(Value::Number(prepared.accumulator));
+    self.execution.active.locals[region.index_slot].set(Value::Number(prepared.index));
     registers[0] = Value::Number(addend);
     registers[1] = receiver;
     registers[region.previous_index_register] = Value::Number(prepared.index - region.step);
@@ -731,7 +727,7 @@ impl Vm {
         .active
         .locals
         .get(region.index_slot)
-        .is_some_and(|cell| Rc::strong_count(cell) != 1)
+        .is_some_and(|cell| cell.strong_count() != 1)
       || [
         region.index_slot,
         region.call_temporary_slot,
@@ -756,7 +752,7 @@ impl Vm {
       .active
       .locals
       .get(region.index_slot)
-      .and_then(|cell| match *cell.borrow() {
+      .and_then(|cell| match cell.value() {
         Value::Number(value) => Some(value),
         _ => None,
       })
@@ -785,7 +781,7 @@ impl Vm {
       .active
       .locals
       .get(region.receiver_slot)
-      .map(|cell| cell.borrow().clone());
+      .map(BindingCell::value);
     let Some(Value::Object(object)) = receiver else {
       return Ok(false);
     };
@@ -894,10 +890,10 @@ impl Vm {
       &mut self.execution.active.locals,
       region.arithmetic_temporary_slot,
     );
-    *self.execution.active.locals[region.call_temporary_slot].borrow_mut() = receiver.clone();
-    *self.execution.active.locals[region.arithmetic_temporary_slot].borrow_mut() =
-      Value::Number(prepared.index);
-    *self.execution.active.locals[region.index_slot].borrow_mut() = Value::Number(prepared.index);
+    self.execution.active.locals[region.call_temporary_slot].set(receiver.clone());
+    self.execution.active.locals[region.arithmetic_temporary_slot]
+      .set(Value::Number(prepared.index));
+    self.execution.active.locals[region.index_slot].set(Value::Number(prepared.index));
     registers[0] = Value::Undefined;
     registers[1] = receiver;
     registers[2] = Value::Number(region.argument);
@@ -941,7 +937,7 @@ impl Vm {
         .active
         .locals
         .get(region.index_slot)
-        .is_some_and(|cell| Rc::strong_count(cell) != 1)
+        .is_some_and(|cell| cell.strong_count() != 1)
       || [
         region.index_slot,
         region.accumulator_slot,
@@ -968,7 +964,7 @@ impl Vm {
         .active
         .locals
         .get(slot)
-        .and_then(|cell| match *cell.borrow() {
+        .and_then(|cell| match cell.value() {
           Value::Number(value) => Some(value),
           _ => None,
         })
@@ -1001,7 +997,7 @@ impl Vm {
       .active
       .locals
       .get(region.receiver_slot)
-      .map(|cell| cell.borrow().clone());
+      .map(BindingCell::value);
     let Some(Value::Object(object)) = receiver else {
       return Ok(false);
     };
@@ -1082,12 +1078,11 @@ impl Vm {
       &mut self.execution.active.locals,
       region.arithmetic_temporary_slot,
     );
-    *self.execution.active.locals[region.call_temporary_slot].borrow_mut() = receiver.clone();
-    *self.execution.active.locals[region.arithmetic_temporary_slot].borrow_mut() =
-      Value::Number(prepared.index);
-    *self.execution.active.locals[region.accumulator_slot].borrow_mut() =
-      Value::Number(prepared.accumulator);
-    *self.execution.active.locals[region.index_slot].borrow_mut() = Value::Number(prepared.index);
+    self.execution.active.locals[region.call_temporary_slot].set(receiver.clone());
+    self.execution.active.locals[region.arithmetic_temporary_slot]
+      .set(Value::Number(prepared.index));
+    self.execution.active.locals[region.accumulator_slot].set(Value::Number(prepared.accumulator));
+    self.execution.active.locals[region.index_slot].set(Value::Number(prepared.index));
     registers[0] = Value::Number(addend);
     registers[1] = receiver;
     registers[2] = Value::Number(region.argument);
@@ -1169,7 +1164,7 @@ impl Vm {
         .active
         .locals
         .get(region.index_slot)
-        .is_some_and(|cell| Rc::strong_count(cell) != 1)
+        .is_some_and(|cell| cell.strong_count() != 1)
       || [
         region.index_slot,
         region.accumulator_slot,
@@ -1195,7 +1190,7 @@ impl Vm {
         .active
         .locals
         .get(slot)
-        .and_then(|cell| match *cell.borrow() {
+        .and_then(|cell| match cell.value() {
           Value::Number(value) => Some(value),
           _ => None,
         })
@@ -1218,8 +1213,8 @@ impl Vm {
           .active
           .locals
           .get(object_slot)
-          .and_then(|cell| match &*cell.borrow() {
-            Value::Object(object) => Some(Rc::clone(object)),
+          .and_then(|cell| match cell.value() {
+            Value::Object(object) => Some(object),
             _ => None,
           });
         let Some(object) = object else {
@@ -1262,7 +1257,7 @@ impl Vm {
           .active
           .locals
           .get(callee_slot)
-          .map(|cell| cell.borrow().clone());
+          .map(BindingCell::value);
         let Some(Value::Closure { proto, .. }) = callee else {
           return Ok(false);
         };
@@ -1331,11 +1326,10 @@ impl Vm {
     let total_iterations = u64::from(outcome.iterations);
     if total_iterations > 0 {
       ensure_slot(&mut self.execution.active.locals, region.temporary_slot);
-      *self.execution.active.locals[region.temporary_slot].borrow_mut() =
-        Value::Number(prepared.index);
-      *self.execution.active.locals[region.accumulator_slot].borrow_mut() =
-        Value::Number(prepared.accumulator);
-      *self.execution.active.locals[region.index_slot].borrow_mut() = Value::Number(prepared.index);
+      self.execution.active.locals[region.temporary_slot].set(Value::Number(prepared.index));
+      self.execution.active.locals[region.accumulator_slot]
+        .set(Value::Number(prepared.accumulator));
+      self.execution.active.locals[region.index_slot].set(Value::Number(prepared.index));
       match region.exits.body {
         crate::vm::region::NumericBodyWriteback::Numeric {
           accumulator_register,

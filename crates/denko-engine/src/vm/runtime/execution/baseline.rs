@@ -28,9 +28,12 @@ impl Vm {
         self
           .profiling
           .jit
-          .record_optimizing_call(result.is_ok());
+          .record_optimizing_call(matches!(
+            &result,
+            Ok(crate::vm::jit::DirectCallOutcome::Returned(_))
+          ));
       }
-      if let Ok(result) = result {
+      if let Ok(crate::vm::jit::DirectCallOutcome::Returned(result)) = result {
         self.profiling.jit_stats.baseline_entries = self
           .profiling
           .jit_stats
@@ -71,8 +74,11 @@ impl Vm {
       self
         .profiling
         .jit
-        .record_optimizing_call(result.is_ok());
-      if let Ok(result) = result {
+        .record_optimizing_call(matches!(
+          &result,
+          Ok(crate::vm::jit::DirectCallOutcome::Returned(_))
+        ));
+      if let Ok(crate::vm::jit::DirectCallOutcome::Returned(result)) = result {
         self.profiling.jit_stats.baseline_entries = self
           .profiling
           .jit_stats
@@ -114,9 +120,12 @@ impl Vm {
           target: target.clone(),
         });
       }
-      let result = target
+      let outcome = target
         .call(crate::vm::jit::DirectCallInputs { arguments })
         .map_err(RuntimeError::from)?;
+      let crate::vm::jit::DirectCallOutcome::Returned(result) = outcome else {
+        return Ok(None);
+      };
       self.profiling.jit_stats.baseline_entries = self
         .profiling
         .jit_stats
@@ -131,27 +140,25 @@ impl Vm {
     }
     let mut registers: [Value; 16] = std::array::from_fn(|_| Value::Undefined);
     registers[1] = this_value.clone();
-    let mut result = Value::Undefined;
-    let mut frame = crate::vm::jit::native::JitFrame {
-      vm: self as *mut Vm,
-      function_id: 0,
-      vm_pc: 0,
-      registers: registers.as_mut_ptr(),
-      register_count: registers.len(),
-      result: &mut result,
-      arguments: arguments.as_ptr(),
-      argument_count: arguments.len().min(parameter_count),
-      locals: std::ptr::null_mut(),
-      local_count: 0,
-    };
-    let Some(exit) = self.profiling.jit.execute(function, &mut frame) else {
+    let mut locals = [];
+    let vm = self as *mut Vm;
+    let outcome = self
+      .profiling
+      .jit
+      .invoke_baseline(
+        function,
+        crate::vm::jit::BaselineInvocation {
+          vm,
+          start_pc: 0,
+          registers: &mut registers,
+          arguments: &arguments[..arguments.len().min(parameter_count)],
+          locals: &mut locals,
+        },
+      )
+      .map_err(RuntimeError::from)?;
+    let crate::vm::jit::BaselineOutcome::Returned(result) = outcome else {
       return Ok(None);
     };
-    if crate::vm::jit::native::decode_exit(exit).map_err(RuntimeError::from)?
-      != crate::vm::jit::native::JitExit::Return
-    {
-      return Ok(None);
-    }
     self.profiling.jit_stats.baseline_entries = self
       .profiling
       .jit_stats
@@ -196,8 +203,14 @@ impl Vm {
     self
       .profiling
       .jit
-      .record_optimizing_call(result.is_ok());
-    Ok(result.ok())
+      .record_optimizing_call(matches!(
+        &result,
+        Ok(crate::vm::jit::DirectCallOutcome::Returned(_))
+      ));
+    match result.map_err(RuntimeError::from)? {
+      crate::vm::jit::DirectCallOutcome::Returned(value) => Ok(Some(value)),
+      crate::vm::jit::DirectCallOutcome::Fallback => Ok(None),
+    }
   }
 
   pub(super) fn try_run_nested_baseline(
@@ -223,31 +236,31 @@ impl Vm {
     {
       return Ok(None);
     }
-    let mut result = Value::Undefined;
-    let locals = (&mut self.execution.active.locals as *mut Vec<SharedValue>).cast();
-    let local_count = self.execution.active.locals.len();
-    let mut frame = crate::vm::jit::native::JitFrame {
-      vm: self as *mut Vm,
-      function_id: 0,
-      vm_pc: self.execution.active.ip,
-      registers: registers.as_mut_ptr(),
-      register_count: registers.len(),
-      result: &mut result,
-      arguments: std::ptr::null(),
-      argument_count: 0,
-      locals,
-      local_count,
-    };
-    let Some(exit) = self.profiling.jit.execute(function, &mut frame) else {
+    let vm = self as *mut Vm;
+    let outcome = self
+      .profiling
+      .jit
+      .invoke_baseline(
+        function,
+        crate::vm::jit::BaselineInvocation {
+          vm,
+          start_pc: self.execution.active.ip,
+          registers,
+          arguments: &[],
+          locals: &mut self.execution.active.locals,
+        },
+      )
+      .map_err(RuntimeError::from)?;
+    if outcome == crate::vm::jit::BaselineOutcome::Unavailable {
       return Ok(None);
-    };
+    }
     self.profiling.jit_stats.baseline_entries = self
       .profiling
       .jit_stats
       .baseline_entries
       .saturating_add(1);
-    match crate::vm::jit::native::decode_exit(exit).map_err(RuntimeError::from)? {
-      crate::vm::jit::native::JitExit::Return => {
+    match outcome {
+      crate::vm::jit::BaselineOutcome::Returned(result) => {
         self.profiling.jit_stats.baseline_returns = self
           .profiling
           .jit_stats
@@ -255,22 +268,17 @@ impl Vm {
           .saturating_add(1);
         Ok(Some(result))
       }
-      crate::vm::jit::native::JitExit::ResumeInterpreter
-      | crate::vm::jit::native::JitExit::Invalidated => {
+      crate::vm::jit::BaselineOutcome::Interpret { resume_pc }
+      | crate::vm::jit::BaselineOutcome::Invalidated { resume_pc } => {
         self.profiling.jit_stats.interpreter_resumes = self
           .profiling
           .jit_stats
           .interpreter_resumes
           .saturating_add(1);
-        self.execution.active.ip = frame.vm_pc;
+        self.execution.active.ip = resume_pc;
         Ok(None)
       }
-      crate::vm::jit::native::JitExit::NextBlock => {
-        Err(RuntimeError::from("unresolved nested baseline block exit"))
-      }
-      crate::vm::jit::native::JitExit::Exception => {
-        Err(RuntimeError::from("baseline JIT reported an exception"))
-      }
+      crate::vm::jit::BaselineOutcome::Unavailable => Ok(None),
     }
   }
 
@@ -354,31 +362,31 @@ impl Vm {
     if !baseline_ready {
       return Ok(None);
     }
-    let mut result = Value::Undefined;
-    let locals = (&mut self.execution.active.locals as *mut Vec<SharedValue>).cast();
-    let local_count = self.execution.active.locals.len();
-    let mut frame = crate::vm::jit::native::JitFrame {
-      vm: self as *mut Vm,
-      function_id: 0,
-      vm_pc: self.execution.active.ip,
-      registers: state.registers.as_mut_ptr(),
-      register_count: state.registers.len(),
-      result: &mut result,
-      arguments: std::ptr::null(),
-      argument_count: 0,
-      locals,
-      local_count,
-    };
-    let Some(exit) = self.profiling.jit.execute(function, &mut frame) else {
+    let vm = self as *mut Vm;
+    let outcome = self
+      .profiling
+      .jit
+      .invoke_baseline(
+        function,
+        crate::vm::jit::BaselineInvocation {
+          vm,
+          start_pc: self.execution.active.ip,
+          registers: &mut state.registers,
+          arguments: &[],
+          locals: &mut self.execution.active.locals,
+        },
+      )
+      .map_err(RuntimeError::from)?;
+    if outcome == crate::vm::jit::BaselineOutcome::Unavailable {
       return Ok(None);
-    };
+    }
     self.profiling.jit_stats.baseline_entries = self
       .profiling
       .jit_stats
       .baseline_entries
       .saturating_add(1);
-    match crate::vm::jit::native::decode_exit(exit).map_err(RuntimeError::from)? {
-      crate::vm::jit::native::JitExit::Return => {
+    match outcome {
+      crate::vm::jit::BaselineOutcome::Returned(result) => {
         self.profiling.jit_stats.baseline_returns = self
           .profiling
           .jit_stats
@@ -386,22 +394,20 @@ impl Vm {
           .saturating_add(1);
         Ok(Some(RiscRunOutcome::Return(result)))
       }
-      crate::vm::jit::native::JitExit::ResumeInterpreter => {
+      crate::vm::jit::BaselineOutcome::Interpret { resume_pc } => {
         self.profiling.jit_stats.interpreter_resumes = self
           .profiling
           .jit_stats
           .interpreter_resumes
           .saturating_add(1);
-        self.execution.active.ip = frame.vm_pc;
+        self.execution.active.ip = resume_pc;
         Ok(None)
       }
-      crate::vm::jit::native::JitExit::Invalidated => Ok(None),
-      crate::vm::jit::native::JitExit::NextBlock => {
-        Err(RuntimeError::from("unresolved baseline block exit"))
+      crate::vm::jit::BaselineOutcome::Invalidated { resume_pc } => {
+        self.execution.active.ip = resume_pc;
+        Ok(None)
       }
-      crate::vm::jit::native::JitExit::Exception => {
-        Err(RuntimeError::from("baseline JIT reported an exception"))
-      }
+      crate::vm::jit::BaselineOutcome::Unavailable => Ok(None),
     }
   }
 

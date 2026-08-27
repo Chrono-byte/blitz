@@ -7,6 +7,7 @@ mod patterns;
 mod regions;
 mod sequences;
 
+use crate::binding::BindingCell;
 use crate::bytecode::{
   Chunk, Op, VerifiedChunk, decode_aux8, decode_compare_jump, decode_rd, decode_risc_aux16,
   decode_risc_cond_offset, decode_rs,
@@ -18,7 +19,7 @@ use crate::gc;
 use crate::runtime_utils::{array_from_values, number_exponentiate, usize_to_f64};
 #[cfg(test)]
 use crate::value::PromiseState;
-use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, SharedValue, Value};
+use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
 use crate::vm::runtime::property::{set_property, values_equal};
 use crate::vm::state::*;
 use js_string::JsStringBuilder;
@@ -96,8 +97,8 @@ impl Vm {
     self.execution.direct_eval_outer = None;
     self.execution.active.closure_env = None;
     self.execution.pending_closure_env = None;
-    self.roots.temporary.clear();
-    self.roots.kept_alive.clear();
+    self.memory.temporary.clear();
+    self.memory.kept_alive.clear();
     self.execution.active.lexical_env = Rc::clone(&self.realm_state.global_env);
     self.execution.active.yield_star = None;
     self.execution.generator_return_frame_count = None;
@@ -228,13 +229,13 @@ impl Vm {
       return Ok(None);
     }
     if self.execution.call_stack.is_empty() && self.execution.interpreter_depth == 1 {
-      let temp_root_base = self.roots.temporary.len();
-      self.roots.temporary.push(result.clone());
-      self.roots.kept_alive.clear();
+      let temp_root_base = self.memory.temporary.len();
+      self.memory.temporary.push(result.clone());
+      self.memory.kept_alive.clear();
       self.run_microtasks_if_needed()?;
       self.maybe_collect_garbage_prototype();
-      self.roots.temporary.truncate(temp_root_base);
-      self.roots.kept_alive.clear();
+      self.memory.temporary.truncate(temp_root_base);
+      self.memory.kept_alive.clear();
       self.finish_opcode_profile_run("risc-return");
     }
     Ok(Some(RiscRunOutcome::Return(result)))
@@ -545,7 +546,7 @@ impl Vm {
               .active
               .locals
               .get(slot)
-              .map(|cell| cell.borrow().clone())
+              .map(BindingCell::value)
               .ok_or_else(|| RuntimeError::from("bad RISC local slot"))?;
             if matches!(value, Value::Uninitialized) {
               return Err(
@@ -557,10 +558,7 @@ impl Vm {
           Op::StoreLocal => {
             let slot = decode_risc_aux16(word) as usize;
             ensure_slot(&mut self.execution.active.locals, slot);
-            let was_uninitialized = matches!(
-              *self.execution.active.locals[slot].borrow(),
-              Value::Uninitialized
-            );
+            let was_uninitialized = self.execution.active.locals[slot].is_uninitialized();
             let immutable = self
               .execution
               .active
@@ -618,9 +616,9 @@ impl Vm {
                 return Err(self.throw_type_error("Assignment to constant variable"));
               }
             } else {
-              *self.execution.active.locals[slot].borrow_mut() = registers[rd].clone();
+              self.execution.active.locals[slot].set(registers[rd].clone());
               if was_uninitialized {
-                let cell = Rc::clone(&self.execution.active.locals[slot]);
+                let cell = self.execution.active.locals[slot].clone();
                 let _ = self
                   .execution
                   .active
@@ -652,15 +650,13 @@ impl Vm {
           Op::CloneLocalCell => {
             let slot = decode_risc_aux16(word) as usize;
             ensure_slot(&mut self.execution.active.locals, slot);
-            let value = self.execution.active.locals[slot]
-              .borrow()
-              .clone();
-            self.execution.active.locals[slot] = Rc::new(RefCell::new(value));
+            let value = self.execution.active.locals[slot].value();
+            self.execution.active.locals[slot] = BindingCell::new(value);
           }
           Op::ResetLocalCell => {
             let slot = decode_risc_aux16(word) as usize;
             ensure_slot(&mut self.execution.active.locals, slot);
-            self.execution.active.locals[slot] = Rc::new(RefCell::new(Value::Uninitialized));
+            self.execution.active.locals[slot] = BindingCell::new(Value::Uninitialized);
           }
           Op::GetUpvalue => {
             let index = decode_risc_aux16(word) as usize;
@@ -674,7 +670,7 @@ impl Vm {
               let environment = environment.borrow();
               environment
                 .get(index)
-                .map(|cell| cell.borrow().clone())
+                .map(BindingCell::value)
                 .ok_or_else(|| {
                   format!(
                     "Bad upvalue index {index} (closure environment has {} entries)",
@@ -718,7 +714,7 @@ impl Vm {
                 )
               })?
             };
-            if matches!(*cell.borrow(), Value::Uninitialized) {
+            if cell.is_uninitialized() {
               return Err(
                 self.throw_reference_error("Cannot access lexical binding before initialization"),
               );
@@ -728,9 +724,9 @@ impl Vm {
                 return Err(self.throw_type_error("Assignment to constant variable"));
               }
             } else {
-              *cell.borrow_mut() = registers[rd].clone();
+              cell.set(registers[rd].clone());
               if let Some(name) = mirror_global_name {
-                let current = cell.borrow().clone();
+                let current = cell.value();
                 self.sync_named_binding_to_global_and_frames(&name, &current);
               }
             }
@@ -776,7 +772,7 @@ impl Vm {
               .table
               .get(module_index)
               .and_then(|module| module.get(&name).cloned())
-              .map_or(Value::Undefined, |slot| slot.borrow().clone());
+              .map_or(Value::Undefined, |slot| slot.value());
             if matches!(value, Value::Uninitialized) {
               return Err(
                 self
@@ -792,10 +788,10 @@ impl Vm {
               self.modules.table.push(HashMap::new());
             }
             if let Some(slot) = self.modules.table[module_index].get(&name) {
-              *slot.borrow_mut() = registers[rd].clone();
+              slot.set(registers[rd].clone());
             } else {
               self.modules.table[module_index]
-                .insert(name, Rc::new(RefCell::new(registers[rd].clone())));
+                .insert(name, BindingCell::new(registers[rd].clone()));
             }
           }
           Op::GetThis => registers[rd] = self.get_this(),
@@ -1458,7 +1454,7 @@ impl Vm {
               .get(slot)
               .cloned()
               .ok_or_else(|| RuntimeError::from("bad lexical environment local slot"))?;
-            let initialized = !matches!(*cell.borrow(), Value::Uninitialized);
+            let initialized = !cell.is_uninitialized();
             let immutable = self
               .execution
               .active
@@ -1549,17 +1545,17 @@ impl Vm {
         gc_poll_countdown = GC_POLL_INTERVAL;
         self.poll_execution_interrupt()?;
         if gc::allocation_pressure() >= gc_allocation_pressure_threshold() {
-          let temp_root_base = self.roots.temporary.len();
+          let temp_root_base = self.memory.temporary.len();
           self
-            .roots
+            .memory
             .temporary
             .extend(registers.iter().cloned());
           self
-            .roots
+            .memory
             .temporary
             .extend(spills.iter().cloned());
           self.maybe_collect_garbage_prototype();
-          self.roots.temporary.truncate(temp_root_base);
+          self.memory.temporary.truncate(temp_root_base);
         }
       }
     }
@@ -1582,7 +1578,7 @@ impl Vm {
     let saved_context = self.execution.active.clone();
     let saved_root_chunk = self.execution.root_chunk.clone();
     let saved_pending_closure_env = self.execution.pending_closure_env.clone();
-    let saved_gc_temp_roots = self.roots.temporary.clone();
+    let saved_gc_temp_roots = self.memory.temporary.clone();
     let saved_recent_return_value = self.construction.recent_return_value.clone();
     let saved_last_uncaught_exception = self.exceptions.last_uncaught.take();
     let saved_pending_exception = self.exceptions.pending.clone();
@@ -1604,48 +1600,46 @@ impl Vm {
     // `saved_context` and the detached RISC continuations live in Rust locals
     // while the nested script runs, so make their JavaScript values explicit
     // GC roots for the duration of the run.
-    self.roots.temporary.extend(
+    self.memory.temporary.extend(
       saved_context
         .locals
         .iter()
-        .map(|cell| cell.borrow().clone()),
+        .map(BindingCell::value),
     );
     self
-      .roots
+      .memory
       .temporary
       .push(saved_context.this_value.clone());
     if let Some(arguments) = &saved_context.arguments.object {
-      self.roots.temporary.push(arguments.clone());
+      self.memory.temporary.push(arguments.clone());
     }
     if let Some(yield_star) = &saved_context.yield_star {
       self
-        .roots
+        .memory
         .temporary
         .push(yield_star.iterator.clone());
       self
-        .roots
+        .memory
         .temporary
         .push(yield_star.next_method.clone());
     }
     if let Some(env) = &saved_context.closure_env {
-      self.roots.temporary.extend(
-        env
-          .borrow()
-          .iter()
-          .map(|cell| cell.borrow().clone()),
-      );
+      self
+        .memory
+        .temporary
+        .extend(env.borrow().iter().map(BindingCell::value));
     }
     saved_context
       .lexical_env
       .borrow()
-      .collect_binding_values(&mut self.roots.temporary);
+      .collect_binding_values(&mut self.memory.temporary);
     for state in saved_frame_risc_states.iter().flatten() {
       self
-        .roots
+        .memory
         .temporary
         .extend(state.registers.iter().cloned());
       self
-        .roots
+        .memory
         .temporary
         .extend(state.spills.iter().cloned());
     }
@@ -1716,7 +1710,7 @@ impl Vm {
           .lexical_env
           .borrow()
           .own_binding_cell(&name)
-          .unwrap_or_else(|| Rc::clone(&eval_cell));
+          .unwrap_or_else(|| eval_cell.clone());
         if !saved_context
           .lexical_env
           .borrow()
@@ -1725,13 +1719,12 @@ impl Vm {
           saved_context
             .lexical_env
             .borrow_mut()
-            .create_mutable_binding(name.clone(), Rc::clone(&target_cell), true);
+            .create_mutable_binding(name.clone(), target_cell.clone(), true);
         }
-        if !Rc::ptr_eq(&target_cell, &eval_cell) {
-          let initial_value = eval_cell.borrow().clone();
-          *target_cell.borrow_mut() = initial_value;
+        if !target_cell.same_storage(&eval_cell) {
+          target_cell.set(eval_cell.value());
         }
-        self.execution.active.locals[index] = Rc::clone(&target_cell);
+        self.execution.active.locals[index] = target_cell.clone();
         self
           .execution
           .active
@@ -1765,7 +1758,7 @@ impl Vm {
     self.execution.active = saved_context;
     self.execution.root_chunk = saved_root_chunk;
     self.execution.pending_closure_env = saved_pending_closure_env;
-    self.roots.temporary = saved_gc_temp_roots;
+    self.memory.temporary = saved_gc_temp_roots;
     self.construction.recent_return_value = saved_recent_return_value;
     self.exceptions.last_uncaught = saved_last_uncaught_exception;
     self.exceptions.pending = saved_pending_exception;
@@ -1808,9 +1801,9 @@ impl Vm {
         thrown: None,
       });
     };
-    let temp_root_base = self.roots.temporary.len();
+    let temp_root_base = self.memory.temporary.len();
     self
-      .roots
+      .memory
       .temporary
       .push(Value::Object(Rc::clone(&self.realm_state.globals)));
     let previous_realm = std::mem::replace(
@@ -1826,7 +1819,7 @@ impl Vm {
     );
     let result = self.run_nested(chunk, false);
     self.realm_state = previous_realm;
-    self.roots.temporary.truncate(temp_root_base);
+    self.memory.temporary.truncate(temp_root_base);
     result
   }
 
@@ -1941,11 +1934,11 @@ use patterns::build_quickened_sites;
 /// Grow a locals vector so that `slot` is a valid index.
 #[inline(always)]
 pub(super) fn ensure_slot(
-  locals: &mut Vec<SharedValue>,
+  locals: &mut Vec<BindingCell>,
   slot: usize,
 ) {
   if slot >= locals.len() {
-    locals.resize_with(slot + 1, || Rc::new(RefCell::new(Value::Undefined)));
+    locals.resize_with(slot + 1, || BindingCell::new(Value::Undefined));
   }
 }
 

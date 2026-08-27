@@ -1114,7 +1114,7 @@ impl Vm {
         {
           return Ok(Some((
             PropertyDescriptor::Data {
-              value: binding.borrow().clone(),
+              value: binding.value(),
               writable: true,
               enumerable: true,
               configurable: false,
@@ -1351,13 +1351,15 @@ impl Vm {
     if let Some(index) = sync_arguments_slot
       && let Some(cell) = self.execution.active.locals.get(index)
     {
-      *cell.borrow_mut() = self
-        .lookup_property_descriptor(obj, key, 0)?
-        .and_then(|(desc, _)| match desc {
-          PropertyDescriptor::Data { value, .. } => Some(value),
-          _ => None,
-        })
-        .unwrap_or(Value::Undefined);
+      cell.set(
+        self
+          .lookup_property_descriptor(obj, key, 0)?
+          .and_then(|(desc, _)| match desc {
+            PropertyDescriptor::Data { value, .. } => Some(value),
+            _ => None,
+          })
+          .unwrap_or(Value::Undefined),
+      );
     }
 
     Ok(())

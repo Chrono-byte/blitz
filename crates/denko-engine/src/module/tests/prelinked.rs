@@ -71,17 +71,19 @@ fn prelinked_direct_import_is_parser_free_and_uses_canonical_slots() {
     .get("graph:value")
     .expect("value record")
     .borrow();
-  assert!(Rc::ptr_eq(
+  assert!(
     value_record
       .exports
       .get("answer")
-      .expect("answer export"),
-    entry
-      .borrow()
-      .imports
-      .get("answer")
-      .expect("answer import"),
-  ));
+      .expect("answer export")
+      .same_storage(
+        entry
+          .borrow()
+          .imports
+          .get("answer")
+          .expect("answer import")
+      )
+  );
   drop(value_record);
 
   let globals = Rc::new(RefCell::new(ObjectData::new()));
@@ -614,14 +616,18 @@ fn prelinked_cycles_read_preallocated_live_bindings() {
     .get("cycle:b")
     .expect("b record")
     .borrow();
-  assert!(Rc::ptr_eq(
-    a.exports.get("a").expect("a export"),
-    b.imports.get("a").expect("a import"),
-  ));
-  assert!(Rc::ptr_eq(
-    b.exports.get("getB").expect("getB export"),
-    a.imports.get("getB").expect("getB import"),
-  ));
+  assert!(
+    a.exports
+      .get("a")
+      .expect("a export")
+      .same_storage(b.imports.get("a").expect("a import"))
+  );
+  assert!(
+    b.exports
+      .get("getB")
+      .expect("getB export")
+      .same_storage(a.imports.get("getB").expect("getB import"))
+  );
   drop(a);
   drop(b);
 
@@ -716,23 +722,20 @@ fn prelinked_reexports_and_export_all_share_the_origin_slot() {
   loader
     .instantiate_all()
     .expect("reexport graph instantiates");
-  let base_slot = Rc::clone(
-    &loader.records_by_specifier["reexport:base"]
-      .borrow()
-      .exports["value"],
-  );
-  let alias_slot = Rc::clone(
-    &loader.records_by_specifier["reexport:alias"]
-      .borrow()
-      .exports["renamed"],
-  );
-  let star_slot = Rc::clone(
-    &loader.records_by_specifier["reexport:star"]
-      .borrow()
-      .exports["renamed"],
-  );
-  assert!(Rc::ptr_eq(&base_slot, &alias_slot));
-  assert!(Rc::ptr_eq(&base_slot, &star_slot));
+  let base_slot = loader.records_by_specifier["reexport:base"]
+    .borrow()
+    .exports["value"]
+    .clone();
+  let alias_slot = loader.records_by_specifier["reexport:alias"]
+    .borrow()
+    .exports["renamed"]
+    .clone();
+  let star_slot = loader.records_by_specifier["reexport:star"]
+    .borrow()
+    .exports["renamed"]
+    .clone();
+  assert!(base_slot.same_storage(&alias_slot));
+  assert!(base_slot.same_storage(&star_slot));
 
   let globals = Rc::new(RefCell::new(ObjectData::new()));
   let mut vm = Vm::new(globals);
@@ -1159,8 +1162,7 @@ fn precompiled_virtual_modules_keep_source_metadata_and_stable_indices() {
       .exports
       .get("value")
       .expect("value export")
-      .borrow()
-      .clone(),
+      .value(),
     Value::Number(42.0),
   );
 }

@@ -14,7 +14,7 @@ use std::hash::{Hash, Hasher};
 pub(crate) struct ValueId(u32);
 
 impl ValueId {
-  fn index(self) -> usize {
+  pub(crate) fn index(self) -> usize {
     self.0 as usize
   }
 }
@@ -233,41 +233,29 @@ impl VerifiedTypedFunction {
     Ok(Self(function))
   }
 
-  #[cfg(test)]
   pub(crate) fn return_value(&self) -> ValueId {
     self.0.return_value
   }
 
-  #[cfg(test)]
   pub(crate) fn exits(&self) -> &[ExitState] {
     &self.0.exits
   }
 
-  pub(crate) fn numeric_binary_signature(&self) -> Option<(NumericBinaryOp, u16, u16)> {
-    let [
-      TypedValue::GuardedNumberArgument {
-        index: left_index,
-        failure: left_failure,
-      },
-      TypedValue::GuardedNumberArgument {
-        index: right_index,
-        failure: right_failure,
-      },
-      TypedValue::F64Binary {
-        operation,
-        left,
-        right,
-      },
-    ] = self.0.values.as_slice()
-    else {
-      return None;
-    };
-    (*left_failure == 0
-      && *right_failure == 0
-      && *left == ValueId(0)
-      && *right == ValueId(1)
-      && self.0.return_value == ValueId(2))
-    .then_some((*operation, *left_index, *right_index))
+  pub(crate) fn values(&self) -> &[TypedValue] {
+    &self.0.values
+  }
+
+  pub(crate) fn numeric_operation(&self) -> Option<NumericBinaryOp> {
+    let mut operations = self
+      .0
+      .values
+      .iter()
+      .filter_map(|value| match value {
+        TypedValue::F64Binary { operation, .. } => Some(*operation),
+        TypedValue::GuardedNumberArgument { .. } => None,
+      });
+    let operation = operations.next()?;
+    operations.next().is_none().then_some(operation)
   }
 }
 

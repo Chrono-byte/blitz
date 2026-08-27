@@ -49,8 +49,10 @@
 //! See individual module documentation for detailed API usage.
 
 pub mod analysis;
+pub mod binding;
 pub mod bytecode;
 pub mod bytecode_bundle;
+pub mod closure_environment;
 pub mod compiler;
 pub mod ecmascript;
 pub mod environment;
@@ -76,6 +78,7 @@ pub mod vm;
 mod ecmascript_correctness_tests;
 
 // Re-export oxc_ast::ast under the `ast` namespace for compatibility.
+pub use binding::*;
 pub use bytecode::*;
 pub use compiler::*;
 pub use denko_macros::js;

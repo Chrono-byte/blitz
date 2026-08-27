@@ -518,7 +518,7 @@ impl Vm {
     };
 
     super::execution::ensure_slot(&mut self.execution.active.locals, slot);
-    *self.execution.active.locals[slot].borrow_mut() = value.clone();
+    self.execution.active.locals[slot].set(value.clone());
     let _ = self
       .execution
       .active
@@ -553,9 +553,7 @@ impl Vm {
       if let Some((PropertyDescriptor::Data { writable: true, .. }, _)) =
         self.lookup_property_descriptor(&arguments_object, &key, 0)?
       {
-        let value = self.execution.active.locals[slot]
-          .borrow()
-          .clone();
+        let value = self.execution.active.locals[slot].value();
         drop(self.set_property_host(
           &arguments_object,
           &Value::String(slot.to_string().into()),
@@ -603,7 +601,7 @@ impl Vm {
           })
         && let Some(cell) = frame.context.locals.get(slot)
       {
-        *cell.borrow_mut() = value.clone();
+        cell.set(value.clone());
       }
     }
   }

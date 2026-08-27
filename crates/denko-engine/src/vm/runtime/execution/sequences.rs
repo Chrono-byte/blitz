@@ -18,7 +18,7 @@ impl Vm {
       let Some(cell) = self.execution.active.locals.get(slot) else {
         return Ok(false);
       };
-      match *cell.borrow() {
+      match cell.value() {
         Value::Number(value) => Some(value),
         _ => None,
       }
@@ -99,7 +99,7 @@ impl Vm {
       .active
       .locals
       .get(receiver_slot)
-      .map(|cell| cell.borrow().clone())
+      .map(BindingCell::value)
     else {
       return Ok(false);
     };
@@ -108,7 +108,7 @@ impl Vm {
       .active
       .locals
       .get(argument_slot)
-      .map(|cell| cell.borrow().clone())
+      .map(BindingCell::value)
     else {
       return Ok(false);
     };
@@ -124,7 +124,7 @@ impl Vm {
     let key = PropertyKey::String(key.clone());
 
     ensure_slot(&mut self.execution.active.locals, temporary_slot);
-    *self.execution.active.locals[temporary_slot].borrow_mut() = receiver.clone();
+    self.execution.active.locals[temporary_slot].set(receiver.clone());
     let callee = self.get_property_value_cached(ip + 5, &receiver, &key)?;
     let canonical_push = matches!(
       &callee,
@@ -224,7 +224,7 @@ impl Vm {
       let Some(cell) = self.execution.active.locals.get(accumulator_slot) else {
         return Ok(false);
       };
-      match *cell.borrow() {
+      match cell.value() {
         Value::Number(value) => Some(value),
         _ => None,
       }
@@ -236,8 +236,8 @@ impl Vm {
       let Some(cell) = self.execution.active.locals.get(object_slot) else {
         return Ok(false);
       };
-      match &*cell.borrow() {
-        Value::Object(object) => Some(Rc::clone(object)),
+      match cell.value() {
+        Value::Object(object) => Some(object),
         _ => None,
       }
     };
@@ -276,8 +276,8 @@ impl Vm {
       PropertyKey::String(key) => key,
       PropertyKey::Symbol(_) => unreachable!(),
     });
-    *self.execution.active.locals[temporary_slot].borrow_mut() = Value::Number(result);
-    *self.execution.active.locals[accumulator_slot].borrow_mut() = Value::Number(result);
+    self.execution.active.locals[temporary_slot].set(Value::Number(result));
+    self.execution.active.locals[accumulator_slot].set(Value::Number(result));
     self.execution.active.ip += 9;
     Ok(true)
   }
@@ -321,7 +321,7 @@ impl Vm {
       let Some(cell) = self.execution.active.locals.get(target_slot) else {
         return Ok(false);
       };
-      match *cell.borrow() {
+      match cell.value() {
         Value::Number(value) => Some(value),
         _ => None,
       }
@@ -345,8 +345,8 @@ impl Vm {
     registers[source_register] = Value::Number(value);
     registers[constant_register] = Value::Number(constant);
     registers[result_register] = Value::Number(result);
-    *self.execution.active.locals[temporary_slot].borrow_mut() = Value::Number(result);
-    *self.execution.active.locals[target_slot].borrow_mut() = Value::Number(result);
+    self.execution.active.locals[temporary_slot].set(Value::Number(result));
+    self.execution.active.locals[target_slot].set(Value::Number(result));
     self.execution.active.ip += 10;
     Ok(true)
   }
@@ -391,10 +391,8 @@ impl Vm {
       let Some(right_cell) = self.execution.active.locals.get(right_slot) else {
         return Ok(false);
       };
-      let left = left_cell.borrow();
-      let right = right_cell.borrow();
-      match (&*left, &*right) {
-        (Value::Number(left), Value::Number(right)) => Some((*left, *right)),
+      match (left_cell.value(), right_cell.value()) {
+        (Value::Number(left), Value::Number(right)) => Some((left, right)),
         _ => None,
       }
     };
@@ -406,7 +404,7 @@ impl Vm {
     ensure_slot(&mut self.execution.active.locals, destination_slot);
     registers[left_register] = Value::Number(left);
     registers[right_register] = Value::Number(right);
-    *self.execution.active.locals[destination_slot].borrow_mut() = Value::Number(result);
+    self.execution.active.locals[destination_slot].set(Value::Number(result));
     registers[left_register] = Value::Number(result);
     self.execution.active.ip += 4;
     Ok(true)

@@ -3,7 +3,7 @@
 use crate::bytecode::FunctionProto;
 use crate::errors::RuntimeError;
 use crate::gc;
-use crate::value::{ObjectData, SharedValue, Value};
+use crate::value::{ObjectData, Value};
 use crate::vm::Vm;
 use crate::vm::state::{GeneratorRunner, GeneratorStatus, RiscExecutionState, RiscRunOutcome};
 use std::cell::RefCell;
@@ -27,7 +27,7 @@ impl Vm {
   pub(in crate::vm::runtime) fn create_generator_object(
     &mut self,
     proto: &Rc<FunctionProto>,
-    closure_env: &Rc<RefCell<Vec<SharedValue>>>,
+    closure_env: &crate::closure_environment::ClosureEnvironment,
     call_args: Vec<Value>,
     this_value: Value,
     callee: &Value,

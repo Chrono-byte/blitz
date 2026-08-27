@@ -970,6 +970,9 @@ mod test {
       vm.get_global("closure_total"),
       Some(Value::Number(124_750.0))
     );
+    let memory = vm.memory_snapshot();
+    assert!(memory.allocated_closure_environments >= 500);
+    assert!(memory.live_closure_environments >= 500);
   }
 
   #[test]
@@ -2619,14 +2622,34 @@ mod test {
     assert_eq!(vm.host_root(first), None);
 
     let second = vm.create_host_root(Value::Number(2.0));
-    assert_eq!(first.slot, second.slot);
-    assert_ne!(first.generation, second.generation);
+    assert_eq!(first.0.slot, second.0.slot);
+    assert_ne!(first.0.generation, second.0.generation);
     assert!(
       vm.set_host_root(first, Value::Number(3.0))
         .is_err()
     );
     assert!(vm.release_host_root(first).is_err());
     assert_eq!(vm.host_root(second), Some(Value::Number(2.0)));
+  }
+
+  #[test]
+  fn weak_host_roots_upgrade_only_for_the_original_live_generation() {
+    let mut vm = Vm::new(test_globals());
+    let root = vm.create_host_root(Value::Number(1.0));
+    let weak = vm
+      .downgrade_host_root(root)
+      .expect("live root can be observed weakly");
+
+    assert_eq!(vm.upgrade_host_root(weak), Some(root));
+    vm.release_host_root(root).expect("release root");
+    assert_eq!(vm.upgrade_host_root(weak), None);
+
+    let replacement = vm.create_host_root(Value::Number(2.0));
+    assert_eq!(root.0.slot, replacement.0.slot);
+    assert_eq!(vm.upgrade_host_root(weak), None);
+    assert_eq!(vm.memory_snapshot().allocated_host_roots, 2);
+    assert_eq!(vm.memory_snapshot().live_host_roots, 1);
+    assert_eq!(vm.memory_snapshot().released_host_roots, 1);
   }
 
   #[test]

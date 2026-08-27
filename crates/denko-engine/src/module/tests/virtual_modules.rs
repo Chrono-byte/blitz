@@ -436,8 +436,8 @@ fn module_namespace_objects_use_exotic_live_binding_semantics() {
 
 #[test]
 fn module_namespace_export_descriptors_track_live_binding_cells() {
-  let binding = Rc::new(RefCell::new(Value::Number(1.0)));
-  let exports = HashMap::from([("value".to_string(), Rc::clone(&binding))]);
+  let binding = crate::binding::BindingCell::new(Value::Number(1.0));
+  let exports = HashMap::from([("value".to_string(), binding.clone())]);
   let namespace = crate::vm::runtime::modules::build_module_namespace_object(&exports);
   let globals = Rc::new(RefCell::new(ObjectData::new()));
   let mut vm = Vm::new(globals);
@@ -453,7 +453,7 @@ fn module_namespace_export_descriptors_track_live_binding_cells() {
     }))
   ));
 
-  *binding.borrow_mut() = Value::Number(2.0);
+  binding.set(Value::Number(2.0));
   assert_eq!(
     vm.get_property_host(&namespace, &key)
       .expect("namespace export is readable"),
@@ -536,14 +536,18 @@ fn virtual_cycles_keep_shared_import_export_slots() {
     .get("cycle/b.js")
     .expect("b record")
     .borrow();
-  assert!(Rc::ptr_eq(
-    a.imports.get("bValue").expect("a import"),
-    b.exports.get("value").expect("b export")
-  ));
-  assert!(Rc::ptr_eq(
-    b.imports.get("aValue").expect("b import"),
-    a.exports.get("value").expect("a export")
-  ));
+  assert!(
+    a.imports
+      .get("bValue")
+      .expect("a import")
+      .same_storage(b.exports.get("value").expect("b export"))
+  );
+  assert!(
+    b.imports
+      .get("aValue")
+      .expect("b import")
+      .same_storage(a.exports.get("value").expect("a export"))
+  );
 }
 
 #[test]

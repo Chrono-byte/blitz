@@ -19,10 +19,22 @@ pub(crate) struct JitFrame {
   /// Prepared call arguments. Direct entry uses these before VM local cells exist.
   pub(crate) arguments: *const Value,
   pub(crate) argument_count: usize,
-  /// Opaque pointer to the VM-owned `Vec<SharedValue>` for helper-only access.
-  pub(crate) locals: *mut std::ffi::c_void,
+  /// VM-owned binding cells available to generated local-load helpers.
+  pub(crate) locals: *mut crate::binding::BindingCell,
   pub(crate) local_count: usize,
 }
+
+#[cfg(target_pointer_width = "64")]
+const _: () = {
+  assert!(std::mem::offset_of!(JitFrame, vm) == 0);
+  assert!(std::mem::offset_of!(JitFrame, function_id) == 8);
+  assert!(std::mem::offset_of!(JitFrame, vm_pc) == 16);
+  assert!(std::mem::offset_of!(JitFrame, registers) == 24);
+  assert!(std::mem::offset_of!(JitFrame, result) == 40);
+  assert!(std::mem::offset_of!(JitFrame, arguments) == 48);
+  assert!(std::mem::offset_of!(JitFrame, locals) == 64);
+  assert!(std::mem::size_of::<JitFrame>() == 80);
+};
 
 /// Frame for leaf calls that cannot resume in the interpreter.
 #[repr(C)]
@@ -191,10 +203,8 @@ pub(crate) unsafe extern "C" fn denko_jit_set_result_from_local(
 ) -> JitExitCode {
   unsafe {
     if !(*frame).locals.is_null() && (slot as usize) < (*frame).local_count {
-      let locals = &*((*frame)
-        .locals
-        .cast::<Vec<crate::value::SharedValue>>());
-      *(*frame).result = locals[slot as usize].borrow().clone();
+      let locals = std::slice::from_raw_parts((*frame).locals, (*frame).local_count);
+      *(*frame).result = locals[slot as usize].value();
       return JIT_EXIT_RETURN;
     }
     if (*frame).arguments.is_null() || slot as usize >= (*frame).argument_count {
@@ -966,9 +976,7 @@ mod tests {
   #[test]
   fn returns_a_vm_owned_local_through_the_opaque_frame_boundary() {
     let code = NativeCode::return_local(0).expect("native allocation");
-    let mut locals = vec![std::rc::Rc::new(std::cell::RefCell::new(Value::Number(
-      17.0,
-    )))];
+    let mut locals = vec![crate::binding::BindingCell::new(Value::Number(17.0))];
     let mut result = Value::Undefined;
     let mut frame = JitFrame {
       vm: std::ptr::null_mut(),
@@ -979,7 +987,7 @@ mod tests {
       result: &mut result,
       arguments: std::ptr::null(),
       argument_count: 0,
-      locals: (&mut locals as *mut Vec<crate::value::SharedValue>).cast(),
+      locals: locals.as_mut_ptr(),
       local_count: 1,
     };
     assert_eq!(unsafe { code.call_frame(&mut frame) }, JIT_EXIT_RETURN);

@@ -66,16 +66,10 @@ use std::rc::Weak;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
+use crate::binding::BindingCell;
+
 use num_bigint::BigInt as BigIntValue;
 use num_traits::Zero;
-
-pub(crate) mod tagged;
-
-/// Shared, reference-counted, mutable handle to a `Value`.
-///
-/// The VM is single-threaded, so binding cells use `RefCell` rather than a
-/// synchronization primitive that implies cross-thread access.
-pub type SharedValue = Rc<RefCell<Value>>;
 
 /// A weak reference to an ObjectData that can be upgraded when needed.
 /// This helps prevent reference cycles in prototype chains.
@@ -701,7 +695,7 @@ pub struct ObjectData {
   /// populated in code-unit sorted export-name order and is deliberately kept
   /// outside `properties`: namespace exports have specialized internal
   /// methods rather than ordinary mutable data properties.
-  pub(crate) module_namespace_exports: Option<IndexMap<JsString, SharedValue>>,
+  pub(crate) module_namespace_exports: Option<IndexMap<JsString, BindingCell>>,
   /// Ephemeron entries for objects with a `[[WeakMapData]]` internal slot.
   pub(crate) weak_map_entries: Option<Vec<WeakMapEntry>>,
   /// Weak keys for objects with a `[[WeakSetData]]` internal slot.
@@ -921,7 +915,7 @@ pub enum Value {
     /// Function prototype
     proto: Rc<FunctionProto>,
     /// Captured / closed-over binding cells
-    env: Rc<RefCell<Vec<SharedValue>>>,
+    env: crate::closure_environment::ClosureEnvironment,
     /// Lexically captured `this` value for arrow functions.
     lexical_this: Option<Box<Value>>,
     /// Mutable property bag for function object properties (e.g., `prototype`).
@@ -967,7 +961,7 @@ pub(crate) enum WeakValue {
   Proxy(Weak<RefCell<ProxyData>>),
   Closure(
     Weak<FunctionProto>,
-    Weak<RefCell<Vec<SharedValue>>>,
+    crate::closure_environment::WeakClosureEnvironment,
     Option<Box<WeakValue>>,
     Weak<RefCell<ObjectData>>,
   ),
@@ -1020,7 +1014,7 @@ impl WeakValue {
         props,
       } => Self::Closure(
         Rc::downgrade(proto),
-        Rc::downgrade(env),
+        env.downgrade(),
         lexical_this
           .as_ref()
           .map(|value| Box::new(Self::new(value))),

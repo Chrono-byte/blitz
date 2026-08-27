@@ -338,8 +338,8 @@ impl Vm {
       | Value::Builtin(_)
       | Value::BuiltinObject(_, _)
       | Value::Promise(..) => {
-        let temp_root_base = self.roots.temporary.len();
-        self.roots.temporary.push(v.clone());
+        let temp_root_base = self.memory.temporary.len();
+        self.memory.temporary.push(v.clone());
         if crate::trace::enabled() {
           eprintln!(
             "[trace] to_primitive called on {} with hint={:?}",
@@ -356,7 +356,7 @@ impl Vm {
         let method = self.get_property_with_receiver(v, &to_prim_key, v)?;
         if !matches!(method, Value::Undefined | Value::Null) {
           if !Self::is_callable_value(&method) {
-            self.roots.temporary.truncate(temp_root_base);
+            self.memory.temporary.truncate(temp_root_base);
             return Err(self.throw_type_error("@@toPrimitive is not callable"));
           }
           if crate::trace::enabled() {
@@ -388,13 +388,13 @@ impl Vm {
             if crate::trace::enabled() {
               crate::trace::value_string("[trace] @@toPrimitive accepted primitive", &rv);
             }
-            self.roots.temporary.truncate(temp_root_base);
+            self.memory.temporary.truncate(temp_root_base);
             return Ok(rv);
           }
           if crate::trace::enabled() {
             crate::trace::value_string("[trace] @@toPrimitive produced non-primitive", &rv);
           }
-          self.roots.temporary.truncate(temp_root_base);
+          self.memory.temporary.truncate(temp_root_base);
           return Err(self.throw_type_error("@@toPrimitive must return a primitive value"));
         }
 
@@ -429,12 +429,12 @@ impl Vm {
                 | Value::BuiltinObject(_, _)
                 | Value::Promise(..)
             ) {
-              self.roots.temporary.truncate(temp_root_base);
+              self.memory.temporary.truncate(temp_root_base);
               return Ok(rv);
             }
           }
         }
-        self.roots.temporary.truncate(temp_root_base);
+        self.memory.temporary.truncate(temp_root_base);
         Err(self.throw_type_error("Cannot convert object to primitive value"))
       }
       _ => Ok(v.clone()),

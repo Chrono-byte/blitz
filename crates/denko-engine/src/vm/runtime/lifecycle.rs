@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: MPL-2.0
 
+use crate::binding::BindingCell;
 use crate::bytecode::{Chunk, OP_COUNT, Op};
 use crate::errors::RuntimeError;
 use crate::gc;
 use crate::module::ModuleLoader;
 use crate::realm::Realm;
 use crate::runtime_utils::array_length_descriptor;
-use crate::value::{
-  ArrayData, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, SharedValue, Value,
-};
+use crate::value::{ArrayData, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, Value};
 use crate::vm::Vm;
 use crate::vm::runtime::property::get_property;
 use crate::vm::state::*;
@@ -138,11 +137,7 @@ impl Vm {
         jit: crate::vm::jit::JitRuntime::default(),
         jit_stats: crate::vm::jit::JitStats::default(),
       },
-      roots: RootState {
-        temporary: Vec::new(),
-        kept_alive: Vec::new(),
-        host: Rc::new(RefCell::new(HostRootStore::new())),
-      },
+      memory: VmMemory::new(),
       interrupts: crate::vm::interrupt::VmInterruptState::new(),
       _gc_registration: gc_registration,
     };
@@ -246,11 +241,7 @@ impl Vm {
         jit: crate::vm::jit::JitRuntime::default(),
         jit_stats: crate::vm::jit::JitStats::default(),
       },
-      roots: RootState {
-        temporary: Vec::new(),
-        kept_alive: Vec::new(),
-        host: Rc::clone(&self.roots.host),
-      },
+      memory: self.memory.fork(),
       interrupts: self.interrupts.fork(),
       _gc_registration: gc_registration,
     }
@@ -261,23 +252,7 @@ impl Vm {
     &mut self,
     value: Value,
   ) -> HostRoot {
-    let mut store = self.roots.host.borrow_mut();
-    let slot = if let Some(slot) = store.free.pop() {
-      store.slots[slot].value = Some(value);
-      slot
-    } else {
-      let slot = store.slots.len();
-      store.slots.push(HostRootSlot {
-        generation: 0,
-        value: Some(value),
-      });
-      slot
-    };
-    HostRoot {
-      store_id: store.id,
-      slot,
-      generation: store.slots[slot].generation,
-    }
+    self.memory.create_host_root(value)
   }
 
   /// Replace a retained host value.
@@ -286,17 +261,7 @@ impl Vm {
     root: HostRoot,
     value: Value,
   ) -> Result<(), RuntimeError> {
-    let mut store = self.roots.host.borrow_mut();
-    if root.store_id != store.id {
-      return Err(RuntimeError::from("Invalid host root"));
-    }
-    let slot = store
-      .slots
-      .get_mut(root.slot)
-      .filter(|slot| slot.generation == root.generation && slot.value.is_some())
-      .ok_or_else(|| RuntimeError::from("Invalid host root"))?;
-    slot.value = Some(value);
-    Ok(())
+    self.memory.set_host_root(root, value)
   }
 
   /// Read a retained host value.
@@ -304,12 +269,28 @@ impl Vm {
     &self,
     root: HostRoot,
   ) -> Option<Value> {
-    let store = self.roots.host.borrow();
-    (root.store_id == store.id)
-      .then(|| store.slots.get(root.slot))
-      .flatten()
-      .filter(|slot| slot.generation == root.generation)
-      .and_then(|slot| slot.value.clone())
+    self.memory.host_root(root)
+  }
+
+  /// Create a non-retaining handle that can observe this root while it remains live.
+  pub fn downgrade_host_root(
+    &self,
+    root: HostRoot,
+  ) -> Option<WeakHostRoot> {
+    self.memory.downgrade_host_root(root)
+  }
+
+  /// Upgrade a weak host handle if its original root generation is still live.
+  pub fn upgrade_host_root(
+    &self,
+    root: WeakHostRoot,
+  ) -> Option<HostRoot> {
+    self.memory.upgrade_host_root(root)
+  }
+
+  /// Return current and cumulative measurements for VM-owned root storage.
+  pub fn memory_snapshot(&self) -> VmMemorySnapshot {
+    self.memory.snapshot()
   }
 
   /// Release a retained host value and invalidate its handle.
@@ -317,26 +298,14 @@ impl Vm {
     &mut self,
     root: HostRoot,
   ) -> Result<(), RuntimeError> {
-    let mut store = self.roots.host.borrow_mut();
-    if root.store_id != store.id {
-      return Err(RuntimeError::from("Invalid host root"));
-    }
-    let slot = store
-      .slots
-      .get_mut(root.slot)
-      .filter(|slot| slot.generation == root.generation && slot.value.is_some())
-      .ok_or_else(|| RuntimeError::from("Invalid host root"))?;
-    slot.value = None;
-    slot.generation = slot.generation.wrapping_add(1);
-    store.free.push(root.slot);
-    Ok(())
+    self.memory.release_host_root(root)
   }
 
   pub(crate) fn share_host_roots_from(
     &mut self,
     other: &Self,
   ) {
-    self.roots.host = Rc::clone(&other.roots.host);
+    self.memory.share_host_roots_from(&other.memory);
   }
 
   pub(super) fn begin_opcode_profile_run(&mut self) {
@@ -695,7 +664,7 @@ impl Vm {
     };
 
     let mut roots: Vec<Value> = Vec::new();
-    let mut env_roots: Vec<Rc<RefCell<Vec<SharedValue>>>> = Vec::new();
+    let mut env_roots: Vec<crate::closure_environment::ClosureEnvironment> = Vec::new();
     roots.push(Value::Object(Rc::clone(&self.realm_state.globals)));
     roots.extend(
       self
@@ -703,7 +672,7 @@ impl Vm {
         .active
         .locals
         .iter()
-        .map(|c| c.borrow().clone()),
+        .map(BindingCell::value),
     );
     roots.push(self.execution.active.this_value.clone());
     if let Some(value) = &self.construction.new_target {
@@ -737,34 +706,16 @@ impl Vm {
       roots.push(state.next_method.clone());
     }
     if let Some(env) = &self.execution.active.closure_env {
-      env_roots.push(Rc::clone(env));
-      roots.extend(
-        env
-          .borrow()
-          .iter()
-          .map(|cell| cell.borrow().clone()),
-      );
+      env_roots.push(env.clone());
+      roots.extend(env.borrow().iter().map(BindingCell::value));
     }
     if let Some(env) = &self.execution.pending_closure_env {
-      env_roots.push(Rc::clone(env));
-      roots.extend(
-        env
-          .borrow()
-          .iter()
-          .map(|cell| cell.borrow().clone()),
-      );
+      env_roots.push(env.clone());
+      roots.extend(env.borrow().iter().map(BindingCell::value));
     }
-    roots.extend(self.roots.temporary.iter().cloned());
-    roots.extend(self.roots.kept_alive.iter().cloned());
-    roots.extend(
-      self
-        .roots
-        .host
-        .borrow()
-        .slots
-        .iter()
-        .filter_map(|slot| slot.value.clone()),
-    );
+    roots.extend(self.memory.temporary.iter().cloned());
+    roots.extend(self.memory.kept_alive.iter().cloned());
+    self.memory.append_host_roots(&mut roots);
     roots.extend(
       self
         .caches
@@ -789,7 +740,7 @@ impl Vm {
           .context
           .locals
           .iter()
-          .map(|c| c.borrow().clone()),
+          .map(BindingCell::value),
       );
       roots.push(frame.context.this_value.clone());
       roots.push(frame.callee.clone());
@@ -808,13 +759,8 @@ impl Vm {
         roots.push(state.next_method.clone());
       }
       if let Some(env) = &frame.context.closure_env {
-        env_roots.push(Rc::clone(env));
-        roots.extend(
-          env
-            .borrow()
-            .iter()
-            .map(|cell| cell.borrow().clone()),
-        );
+        env_roots.push(env.clone());
+        roots.extend(env.borrow().iter().map(BindingCell::value));
       }
       frame
         .context
@@ -823,7 +769,7 @@ impl Vm {
         .collect_binding_values(&mut roots);
     }
     for module in &self.modules.table {
-      roots.extend(module.values().map(|cell| cell.borrow().clone()));
+      roots.extend(module.values().map(BindingCell::value));
     }
     if let Some(value) = self
       .realm_state
@@ -1172,7 +1118,7 @@ impl Vm {
           self.jobs.microtasks.len(),
           self.jobs.dynamic_imports.len(),
           self.execution.pending_closure_env.is_some(),
-          self.roots.temporary.len(),
+          self.memory.temporary.len(),
         );
       }
       return;
@@ -1213,7 +1159,7 @@ impl Vm {
       .unwrap_or(Value::Undefined);
     self.execution.active.closure_env = None;
     self.execution.pending_closure_env = None;
-    self.roots.temporary.clear();
+    self.memory.temporary.clear();
     self.execution.active.lexical_env = Rc::clone(&self.realm_state.global_env);
     self.execution.active.yield_star = None;
     self.execution.generator_return_frame_count = None;

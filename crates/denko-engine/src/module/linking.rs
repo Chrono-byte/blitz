@@ -93,7 +93,7 @@ impl ModuleLoader {
           .to_string_lossy()
           .starts_with(VIRTUAL_PATH_PREFIX)
           .then_some(specifier.as_str());
-        let mut candidates: HashMap<String, Option<SharedValue>> = HashMap::new();
+        let mut candidates: HashMap<String, Option<BindingCell>> = HashMap::new();
         for source in star_exports {
           let dependency = self.construct_from_importer(&base_dir, importer, &source)?;
           let dependency_path = dependency.borrow().path.clone();
@@ -117,7 +117,7 @@ impl ModuleLoader {
                 if entry
                   .get()
                   .as_ref()
-                  .is_some_and(|existing| !Rc::ptr_eq(existing, &slot))
+                  .is_some_and(|existing| !existing.same_storage(&slot))
                 {
                   entry.insert(None);
                 }
@@ -153,7 +153,7 @@ impl ModuleLoader {
           if record
             .exports
             .get(&name)
-            .is_none_or(|existing| !Rc::ptr_eq(existing, &slot))
+            .is_none_or(|existing| !existing.same_storage(&slot))
           {
             record.exports.insert(name, slot);
             changed = true;
@@ -178,7 +178,7 @@ impl ModuleLoader {
           continue;
         };
         if let Some(slot) = record.exports.get(exported) {
-          *slot.borrow_mut() = namespace;
+          slot.set(namespace);
         }
       }
     }
@@ -215,7 +215,7 @@ impl ModuleLoader {
           .map_err(|_| BundlerError::from("Prelinked binding count does not fit usize"))?;
         registration.binding_slots = Some(
           (0..binding_count)
-            .map(|_| Rc::new(RefCell::new(Value::Undefined)))
+            .map(|_| BindingCell::new(Value::Undefined))
             .collect(),
         );
         let slots = registration
@@ -229,7 +229,7 @@ impl ModuleLoader {
             let slot = slots
               .get(binding_id)
               .ok_or_else(|| BundlerError::from("Prelinked host binding ID is out of range"))?;
-            *slot.borrow_mut() = value.clone();
+            slot.set(value.clone());
           }
         }
       }
@@ -510,7 +510,7 @@ impl ModuleLoader {
                         .unwrap_or(Value::Uninitialized);
                       rec
                         .exports
-                        .insert(exported, Rc::new(RefCell::new(initial)));
+                        .insert(exported, BindingCell::new(initial));
                     }
                   }
                 }
@@ -530,7 +530,7 @@ impl ModuleLoader {
                     };
                     rec
                       .exports
-                      .insert(id.to_string(), Rc::new(RefCell::new(initial)));
+                      .insert(id.to_string(), BindingCell::new(initial));
                   } else if decl_type == "VariableDeclaration"
                     && let Some(decls) = decl
                       .get("declarations")
@@ -547,7 +547,7 @@ impl ModuleLoader {
                       for name in names {
                         rec
                           .exports
-                          .insert(name, Rc::new(RefCell::new(initial.clone())));
+                          .insert(name, BindingCell::new(initial.clone()));
                       }
                     }
                   }
@@ -564,7 +564,7 @@ impl ModuleLoader {
                 };
                 rec
                   .exports
-                  .insert("default".to_string(), Rc::new(RefCell::new(initial)));
+                  .insert("default".to_string(), BindingCell::new(initial));
               }
               "ExportAllDeclaration" => {
                 if let Some(source) = item
@@ -575,7 +575,7 @@ impl ModuleLoader {
                   if let Some(exported) = estree_module_export_name(item.get("exported")) {
                     rec
                       .exports
-                      .insert(exported.clone(), Rc::new(RefCell::new(Value::Undefined)));
+                      .insert(exported.clone(), BindingCell::new(Value::Undefined));
                     rec
                       .namespace_export_sources
                       .push((exported, source.to_string()));
@@ -726,9 +726,7 @@ impl ModuleLoader {
                   if let Some(slot) = slot_opt {
                     {
                       let mut rec = rec_rc.borrow_mut();
-                      rec
-                        .imports
-                        .insert(local.clone(), Rc::clone(&slot));
+                      rec.imports.insert(local.clone(), slot.clone());
                       if let Some(src_idx) = dep_module_index {
                         rec
                           .import_sources
@@ -756,9 +754,7 @@ impl ModuleLoader {
                   if let Some(slot) = slot_opt {
                     {
                       let mut rec = rec_rc.borrow_mut();
-                      rec
-                        .imports
-                        .insert(local.clone(), Rc::clone(&slot));
+                      rec.imports.insert(local.clone(), slot.clone());
                       if let Some(src_idx) = dep_module_index {
                         rec
                           .import_sources
@@ -781,9 +777,9 @@ impl ModuleLoader {
                     .to_string();
                   let exports_snapshot = { dep_rec_rc.borrow().exports.clone() };
                   let dep_module_index = dep_rec_rc.borrow().module_index;
-                  let boxed = Rc::new(RefCell::new(
+                  let boxed = BindingCell::new(
                     crate::vm::runtime::modules::build_module_namespace_object(&exports_snapshot),
-                  ));
+                  );
                   {
                     let mut rec = rec_rc.borrow_mut();
                     rec.imports.insert(local.clone(), boxed);

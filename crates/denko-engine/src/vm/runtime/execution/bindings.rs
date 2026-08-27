@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
+use crate::binding::BindingCell;
 use crate::environment::EnvironmentRecord;
 use crate::value::{PropertyDescriptor, PropertyKey, Value};
 use crate::vm::Vm;
@@ -41,13 +42,13 @@ impl Vm {
       let (Some(name), Some(cell)) = (name, locals.get(index)) else {
         continue;
       };
-      let initialized = !matches!(*cell.borrow(), Value::Uninitialized);
+      let initialized = !cell.is_uninitialized();
       if immutable.get(index).copied().unwrap_or(false) {
-        global_env.create_immutable_binding(name, Rc::clone(cell), initialized);
+        global_env.create_immutable_binding(name, cell.clone(), initialized);
       } else if lexical.get(index).copied().unwrap_or(false) {
-        global_env.create_mutable_lexical_binding(name, Rc::clone(cell), initialized);
+        global_env.create_mutable_lexical_binding(name, cell.clone(), initialized);
       } else {
-        global_env.create_mutable_binding(name, Rc::clone(cell), initialized);
+        global_env.create_mutable_binding(name, cell.clone(), initialized);
       }
     }
   }
@@ -87,13 +88,12 @@ impl Vm {
       return;
     }
 
-    self.execution.active.locals =
-      std::iter::repeat_with(|| Rc::new(RefCell::new(Value::Undefined)))
-        .take(slot_count)
-        .collect();
+    self.execution.active.locals = std::iter::repeat_with(|| BindingCell::new(Value::Undefined))
+      .take(slot_count)
+      .collect();
     for (idx, is_tdz) in slot_tdz.iter().copied().enumerate() {
       if is_tdz && idx < self.execution.active.locals.len() {
-        *self.execution.active.locals[idx].borrow_mut() = Value::Uninitialized;
+        self.execution.active.locals[idx].set(Value::Uninitialized);
       }
     }
 
@@ -108,7 +108,7 @@ impl Vm {
         if slot_immutable.get(idx).copied().unwrap_or(false) {
           root_env.borrow_mut().create_immutable_binding(
             name.clone(),
-            Rc::clone(&self.execution.active.locals[idx]),
+            self.execution.active.locals[idx].clone(),
             initialized,
           );
         } else if slot_tdz.get(idx).copied().unwrap_or(false) {
@@ -116,18 +116,18 @@ impl Vm {
             .borrow_mut()
             .create_mutable_lexical_binding(
               name.clone(),
-              Rc::clone(&self.execution.active.locals[idx]),
+              self.execution.active.locals[idx].clone(),
               initialized,
             );
         } else {
           root_env.borrow_mut().create_mutable_binding(
             name.clone(),
-            Rc::clone(&self.execution.active.locals[idx]),
+            self.execution.active.locals[idx].clone(),
             initialized,
           );
         }
         if initialized && self.current_module_specifier().is_none() {
-          let value = self.execution.active.locals[idx].borrow().clone();
+          let value = self.execution.active.locals[idx].value();
           self
             .realm_state
             .globals

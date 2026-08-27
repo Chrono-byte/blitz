@@ -27,24 +27,26 @@
 //! // vm.run(chunk)?;
 //! ```
 
+use crate::binding::BindingCell;
 use crate::bytecode::{Chunk, FunctionProto, OP_COUNT};
 use crate::environment::EnvironmentRecord;
 use crate::gc;
 use crate::module::ModuleLoader;
 use crate::realm::Realm;
-use crate::value::{ObjectData, SharedValue, Value};
+use crate::value::{ObjectData, Value};
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::env;
 use std::rc::{Rc, Weak};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use tokio::runtime::Runtime;
 
+pub(crate) mod arena;
 mod frame;
 mod generator_runner;
 mod handler;
+mod memory;
 mod partial_descriptor;
 mod stack;
 mod yield_star;
@@ -55,6 +57,8 @@ pub(crate) use handler::{
   AwaitSettlement, FinallyHandlerRecord, HandlerRecord, PendingOperationStep, PendingRiscOperation,
   RiscExecutionState, RiscRunOutcome,
 };
+pub(crate) use memory::VmMemory;
+pub use memory::{HostRoot, VmMemorySnapshot, WeakHostRoot};
 pub(crate) use partial_descriptor::PartialDescriptor;
 pub(crate) use stack::{CallStack, HandlerStack};
 pub(crate) use yield_star::{YieldStarResume, YieldStarState};
@@ -157,7 +161,7 @@ pub struct Vm {
   pub(super) jobs: JobState,
   pub(super) caches: CacheState,
   pub(super) profiling: ProfilingState,
-  pub(super) roots: RootState,
+  pub(super) memory: VmMemory,
   pub(super) interrupts: crate::vm::interrupt::VmInterruptState,
   /// Keeps this VM represented in the thread-local prototype heap lifetime.
   ///
@@ -189,9 +193,9 @@ pub(crate) struct ArgumentsState {
 pub(crate) struct ExecutionContext {
   pub(crate) chunk: Arc<Chunk>,
   pub(crate) ip: usize,
-  pub(crate) locals: Vec<SharedValue>,
+  pub(crate) locals: Vec<BindingCell>,
   pub(crate) this_value: Value,
-  pub(crate) closure_env: Option<Rc<RefCell<Vec<SharedValue>>>>,
+  pub(crate) closure_env: Option<crate::closure_environment::ClosureEnvironment>,
   pub(crate) slots: Option<SlotMetadata>,
   pub(crate) lexical_env: Rc<RefCell<EnvironmentRecord>>,
   pub(crate) yield_star: Option<YieldStarState>,
@@ -212,7 +216,7 @@ pub(super) struct ExecutionState {
   /// this is zero, preserving JavaScript job run-to-completion.
   pub(super) interpreter_depth: usize,
   pub(super) builtin_this_arg_prepended: bool,
-  pub(super) pending_closure_env: Option<Rc<RefCell<Vec<SharedValue>>>>,
+  pub(super) pending_closure_env: Option<crate::closure_environment::ClosureEnvironment>,
   pub(super) call_stack: CallStack,
   pub(super) root_chunk: Option<Arc<Chunk>>,
   pub(super) direct_eval_outer: Option<DirectEvalState>,
@@ -235,7 +239,7 @@ pub(super) struct ConstructionState {
 
 pub(super) struct ModuleState {
   pub(super) loader: Rc<RefCell<ModuleLoader>>,
-  pub(super) table: Vec<HashMap<String, SharedValue>>,
+  pub(super) table: Vec<HashMap<String, BindingCell>>,
   pub(super) current_specifier: Option<String>,
 }
 
@@ -311,43 +315,6 @@ pub(super) struct ProfilingState {
   pub(super) hot_chunks: std::collections::HashSet<usize>,
   pub(super) jit: crate::vm::jit::JitRuntime,
   pub(super) jit_stats: crate::vm::jit::JitStats,
-}
-
-pub(super) struct RootState {
-  pub(super) temporary: Vec<Value>,
-  /// Objects returned from WeakRef.prototype.deref until the current job ends.
-  pub(super) kept_alive: Vec<Value>,
-  pub(super) host: Rc<RefCell<HostRootStore>>,
-}
-
-/// Opaque handle to a value retained by the VM for a host integration.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct HostRoot {
-  pub(super) store_id: u64,
-  pub(super) slot: usize,
-  pub(super) generation: u64,
-}
-
-pub(super) struct HostRootSlot {
-  pub(super) generation: u64,
-  pub(super) value: Option<Value>,
-}
-
-pub(super) struct HostRootStore {
-  pub(super) id: u64,
-  pub(super) slots: Vec<HostRootSlot>,
-  pub(super) free: Vec<usize>,
-}
-
-impl HostRootStore {
-  pub(super) fn new() -> Self {
-    static NEXT_HOST_ROOT_STORE_ID: AtomicU64 = AtomicU64::new(1);
-    Self {
-      id: NEXT_HOST_ROOT_STORE_ID.fetch_add(1, Ordering::Relaxed),
-      slots: Vec::new(),
-      free: Vec::new(),
-    }
-  }
 }
 
 thread_local! {

@@ -37,7 +37,7 @@ pub(crate) fn own_property_descriptor(
         && let Some(binding) = exports.get(name)
       {
         return Some(PropertyDescriptor::Data {
-          value: binding.borrow().clone(),
+          value: binding.value(),
           writable: true,
           enumerable: true,
           configurable: false,
