@@ -1284,7 +1284,7 @@ impl Compiler {
               }
             } else if let Some(upvalue) = self.resolve_upvalue(name) {
               self.emit(Op::SetUpvalue, LINE);
-              self.emit_byte(upvalue, LINE);
+              self.emit_u16(upvalue, LINE);
             } else {
               self.emit_set_global_name(name);
             }

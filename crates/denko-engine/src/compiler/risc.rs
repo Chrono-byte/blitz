@@ -519,7 +519,10 @@ impl RiscBuilder {
             encode_risc_aux16(
               instruction.op,
               rd,
-              if matches!(instruction.op, Op::LoadLocal | Op::MakeClosure) {
+              if matches!(
+                instruction.op,
+                Op::LoadLocal | Op::GetUpvalue | Op::MakeClosure
+              ) {
                 instruction.operand_u16()
               } else {
                 arg as u16
@@ -548,7 +551,7 @@ impl RiscBuilder {
               source,
               if matches!(instruction.op, Op::SetGlobal) {
                 instruction.operand_u16()
-              } else if matches!(instruction.op, Op::StoreLocal) {
+              } else if matches!(instruction.op, Op::StoreLocal | Op::SetUpvalue) {
                 instruction.operand_u16()
               } else {
                 arg as u16

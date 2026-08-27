@@ -108,7 +108,7 @@ pub(crate) struct Compiler {
   /// Bindings visible from the immediately enclosing function.
   pub outer_bindings: HashMap<String, CaptureSource>,
   /// Upvalue indices allocated in this compiler.
-  pub upvalue_indices: HashMap<String, u8>,
+  pub upvalue_indices: HashMap<String, u16>,
   /// Upvalue capture specs for the current function.
   pub captured_upvalues: Vec<UpvalueSpec>,
   /// Private identifiers visible in the current class lexical environment.
@@ -165,7 +165,7 @@ pub enum CaptureSource {
   /// Upvalue captured from outer closure.
   Upvalue {
     /// Upvalue index in the enclosing function.
-    index: u8,
+    index: u16,
     /// Export name owned by the captured binding, if any.
     module_export_name: Option<String>,
     /// Whether assignment to this binding must be rejected.
@@ -1185,11 +1185,11 @@ impl Compiler {
 
   pub(crate) fn emit_sync_upvalue_module_export(
     &mut self,
-    upvalue: u8,
+    upvalue: u16,
   ) -> Result<(), CompilerError> {
     if let Some((upvalue, export_name)) = self.module_export_for_upvalue(upvalue) {
       self.emit(Op::GetUpvalue, LINE);
-      self.emit_byte(upvalue, LINE);
+      self.emit_u16(upvalue, LINE);
       self.emit_set_own_module_export(&export_name)?;
     }
     Ok(())
@@ -1197,8 +1197,8 @@ impl Compiler {
 
   fn module_export_for_upvalue(
     &self,
-    upvalue: u8,
-  ) -> Option<(u8, String)> {
+    upvalue: u16,
+  ) -> Option<(u16, String)> {
     self
       .upvalue_indices
       .iter()
@@ -1239,7 +1239,7 @@ impl Compiler {
       self.emit_slot(slot, LINE);
     } else if let Some(upvalue) = self.resolve_upvalue(name) {
       self.emit(Op::GetUpvalue, LINE);
-      self.emit_byte(upvalue, LINE);
+      self.emit_u16(upvalue, LINE);
     } else if let Some((src_idx, exported_name)) = self
       .current_module
       .as_ref()
@@ -1292,12 +1292,12 @@ impl Compiler {
   pub(crate) fn resolve_upvalue(
     &mut self,
     name: &str,
-  ) -> Option<u8> {
+  ) -> Option<u16> {
     if let Some(&idx) = self.upvalue_indices.get(name) {
       return Some(idx);
     }
     let source = self.outer_bindings.get(name)?.clone();
-    let idx = u8::try_from(self.captured_upvalues.len()).ok()?;
+    let idx = u16::try_from(self.captured_upvalues.len()).ok()?;
     let spec = match source {
       CaptureSource::Local {
         slot,
@@ -1319,7 +1319,7 @@ impl Compiler {
         ..
       } => UpvalueSpec {
         is_local: false,
-        index: u16::from(upvalue),
+        index: upvalue,
         mirror_global_name: None,
         immutable,
         sloppy_immutable_silent,

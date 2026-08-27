@@ -670,7 +670,7 @@ impl super::Compiler {
                   self.emit_sync_local_module_export(name, slot)?;
                 } else if let Some(upvalue) = self.resolve_upvalue(name) {
                   self.emit(Op::SetUpvalue, LINE);
-                  self.emit_byte(upvalue, LINE);
+                  self.emit_u16(upvalue, LINE);
                   self.emit_sync_upvalue_module_export(upvalue)?;
                 } else {
                   self.emit_set_global_name(name);
@@ -849,7 +849,7 @@ impl super::Compiler {
                 self.patch_jump(jump_end);
               } else if let Some(upvalue) = self.resolve_upvalue(name) {
                 self.emit(Op::GetUpvalue, LINE);
-                self.emit_byte(upvalue, LINE);
+                self.emit_u16(upvalue, LINE);
                 self.emit(Op::Copy, LINE);
                 self.emit(Op::JumpIfFalse, LINE);
                 let jump_end = self.current_ip();
@@ -859,7 +859,7 @@ impl super::Compiler {
                 self.compile_expr_oast(&a.right)?;
                 self.emit(Op::Copy, LINE);
                 self.emit(Op::SetUpvalue, LINE);
-                self.emit_byte(upvalue, LINE);
+                self.emit_u16(upvalue, LINE);
                 self.patch_jump(jump_end);
               } else {
                 self.emit_get_global_name(name);
@@ -931,7 +931,7 @@ impl super::Compiler {
                 self.patch_jump(jump_end);
               } else if let Some(upvalue) = self.resolve_upvalue(name) {
                 self.emit(Op::GetUpvalue, LINE);
-                self.emit_byte(upvalue, LINE);
+                self.emit_u16(upvalue, LINE);
                 self.emit(Op::Copy, LINE);
                 self.emit(Op::JumpIfTrue, LINE);
                 let jump_end = self.current_ip();
@@ -941,7 +941,7 @@ impl super::Compiler {
                 self.compile_expr_oast(&a.right)?;
                 self.emit(Op::Copy, LINE);
                 self.emit(Op::SetUpvalue, LINE);
-                self.emit_byte(upvalue, LINE);
+                self.emit_u16(upvalue, LINE);
                 self.patch_jump(jump_end);
               } else {
                 self.emit_get_global_name(name);
@@ -1018,7 +1018,7 @@ impl super::Compiler {
                 self.patch_jump(after_store);
               } else if let Some(upvalue) = self.resolve_upvalue(name) {
                 self.emit(Op::GetUpvalue, LINE);
-                self.emit_byte(upvalue, LINE);
+                self.emit_u16(upvalue, LINE);
                 self.emit(Op::Copy, LINE);
                 self.emit(Op::JumpIfNullish, LINE);
                 let jump_end = self.current_ip();
@@ -1033,7 +1033,7 @@ impl super::Compiler {
                 self.compile_expr_oast(&a.right)?;
                 self.emit(Op::Copy, LINE);
                 self.emit(Op::SetUpvalue, LINE);
-                self.emit_byte(upvalue, LINE);
+                self.emit_u16(upvalue, LINE);
                 self.patch_jump(after_store);
               } else {
                 self.emit_get_global_name(name);

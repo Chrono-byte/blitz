@@ -619,7 +619,7 @@ impl super::Compiler {
       self.emit_sync_local_module_export(name, slot)?;
     } else if let Some(upvalue) = self.resolve_upvalue(name) {
       self.emit(Op::SetUpvalue, LINE);
-      self.emit_byte(upvalue, LINE);
+      self.emit_u16(upvalue, LINE);
       self.emit_sync_upvalue_module_export(upvalue)?;
     } else {
       self.emit_set_global_name(name);

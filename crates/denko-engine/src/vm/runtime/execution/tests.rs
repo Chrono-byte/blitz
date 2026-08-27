@@ -68,6 +68,27 @@ mod test {
   }
 
   #[test]
+  fn closures_capture_upvalues_above_u8_range() {
+    let declarations = (0..300)
+      .map(|index| format!("let captured{index} = undefined;"))
+      .collect::<String>();
+    let references = (0..300)
+      .map(|index| format!("captured{index}"))
+      .collect::<Vec<_>>()
+      .join(",");
+    let statements = references
+      .split(',')
+      .map(|reference| format!("{reference};"))
+      .collect::<String>();
+    let source = format!(
+      "{declarations} function readHighUpvalue() {{ {statements} return captured299 === undefined; }} globalThis.highUpvalue = readHighUpvalue();"
+    );
+
+    let (vm, _) = run_script(&source);
+    assert_eq!(vm.get_global("highUpvalue"), Some(Value::Bool(true)));
+  }
+
+  #[test]
   fn host_interrupt_is_not_a_catchable_javascript_exception() {
     let session = Parser::parse_source(
       "globalThis.interrupt_caught = false; try { globalThis.interrupt_started = true; } catch (_) { globalThis.interrupt_caught = true; }",
