@@ -43,6 +43,7 @@ mod early_errors;
 mod emit;
 mod expression;
 mod function;
+mod optimize;
 mod optional_chain;
 mod pre_declare;
 mod reference;

@@ -273,6 +273,7 @@ pub(crate) enum NumericRegionShape {
   AddPrepared,
   SubtractPrepared,
   MultiplyPrepared,
+  DividePrepared,
 }
 
 impl NumericRegionShape {
@@ -282,6 +283,7 @@ impl NumericRegionShape {
       Self::AddPrepared => 1,
       Self::SubtractPrepared => 2,
       Self::MultiplyPrepared => 3,
+      Self::DividePrepared => 4,
     }
   }
 }

@@ -11,17 +11,25 @@ use crate::errors::CompilerError;
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ValueId(usize);
+pub(crate) struct ValueId(pub(crate) usize);
 
-struct PendingInstruction {
-  op: Op,
-  payload: u32,
-  branch_offset: Option<i32>,
-  inputs: InstructionInputs,
-  output: Option<ValueId>,
+impl ValueId {
+  #[allow(dead_code)]
+  pub(crate) fn from_index(index: usize) -> Self {
+    Self(index)
+  }
 }
 
-enum InstructionInputs {
+pub(crate) struct PendingInstruction {
+  pub(crate) op: Op,
+  pub(crate) payload: u32,
+  pub(crate) branch_offset: Option<i32>,
+  pub(crate) inputs: InstructionInputs,
+  pub(crate) output: Option<ValueId>,
+}
+
+#[derive(Clone)]
+pub(crate) enum InstructionInputs {
   None,
   One(ValueId),
   Two([ValueId; 2]),
@@ -29,7 +37,7 @@ enum InstructionInputs {
 }
 
 impl InstructionInputs {
-  fn from_slice(values: &[ValueId]) -> Self {
+  pub(crate) fn from_slice(values: &[ValueId]) -> Self {
     match values {
       [] => Self::None,
       [value] => Self::One(*value),
@@ -38,7 +46,7 @@ impl InstructionInputs {
     }
   }
 
-  fn as_slice(&self) -> &[ValueId] {
+  pub(crate) fn as_slice(&self) -> &[ValueId] {
     match self {
       Self::None => &[],
       Self::One(value) => std::slice::from_ref(value),
@@ -211,15 +219,15 @@ struct BranchPatch {
 /// positions; finalization assigns those values to `r8..r15` and spill slots.
 #[derive(Default)]
 pub(crate) struct RiscBuilder {
-  instructions: Vec<PendingInstruction>,
-  lines: Vec<u32>,
+  pub(crate) instructions: Vec<PendingInstruction>,
+  pub(crate) lines: Vec<u32>,
   pending: Option<(Op, u32, u32)>,
-  values: Vec<ValueId>,
-  max_values: usize,
-  branch_values: HashMap<usize, Vec<ValueId>>,
+  pub(crate) values: Vec<ValueId>,
+  pub(crate) max_values: usize,
+  pub(crate) branch_values: HashMap<usize, Vec<ValueId>>,
   #[cfg(debug_assertions)]
   entry_values: HashMap<usize, Vec<ValueId>>,
-  reachable: bool,
+  pub(crate) reachable: bool,
 }
 
 impl RiscBuilder {
@@ -428,6 +436,7 @@ impl RiscBuilder {
     mut builder: RiscBuilder,
   ) -> Result<Chunk, CompilerError> {
     builder.finalize_pending();
+    crate::compiler::optimize::optimize(&mut builder, &mut chunk);
     for instruction in &builder.instructions {
       if !risc_executor_supports(instruction.op) {
         return Err(CompilerError::from(format!(

@@ -429,6 +429,7 @@ pub(crate) enum NumericBinaryOp {
   Add,
   Subtract,
   Multiply,
+  Divide,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -516,7 +517,7 @@ impl DirectCallTarget {
 pub(crate) struct JitRuntime {
   pub(crate) code: HashMap<FunctionId, Vec<JitCode>>,
   next_version: u64,
-  numeric_regions: [NumericRegionCode; 4],
+  numeric_regions: [NumericRegionCode; 5],
   dense_array_push_region: NumericRegionCode,
   dense_masked_read_region: NumericRegionCode,
   optimizing: OptimizingTier,
@@ -925,6 +926,9 @@ impl JitRuntime {
       }
       crate::vm::region::NumericRegionShape::MultiplyPrepared => {
         native::NumericLoopAddend::MultiplyConstant
+      }
+      crate::vm::region::NumericRegionShape::DividePrepared => {
+        native::NumericLoopAddend::DivideConstant
       }
     };
     let slot = &mut self.numeric_regions[prepared.shape.index()];

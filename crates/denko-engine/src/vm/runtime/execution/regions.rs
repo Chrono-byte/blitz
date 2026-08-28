@@ -1294,6 +1294,9 @@ impl Vm {
               crate::vm::jit::NumericBinaryOp::Multiply => {
                 crate::vm::region::NumericRegionShape::MultiplyPrepared
               }
+              crate::vm::jit::NumericBinaryOp::Divide => {
+                crate::vm::region::NumericRegionShape::DividePrepared
+              }
             };
             value
           }

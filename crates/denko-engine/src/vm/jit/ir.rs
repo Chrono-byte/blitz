@@ -63,6 +63,7 @@ impl CompilerChunk {
       Op::Add => Some(NumericBinaryOp::Add),
       Op::Sub => Some(NumericBinaryOp::Subtract),
       Op::Mul => Some(NumericBinaryOp::Multiply),
+      Op::Div => Some(NumericBinaryOp::Divide),
       _ => None,
     }
   }
@@ -131,6 +132,7 @@ impl SemanticFunction {
       Op::Add => NumericBinaryOp::Add,
       Op::Sub => NumericBinaryOp::Subtract,
       Op::Mul => NumericBinaryOp::Multiply,
+      Op::Div => NumericBinaryOp::Divide,
       _ => return Err(IrError::UnsupportedBody),
     };
     Ok(Self {
@@ -320,7 +322,8 @@ mod tests {
   #[test]
   fn rejects_unsupported_binary_and_malformed_typed_ssa() {
     let mut snapshot = add_snapshot();
-    snapshot.code[2] = (snapshot.code[2] & !0xff) | Op::Div as u32;
+    // Div is now supported; test with Mod which remains unsupported for direct binary.
+    snapshot.code[2] = (snapshot.code[2] & !0xff) | Op::Mod as u32;
     assert_eq!(
       SemanticFunction::decode(&snapshot),
       Err(IrError::UnsupportedBody)

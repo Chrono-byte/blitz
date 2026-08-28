@@ -58,6 +58,7 @@ pub(crate) enum NumericLoopAddend {
   Index,
   SubtractConstant,
   MultiplyConstant,
+  DivideConstant,
 }
 
 pub(crate) const NUMERIC_EXIT_COMPLETED: u32 = 0;
@@ -436,6 +437,9 @@ impl NativeCode {
       }
       NumericLoopAddend::MultiplyConstant => {
         bytes.extend_from_slice(&[0xF2, 0x0F, 0x59, 0xD4]); // mulsd xmm2, xmm4
+      }
+      NumericLoopAddend::DivideConstant => {
+        bytes.extend_from_slice(&[0xF2, 0x0F, 0x5E, 0xD4]); // divsd xmm2, xmm4
       }
     }
     bytes.extend_from_slice(&[

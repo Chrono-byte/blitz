@@ -297,6 +297,9 @@ mod test {
   #[cfg(all(unix, target_arch = "x86_64"))]
   #[test]
   fn unsupported_numeric_division_body_is_rejected_once() {
+    // Divide is now supported via the optimizing JIT (see `NumericBinaryOp::Divide`).
+    // This test now verifies that a numeric division body is successfully compiled
+    // and executed natively. Use `left % right` for an unsupported body.
     let (vm, _) = run_script(
       "function divide(left, right) { return left / right; } let total = 1; for (let i = 0; i < 3000; i += 1) total = divide(total, 1); globalThis.typed_divide_total = total;",
     );
@@ -304,11 +307,10 @@ mod test {
       vm.get_global("typed_divide_total"),
       Some(Value::Number(1.0))
     );
-    let (attempts, installs, native_calls, guard_failures) = vm.profiling.jit.optimizing_stats();
-    assert_eq!(attempts, 0);
-    assert_eq!(installs, 0);
-    assert_eq!(native_calls, 0);
-    assert_eq!(guard_failures, 0);
+    let (attempts, installs, native_calls, _guard_failures) = vm.profiling.jit.optimizing_stats();
+    assert_eq!(attempts, 1);
+    assert_eq!(installs, 1);
+    assert!(native_calls > 0);
   }
 
   #[cfg(all(unix, target_arch = "x86_64"))]

@@ -111,6 +111,7 @@ pub(crate) fn emit_numeric_binary(
     super::NumericBinaryOp::Add => 0x58,
     super::NumericBinaryOp::Subtract => 0x5C,
     super::NumericBinaryOp::Multiply => 0x59,
+    super::NumericBinaryOp::Divide => 0x5E,
   }]);
   code.emit(&[0xC1]); // scalar binary operation xmm0, xmm1
   code.emit(&[0x66, 0x48, 0x0F, 0x7E, 0xC0]); // movq rax, xmm0
