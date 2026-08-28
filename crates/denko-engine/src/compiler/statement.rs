@@ -437,7 +437,6 @@ impl Compiler {
         self.patch_jump(handler_jump);
 
         self.emit(Op::PopEnv, LINE);
-        self.with_depth = self.with_depth.saturating_sub(1);
         self.emit(Op::Throw, LINE);
         let _after_handler = self.current_ip();
 
@@ -1381,7 +1380,10 @@ impl Compiler {
           return Ok(());
         }
         if let Some(arg) = &r.argument {
-          if self.handler_depth == 0 && self.iterator_close_stack.is_empty() && self.with_depth == 0
+          if self.handler_depth == 0
+            && self.iterator_close_stack.is_empty()
+            && self.with_depth == 0
+            && self.finally_patches.is_empty()
           {
             self.compile_expr_oast_tail(arg)?;
           } else {

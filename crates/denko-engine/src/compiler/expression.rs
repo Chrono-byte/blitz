@@ -633,12 +633,7 @@ impl super::Compiler {
                 .as_ref()
                 .is_some_and(|c| c.imports.contains_key(name));
               if is_imported {
-                self.compile_expr_oast(&a.right)?;
-                self.emit(Op::Discard, LINE);
-                self.emit_get_builtin_name("throwTypeError");
-                self.emit(Op::Call, LINE);
-                self.emit_byte(0, LINE);
-                return Ok(());
+                return Err(Self::imported_binding_assignment_error());
               }
               let with_reference = (self.with_depth > 0 || self.may_capture_with)
                 .then(|| self.emit_resolve_with_identifier(name))
@@ -1205,6 +1200,13 @@ impl super::Compiler {
         match &u.argument {
           OTarget::AssignmentTargetIdentifier(id) => {
             let name = id.name.as_str();
+            if self
+              .current_module
+              .as_ref()
+              .is_some_and(|c| c.imports.contains_key(name))
+            {
+              return Err(Self::imported_binding_assignment_error());
+            }
             let with_reference = (self.with_depth > 0 || self.may_capture_with)
               .then(|| self.emit_resolve_with_identifier(name))
               .transpose()?;

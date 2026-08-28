@@ -117,6 +117,13 @@ impl Compiler {
       }
       oast::Statement::LabeledStatement(l) => self.var_declared_names_of_statement(&l.body, out),
       oast::Statement::WithStatement(w) => self.var_declared_names_of_statement(&w.body, out),
+      oast::Statement::SwitchStatement(s) => {
+        for case in &s.cases {
+          for statement in &case.consequent {
+            self.var_declared_names_of_statement(statement, out);
+          }
+        }
+      }
       oast::Statement::TryStatement(t) => {
         for stmt in &t.block.body {
           self.var_declared_names_of_statement(stmt, out);

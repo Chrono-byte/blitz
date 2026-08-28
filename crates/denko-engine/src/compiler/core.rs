@@ -105,6 +105,10 @@ pub(crate) struct Compiler {
   pub allow_new_target: bool,
   /// Whether `super` property access/calls are valid in the current context.
   pub allow_super: bool,
+  /// Whether this compiler is for an async function.
+  pub is_async: bool,
+  /// Whether this compiler is for a generator function.
+  pub is_generator: bool,
   /// Bindings visible from the immediately enclosing function.
   pub outer_bindings: HashMap<String, CaptureSource>,
   /// Upvalue indices allocated in this compiler.
@@ -344,6 +348,8 @@ impl Compiler {
       pending_operand_bytes: 0,
       allow_new_target,
       allow_super,
+      is_async: false,
+      is_generator: false,
       outer_bindings: HashMap::new(),
       upvalue_indices: HashMap::new(),
       captured_upvalues: Vec::new(),
@@ -351,6 +357,29 @@ impl Compiler {
       pending_instance_fields: Vec::new(),
       emission_error: None,
     }
+  }
+
+  /// Returns true if a tail call can be emitted in the current context.
+  pub(crate) fn can_emit_tail_call(&self) -> bool {
+    self.strict_context
+      && self.finally_patches.is_empty()
+      && self.handler_depth == 0
+      && self.iterator_close_stack.is_empty()
+      && self.with_depth == 0
+      && !self.is_async
+      && !self.is_generator
+  }
+
+  /// Compute a 1-based source line for a span. Falls back to 1 when out of bounds.
+  #[allow(dead_code)]
+  pub(crate) fn line_for_span(&self, span: oxc_span::Span) -> u32 {
+    let source = self.source_text.as_str();
+    let offset = span.start as usize;
+    if offset > source.len() {
+      return 1;
+    }
+    // Count newlines before offset; oxc spans are byte offsets.
+    source[..offset].bytes().filter(|&b| b == b'\n').count() as u32 + 1
   }
 
   /// Emits a single instruction word with an 8-bit opcode and zero payload.
@@ -402,14 +431,16 @@ impl Compiler {
     // Pack a single operand byte into the pending instruction's 24-bit payload
     // using little-endian order: first emitted byte occupies bits 8..15, next 16..23, etc.
     if self.risc.is_empty() {
+      self.emission_error.get_or_insert_with(|| {
+        CompilerError::from("compiler emitted operand without instruction")
+      });
       return;
     }
     if self.pending_operand_bytes >= 3 {
       // Avoid writing beyond the instruction payload.
-      debug_assert!(
-        self.pending_operand_bytes < 3,
-        "too many operand bytes for instruction payload"
-      );
+      self.emission_error.get_or_insert_with(|| {
+        CompilerError::from("too many operand bytes for instruction payload")
+      });
       return;
     }
     self
@@ -650,7 +681,7 @@ impl Compiler {
       .scopes
       .iter()
       .rposition(|scope| scope.kind == ScopeKind::Function)
-      .expect("compiler must always have a function scope")
+      .unwrap_or(0)
   }
 
   /// Adds a local variable to the given scope, returning its slot index.
@@ -1007,17 +1038,20 @@ impl Compiler {
 
   /// Exits the current scope, popping it from the scope stack.
   pub(crate) fn exit_scope(&mut self) {
-    let scope = self
-      .scopes
-      .pop()
-      .expect("compiler must always have an active scope");
+    let Some(scope) = self.scopes.pop() else {
+      self.emission_error.get_or_insert_with(|| {
+        CompilerError::from("compiler scope error: missing active scope")
+      });
+      return;
+    };
     for _ in 0..scope.runtime_env_count {
       self.emit(Op::PopEnv, 1);
     }
-    debug_assert!(
-      !matches!(scope.kind, ScopeKind::Function) || !self.scopes.is_empty(),
-      "cannot pop the last function scope"
-    );
+    if matches!(scope.kind, ScopeKind::Function) && self.scopes.is_empty() {
+      self.emission_error.get_or_insert_with(|| {
+        CompilerError::from("compiler scope error: popped last function scope")
+      });
+    }
   }
 
   /// Returns a snapshot of the current visible bindings from all scopes.
@@ -1376,8 +1410,17 @@ impl Compiler {
     name: &str,
   ) {
     let idx = self.global_name_index(name);
+    let idx_u16 = match u16::try_from(idx) {
+      Ok(v) => v,
+      Err(_) => {
+        self.emission_error.get_or_insert_with(|| {
+          CompilerError::from(format!("Too many constants (max 65535, got {idx})"))
+        });
+        return;
+      }
+    };
     self.emit(Op::GetGlobal, LINE);
-    self.emit_u16(u16::try_from(idx).expect("idx fits in u16"), LINE);
+    self.emit_u16(idx_u16, LINE);
   }
 
   /// Emits a `GetBuiltin` operation for the given builtin name.
@@ -1386,8 +1429,17 @@ impl Compiler {
     name: &str,
   ) {
     let idx = self.global_name_index(name);
+    let idx_u16 = match u16::try_from(idx) {
+      Ok(v) => v,
+      Err(_) => {
+        self.emission_error.get_or_insert_with(|| {
+          CompilerError::from(format!("Too many constants (max 65535, got {idx})"))
+        });
+        return;
+      }
+    };
     self.emit(Op::GetBuiltin, LINE);
-    self.emit_u16(u16::try_from(idx).expect("idx fits in u16"), LINE);
+    self.emit_u16(idx_u16, LINE);
   }
 
   /// Executes the given closure with the given compile context override.
@@ -1443,8 +1495,17 @@ impl Compiler {
       self.emit(Op::Typeof, LINE);
     } else {
       let idx = self.global_name_index(name);
+      let idx_u16 = match u16::try_from(idx) {
+        Ok(v) => v,
+        Err(_) => {
+          self.emission_error.get_or_insert_with(|| {
+            CompilerError::from(format!("Too many constants (max 65535, got {idx})"))
+          });
+          return;
+        }
+      };
       self.emit(Op::TypeofGlobal, LINE);
-      self.emit_u16(u16::try_from(idx).expect("idx fits in u16"), LINE);
+      self.emit_u16(idx_u16, LINE);
     }
   }
 
@@ -1454,8 +1515,17 @@ impl Compiler {
     name: &str,
   ) {
     let idx = self.global_name_index(name);
+    let idx_u16 = match u16::try_from(idx) {
+      Ok(v) => v,
+      Err(_) => {
+        self.emission_error.get_or_insert_with(|| {
+          CompilerError::from(format!("Too many constants (max 65535, got {idx})"))
+        });
+        return;
+      }
+    };
     self.emit(Op::SetGlobal, LINE);
-    self.emit_u16(u16::try_from(idx).expect("idx fits in u16"), LINE);
+    self.emit_u16(idx_u16, LINE);
   }
 
   /// Patches a jump instruction at the given offset with the current code size.
@@ -1470,7 +1540,12 @@ impl Compiler {
     let patch_idx = self.resolve_jump_patch_index(offset);
     let target = self.current_ip() as isize;
     let rel = target - (patch_idx as isize) - 1;
-    let val = i32::try_from(rel).expect("jump offset overflow");
+    let Ok(val) = i32::try_from(rel) else {
+      self.emission_error.get_or_insert_with(|| {
+        CompilerError::from("jump offset overflow")
+      });
+      return;
+    };
     self.apply_jump_patch(patch_idx, val);
   }
 
@@ -1491,7 +1566,12 @@ impl Compiler {
   ) {
     let patch_idx = self.resolve_jump_patch_index(offset);
     let rel = (target as isize) - (patch_idx as isize) - 1;
-    let rel_i32 = i32::try_from(rel).expect("jump offset exceeds i32 range");
+    let Ok(rel_i32) = i32::try_from(rel) else {
+      self.emission_error.get_or_insert_with(|| {
+        CompilerError::from("jump offset exceeds i32 range")
+      });
+      return;
+    };
     self.apply_jump_patch(patch_idx, rel_i32);
   }
 
@@ -1503,7 +1583,12 @@ impl Compiler {
   ) {
     // Store signed jump offsets as sign-extended i24 payload so runtime
     // jump decoding (`read_i24_payload_at`) preserves negative back-jumps.
-    let v = i32::try_from(val).expect("val fits in i32");
+    let Ok(v) = i32::try_from(val) else {
+      self.emission_error.get_or_insert_with(|| {
+        CompilerError::from("jump offset exceeds i32 range")
+      });
+      return;
+    };
     let idx = self.current_ip().saturating_sub(1);
     self.risc.patch_branch_line(idx, v, line);
     self.pending_operand_bytes = 0;
@@ -1519,7 +1604,12 @@ impl Compiler {
       let patch_idx = self.resolve_jump_patch_index(patch_pos);
       // compute relative offset in instruction units
       let rel = (target as isize) - (patch_idx as isize) - 1;
-      let v = i32::try_from(rel).expect("offset overflow");
+      let Ok(v) = i32::try_from(rel) else {
+        self.emission_error.get_or_insert_with(|| {
+          CompilerError::from("jump offset overflow")
+        });
+        return;
+      };
       self.apply_jump_patch(patch_idx, v);
     }
   }

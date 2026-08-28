@@ -205,6 +205,31 @@ impl Compiler {
     }
   }
 
+  fn emit_function_closure(
+    &mut self,
+    name: &str,
+    func: &oast::Function<'_>,
+  ) -> Result<usize, crate::errors::CompilerError> {
+    let (proto, _env_len) = self.compile_function(name, None, func, None, false)?;
+    let idx = self.chunk.add_function(proto);
+    self.emit(Op::MakeClosure, LINE);
+    self.emit_function_index(idx, LINE);
+    let slot = if let Some(s) = self.resolve_local(name) {
+      s
+    } else {
+      self.add_local_with_mirror(name.to_string(), None, self.mirrors_root_bindings())
+    };
+    if self.local_mirrors_global(slot) {
+      self.emit(Op::Copy, LINE);
+    }
+    self.emit(Op::StoreLocal, LINE);
+    self.emit_slot(slot, LINE);
+    if self.local_mirrors_global(slot) {
+      self.emit_set_global_name(name);
+    }
+    Ok(slot)
+  }
+
   /// Emit the actual function closures for hoisted function declarations.
   ///
   /// This compiles each function declaration statement into a closure object
@@ -219,23 +244,7 @@ impl Compiler {
         oast::Statement::FunctionDeclaration(f) => {
           if let Some(ident) = &f.id {
             let fname = ident.name.to_string();
-            let (proto, _env_len) = self.compile_function(&fname, None, f, None, false)?;
-            let idx = self.chunk.add_function(proto);
-            self.emit(Op::MakeClosure, LINE);
-            self.emit_function_index(idx, LINE);
-            let slot = if let Some(s) = self.resolve_local(&fname) {
-              s
-            } else {
-              self.add_local_with_mirror(fname.clone(), None, self.mirrors_root_bindings())
-            };
-            if self.local_mirrors_global(slot) {
-              self.emit(Op::Copy, LINE);
-            }
-            self.emit(Op::StoreLocal, LINE);
-            self.emit_slot(slot, LINE);
-            if self.local_mirrors_global(slot) {
-              self.emit_set_global_name(&fname);
-            }
+            let slot = self.emit_function_closure(&fname, f)?;
             if self.current_module.is_some() {
               self.emit(Op::LoadLocal, LINE);
               self.emit_slot(slot, LINE);
@@ -248,23 +257,7 @@ impl Compiler {
             && let Some(ident) = &f.id
           {
             let fname = ident.name.to_string();
-            let (proto, _env_len) = self.compile_function(&fname, None, f, None, false)?;
-            let idx = self.chunk.add_function(proto);
-            self.emit(Op::MakeClosure, LINE);
-            self.emit_function_index(idx, LINE);
-            let slot = if let Some(s) = self.resolve_local(&fname) {
-              s
-            } else {
-              self.add_local_with_mirror(fname.clone(), None, self.mirrors_root_bindings())
-            };
-            if self.local_mirrors_global(slot) {
-              self.emit(Op::Copy, LINE);
-            }
-            self.emit(Op::StoreLocal, LINE);
-            self.emit_slot(slot, LINE);
-            if self.local_mirrors_global(slot) {
-              self.emit_set_global_name(&fname);
-            }
+            let slot = self.emit_function_closure(&fname, f)?;
             if self.current_module.is_some() {
               self.emit(Op::LoadLocal, LINE);
               self.emit_slot(slot, LINE);
@@ -276,23 +269,7 @@ impl Compiler {
           if let oast::ExportDefaultDeclarationKind::FunctionDeclaration(f) = &export.declaration {
             if let Some(ident) = &f.id {
               let fname = ident.name.to_string();
-              let (proto, _env_len) = self.compile_function(&fname, None, f, None, false)?;
-              let idx = self.chunk.add_function(proto);
-              self.emit(Op::MakeClosure, LINE);
-              self.emit_function_index(idx, LINE);
-              let slot = if let Some(s) = self.resolve_local(&fname) {
-                s
-              } else {
-                self.add_local_with_mirror(fname.clone(), None, self.mirrors_root_bindings())
-              };
-              if self.local_mirrors_global(slot) {
-                self.emit(Op::Copy, LINE);
-              }
-              self.emit(Op::StoreLocal, LINE);
-              self.emit_slot(slot, LINE);
-              if self.local_mirrors_global(slot) {
-                self.emit_set_global_name(&fname);
-              }
+              let slot = self.emit_function_closure(&fname, f)?;
               if self.current_module.is_some() {
                 self.emit(Op::LoadLocal, LINE);
                 self.emit_slot(slot, LINE);

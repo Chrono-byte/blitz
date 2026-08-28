@@ -482,14 +482,19 @@ impl super::Compiler {
       self.emit(Op::LoadLocal, LINE);
       self.emit_slot(callee_slot, LINE);
       let tail_arg_count = self.compile_call_arguments(&c.arguments)?;
-      self.emit_call_with_arg_count(Op::TailCall, tail_arg_count)?;
+      let tail_op = if self.can_emit_tail_call() {
+        Op::TailCall
+      } else {
+        Op::Call
+      };
+      self.emit_call_with_arg_count(tail_op, tail_arg_count)?;
       self.patch_jump(end);
       return Ok(());
     }
 
     self.compile_expr_oast(&c.callee)?;
     let arg_count = self.compile_call_arguments(&c.arguments)?;
-    let op = if self.strict_context {
+    let op = if self.can_emit_tail_call() {
       Op::TailCall
     } else {
       Op::Call
