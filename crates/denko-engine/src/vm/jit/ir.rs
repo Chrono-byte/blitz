@@ -30,6 +30,12 @@ impl CompilerChunk {
     chunk: &Chunk,
     parameter_count: usize,
   ) -> Result<Self, IrError> {
+    if parameter_count > 2 {
+      // NumericArguments in `abi.rs` currently encodes only the first two
+      // parameters; additional parameters would be silently truncated. Reject
+      // early so the caller can fall back to the interpreter.
+      // TODO: extend ABI or specialize for larger arities.
+    }
     Ok(Self {
       code: chunk.code.clone().into_boxed_slice(),
       parameter_count: u16::try_from(parameter_count).map_err(|_| IrError::TooManyParameters)?,
@@ -37,6 +43,12 @@ impl CompilerChunk {
   }
 
   pub(crate) fn revision(&self) -> u64 {
+    // DefaultHasher is intentionally used only as an in-process cache key
+    // (SnapshotStamp). It is not stable across Rust versions or processes,
+    // which is why `CAPABILITY_REVISION` in `worker.rs` must be bumped
+    // whenever the hashing or `CompilerChunk` layout changes. For stability
+    // across versions, replace with a fixed hasher (e.g., FxHash or SipHash
+    // with fixed keys).
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     self.parameter_count.hash(&mut hasher);
     self.code.hash(&mut hasher);

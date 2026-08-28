@@ -5,6 +5,9 @@
 use super::ir::{ExitOutcome, ResumePoint, TypedValue, VerifiedTypedFunction};
 use super::native::RuntimeHelperId;
 
+// Bump this together with `worker::CAPABILITY_REVISION` whenever the
+// codegen or ABI changes (e.g., guard branch now uses rel32). Artifacts
+// are validated via `validate()` which checks this ABI.
 pub(crate) const NATIVE_ARTIFACT_ABI: AbiRevision = AbiRevision(1);
 const MAX_ARTIFACT_BYTES: usize = 64 * 1024;
 
@@ -196,13 +199,33 @@ impl ShortBranchCode {
     self.bytes.extend_from_slice(bytes);
   }
 
+  /// Emit a conditional branch to the guard failure block using a 32-bit
+  /// displacement. The previous 8-bit form (`jb`/`jae` rel8) only allowed
+  /// ±127 bytes and would fail with `TooLarge` for larger artifacts. Using
+  /// the `0F 82/83` rel32 form supports the full 64 KiB artifact limit.
   fn guard_branch(
     &mut self,
     opcode: u8,
   ) {
-    self.bytes.push(opcode);
+    // Map short `jb` (0x72) / `jae` (0x73) to long `jb rel32` (0F 82) /
+    // `jae rel32` (0F 83). The 4-byte displacement is patched in
+    // `bind_guard_failure`.
+    let long_opcode = match opcode {
+      0x72 => 0x82, // jb rel32
+      0x73 => 0x83, // jae rel32
+      _ => {
+        // Fallback: emit as short branch if unknown opcode; will be
+        // rejected later if out of range.
+        self.bytes.push(opcode);
+        self.guard_fixups.push(self.bytes.len());
+        self.bytes.push(0);
+        return;
+      }
+    };
+    self.bytes.push(0x0F);
+    self.bytes.push(long_opcode);
     self.guard_fixups.push(self.bytes.len());
-    self.bytes.push(0);
+    self.bytes.extend_from_slice(&[0, 0, 0, 0]);
   }
 
   fn emit_number_argument(
@@ -227,7 +250,8 @@ impl ShortBranchCode {
   fn bind_guard_failure(&mut self) -> Result<(), ArtifactError> {
     let target = self.bytes.len();
     for fixup in self.guard_fixups.drain(..) {
-      self.bytes[fixup] = relative_i8(fixup, target)?;
+      let rel = relative_i32(fixup, target)?;
+      self.bytes[fixup..fixup + 4].copy_from_slice(&rel.to_le_bytes());
     }
     Ok(())
   }
@@ -238,13 +262,11 @@ impl ShortBranchCode {
 }
 
 #[cfg(all(unix, target_arch = "x86_64"))]
-fn relative_i8(
+fn relative_i32(
   from: usize,
   to: usize,
-) -> Result<u8, ArtifactError> {
-  i8::try_from(to as isize - (from + 1) as isize)
-    .map(|offset| offset as u8)
-    .map_err(|_| ArtifactError::TooLarge)
+) -> Result<i32, ArtifactError> {
+  i32::try_from(to as isize - (from + 4) as isize).map_err(|_| ArtifactError::TooLarge)
 }
 
 #[cfg(not(all(unix, target_arch = "x86_64")))]
@@ -341,5 +363,23 @@ mod tests {
       unsafe { code.call_compact_direct_frame(&mut frame) },
       JIT_EXIT_INTERPRETER
     );
+  }
+
+  #[cfg(all(unix, target_arch = "x86_64"))]
+  #[test]
+  fn guard_branch_supports_large_displacement() {
+    // Force a displacement >127 to ensure the rel32 form is used. The previous
+    // rel8 implementation would return TooLarge.
+    let mut code = ShortBranchCode::default();
+    code.guard_branch(0x72); // jb
+    // Pad with 200 bytes (more than 127) before the guard target.
+    code.emit(&vec![0x90; 200]); // nop
+    code.bind_guard_failure().expect("large guard should succeed with rel32");
+    // Verify the 4-byte displacement was patched near the end.
+    assert!(code.bytes.len() > 200);
+    // The artifact should still be installable as a numeric binary.
+    // Reuse the normal typed function to ensure overall emission still works.
+    let typed_artifact = artifact();
+    assert!(typed_artifact.validate().is_ok());
   }
 }

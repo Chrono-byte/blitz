@@ -6,10 +6,15 @@ use super::artifact::{ArtifactError, NativeArtifact, emit_numeric_binary};
 use super::ir::{CompilerChunk, IrError, SemanticFunction, VerifiedTypedFunction};
 use super::{FunctionId, NumericBinaryOp};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::mpsc::{Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{Receiver, Sender, SyncSender, TryRecvError};
 use std::thread::JoinHandle;
 
-const CAPABILITY_REVISION: CapabilityRevision = CapabilityRevision(1);
+/// Bump this whenever `abi.rs` encoding, `ir::CompilerChunk` layout, or
+/// `artifact::NATIVE_ARTIFACT_ABI` changes. It invalidates stale
+/// `SnapshotStamp`s so the worker does not reuse an artifact built with an
+/// incompatible ABI/hasher. Current value 2 reflects the ShortBranchCode
+/// rel32 fix (previously rel8, limited to ±127).
+const CAPABILITY_REVISION: CapabilityRevision = CapabilityRevision(2);
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) enum SpecializationKey {
@@ -110,14 +115,19 @@ enum WorkerCommand {
 }
 
 pub(super) struct CompilerWorker {
-  requests: Sender<WorkerCommand>,
+  requests: SyncSender<WorkerCommand>,
   completions: Receiver<CompileCompletion>,
   join: Option<JoinHandle<()>>,
 }
 
 impl CompilerWorker {
   pub(super) fn start() -> Result<Self, String> {
-    let (request_tx, request_rx) = std::sync::mpsc::channel();
+    // Bounded request channel prevents unbounded queue growth if the
+    // interpreter produces many compilation requests faster than the worker
+    // can drain them. 64 is enough for the current workload (numeric
+    // binaries) while bounding memory. Completions are unbounded because they
+    // are small and must not block the worker.
+    let (request_tx, request_rx) = std::sync::mpsc::sync_channel(64);
     let (completion_tx, completion_rx) = std::sync::mpsc::channel();
     let join = std::thread::Builder::new()
       .name("denko-jit".to_string())
@@ -134,10 +144,14 @@ impl CompilerWorker {
     &self,
     request: CompileRequest,
   ) -> Result<(), String> {
-    self
-      .requests
-      .send(WorkerCommand::Compile(request))
-      .map_err(|_| "optimizing compiler worker disconnected".to_string())
+    use std::sync::mpsc::TrySendError;
+    match self.requests.try_send(WorkerCommand::Compile(request)) {
+      Ok(()) => Ok(()),
+      Err(TrySendError::Full(_)) => Err("optimizing compiler queue full".to_string()),
+      Err(TrySendError::Disconnected(_)) => {
+        Err("optimizing compiler worker disconnected".to_string())
+      }
+    }
   }
 
   pub(super) fn try_recv(&self) -> Result<Option<CompileCompletion>, String> {
@@ -151,7 +165,7 @@ impl CompilerWorker {
 
 impl Drop for CompilerWorker {
   fn drop(&mut self) {
-    let _ = self.requests.send(WorkerCommand::Shutdown);
+    let _ = self.requests.try_send(WorkerCommand::Shutdown);
     if let Some(join) = self.join.take() {
       let _ = join.join();
     }
