@@ -828,6 +828,9 @@ impl Vm {
           } else if proto.is_async {
             self.invoke_async_closure(proto, &closure_env, call_args, this_arg, callee)
           } else {
+            if let Some(result) = self.try_host_baseline_call(proto, &this_arg, &call_args)? {
+              return Ok(result);
+            }
             let caller_context = self.execution.active.clone();
             let caller_frame_len = self.execution.call_stack.len();
             let caller_handler_len = self.exceptions.handlers.len();

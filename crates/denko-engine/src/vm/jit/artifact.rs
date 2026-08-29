@@ -102,7 +102,7 @@ pub(crate) fn emit_numeric_binary(
   let lowering = NumericBinaryLowering::from_verified(function)?;
   let mut code = ShortBranchCode::default();
   code.emit(&[0x48, 0x83, 0x7F, 0x10, 0x02]); // cmp qword [rdi+16], 2
-  code.guard_branch(0x72); // jb guard_failure
+  code.guard_branch(0x72)?; // jb guard_failure
   code.emit(&[0x48, 0x8B, 0x4F, 0x08]); // mov rcx, [rdi+8]
   code.emit_number_argument(0, 0xC0)?;
   code.emit_number_argument(1, 0xC8)?;
@@ -207,26 +207,20 @@ impl ShortBranchCode {
   fn guard_branch(
     &mut self,
     opcode: u8,
-  ) {
+  ) -> Result<(), ArtifactError> {
     // Map short `jb` (0x72) / `jae` (0x73) to long `jb rel32` (0F 82) /
     // `jae rel32` (0F 83). The 4-byte displacement is patched in
     // `bind_guard_failure`.
     let long_opcode = match opcode {
       0x72 => 0x82, // jb rel32
       0x73 => 0x83, // jae rel32
-      _ => {
-        // Fallback: emit as short branch if unknown opcode; will be
-        // rejected later if out of range.
-        self.bytes.push(opcode);
-        self.guard_fixups.push(self.bytes.len());
-        self.bytes.push(0);
-        return;
-      }
+      _ => return Err(ArtifactError::InvalidContract),
     };
     self.bytes.push(0x0F);
     self.bytes.push(long_opcode);
     self.guard_fixups.push(self.bytes.len());
     self.bytes.extend_from_slice(&[0, 0, 0, 0]);
+    Ok(())
   }
 
   fn emit_number_argument(
@@ -243,7 +237,7 @@ impl ShortBranchCode {
     self.emit(&[0x66, 0x81, 0xE2, 0xFF, 0x7F]); // ignore IEEE sign
     self.emit(&[0x66, 0x81, 0xFA]);
     self.emit(&super::abi::FIRST_NON_NUMBER_HIGH_WORD.to_le_bytes());
-    self.guard_branch(0x73); // jae guard_failure
+    self.guard_branch(0x73)?; // jae guard_failure
     self.emit(&[0x66, 0x48, 0x0F, 0x6E, xmm_move]); // movq xmm, rax
     Ok(())
   }
@@ -283,15 +277,18 @@ mod tests {
   use crate::vm::jit::ir::{CompilerChunk, SemanticFunction};
   use crate::{compiler, parser::Parser};
 
-  fn artifact() -> NativeArtifact {
-    let session = Parser::parse_source("function add(left, right) { return left + right; }")
-      .expect("source parses");
+  fn artifact_for(source: &str) -> NativeArtifact {
+    let session = Parser::parse_source(source).expect("source parses");
     let chunk = compiler::compile_session(&session).expect("source compiles");
     let proto = &chunk.functions[0];
     let snapshot = CompilerChunk::from_chunk(&proto.chunk, proto.arity).expect("snapshot");
     let semantic = SemanticFunction::decode(&snapshot).expect("semantic SSA");
     let typed = VerifiedTypedFunction::specialize_numeric_binary(&semantic).expect("typed SSA");
     emit_numeric_binary(&typed).expect("artifact")
+  }
+
+  fn artifact() -> NativeArtifact {
+    artifact_for("function add(left, right) { return left + right; }")
   }
 
   #[cfg(all(unix, target_arch = "x86_64"))]
@@ -368,14 +365,58 @@ mod tests {
 
   #[cfg(all(unix, target_arch = "x86_64"))]
   #[test]
+  fn installed_artifact_divides_numbers_with_ieee754_results() {
+    use crate::value::Value;
+    use crate::vm::jit::abi::NumericArguments;
+    use crate::vm::jit::native::{CompactDirectCallFrame, JIT_EXIT_RETURN, NativeCode};
+
+    let artifact = artifact_for("function divide(left, right) { return left / right; }");
+    let code = NativeCode::install_artifact(artifact.validate().expect("valid artifact"))
+      .expect("native installation");
+
+    let cases = [
+      (
+        &[Value::Number(6.0), Value::Number(2.0)][..],
+        3.0f64.to_bits(),
+      ),
+      (
+        &[Value::Number(1.0), Value::Number(0.0)][..],
+        f64::INFINITY.to_bits(),
+      ),
+      (
+        &[Value::Number(-0.0), Value::Number(2.0)][..],
+        (-0.0f64).to_bits(),
+      ),
+    ];
+    for (values, expected_bits) in cases {
+      let numbers = NumericArguments::from_values(values);
+      let mut frame = CompactDirectCallFrame {
+        result_bits: 0,
+        arguments: numbers.as_ptr(),
+        argument_count: numbers.argument_count(),
+      };
+      assert_eq!(
+        unsafe { code.call_compact_direct_frame(&mut frame) },
+        JIT_EXIT_RETURN
+      );
+      assert_eq!(frame.result_bits, expected_bits);
+    }
+  }
+
+  #[cfg(all(unix, target_arch = "x86_64"))]
+  #[test]
   fn guard_branch_supports_large_displacement() {
     // Force a displacement >127 to ensure the rel32 form is used. The previous
     // rel8 implementation would return TooLarge.
     let mut code = ShortBranchCode::default();
-    code.guard_branch(0x72); // jb
+    code
+      .guard_branch(0x72)
+      .expect("known guard opcode"); // jb
     // Pad with 200 bytes (more than 127) before the guard target.
-    code.emit(&vec![0x90; 200]); // nop
-    code.bind_guard_failure().expect("large guard should succeed with rel32");
+    code.emit(&[0x90; 200]); // nop
+    code
+      .bind_guard_failure()
+      .expect("large guard should succeed with rel32");
     // Verify the 4-byte displacement was patched near the end.
     assert!(code.bytes.len() > 200);
     // The artifact should still be installable as a numeric binary.

@@ -145,7 +145,10 @@ impl CompilerWorker {
     request: CompileRequest,
   ) -> Result<(), String> {
     use std::sync::mpsc::TrySendError;
-    match self.requests.try_send(WorkerCommand::Compile(request)) {
+    match self
+      .requests
+      .try_send(WorkerCommand::Compile(request))
+    {
       Ok(()) => Ok(()),
       Err(TrySendError::Full(_)) => Err("optimizing compiler queue full".to_string()),
       Err(TrySendError::Disconnected(_)) => {
@@ -165,7 +168,10 @@ impl CompilerWorker {
 
 impl Drop for CompilerWorker {
   fn drop(&mut self) {
-    let _ = self.requests.try_send(WorkerCommand::Shutdown);
+    // Shutdown must be delivered even when the bounded queue is full. A
+    // non-blocking send could drop the command and leave the worker blocked
+    // in `recv`, causing the join below to hang forever.
+    let _ = self.requests.send(WorkerCommand::Shutdown);
     if let Some(join) = self.join.take() {
       let _ = join.join();
     }

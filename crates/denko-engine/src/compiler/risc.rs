@@ -555,17 +555,7 @@ impl RiscBuilder {
           let source = load_location(&mut lowered, plan.get(instruction.input(0)?)?, 0, line);
           emit(
             &mut lowered,
-            encode_risc_aux16(
-              instruction.op,
-              source,
-              if matches!(instruction.op, Op::SetGlobal) {
-                instruction.operand_u16()
-              } else if matches!(instruction.op, Op::StoreLocal | Op::SetUpvalue) {
-                instruction.operand_u16()
-              } else {
-                arg as u16
-              },
-            ),
+            encode_risc_aux16(instruction.op, source, instruction.operand_u16()),
             line,
           );
         }

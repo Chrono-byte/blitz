@@ -31,10 +31,10 @@ impl CompilerChunk {
     parameter_count: usize,
   ) -> Result<Self, IrError> {
     if parameter_count > 2 {
-      // NumericArguments in `abi.rs` currently encodes only the first two
-      // parameters; additional parameters would be silently truncated. Reject
-      // early so the caller can fall back to the interpreter.
-      // TODO: extend ABI or specialize for larger arities.
+      // Numeric binary specialization only proves the first two formal
+      // parameters. Keep larger signatures on the ordinary call path until
+      // the ABI carries a complete formal-parameter contract.
+      return Err(IrError::TooManyParameters);
     }
     Ok(Self {
       code: chunk.code.clone().into_boxed_slice(),
@@ -60,10 +60,10 @@ impl CompilerChunk {
       return None;
     };
     match opcode(*binary) {
-      Op::Add => Some(NumericBinaryOp::Add),
-      Op::Sub => Some(NumericBinaryOp::Subtract),
-      Op::Mul => Some(NumericBinaryOp::Multiply),
-      Op::Div => Some(NumericBinaryOp::Divide),
+      Some(Op::Add) => Some(NumericBinaryOp::Add),
+      Some(Op::Sub) => Some(NumericBinaryOp::Subtract),
+      Some(Op::Mul) => Some(NumericBinaryOp::Multiply),
+      Some(Op::Div) => Some(NumericBinaryOp::Divide),
       _ => None,
     }
   }
@@ -109,9 +109,9 @@ impl SemanticFunction {
     let [left_load, right_load, binary, return_word] = snapshot.code.as_ref() else {
       return Err(IrError::UnsupportedBody);
     };
-    if opcode(*left_load) != Op::LoadLocal
-      || opcode(*right_load) != Op::LoadLocal
-      || opcode(*return_word) != Op::Return
+    if opcode(*left_load) != Some(Op::LoadLocal)
+      || opcode(*right_load) != Some(Op::LoadLocal)
+      || opcode(*return_word) != Some(Op::Return)
     {
       return Err(IrError::UnsupportedBody);
     }
@@ -129,10 +129,10 @@ impl SemanticFunction {
     let left = ValueId(0);
     let right = ValueId(1);
     let operation = match opcode(*binary) {
-      Op::Add => NumericBinaryOp::Add,
-      Op::Sub => NumericBinaryOp::Subtract,
-      Op::Mul => NumericBinaryOp::Multiply,
-      Op::Div => NumericBinaryOp::Divide,
+      Some(Op::Add) => NumericBinaryOp::Add,
+      Some(Op::Sub) => NumericBinaryOp::Subtract,
+      Some(Op::Mul) => NumericBinaryOp::Multiply,
+      Some(Op::Div) => NumericBinaryOp::Divide,
       _ => return Err(IrError::UnsupportedBody),
     };
     Ok(Self {
@@ -280,9 +280,8 @@ pub(crate) enum IrError {
   InvalidSsa,
 }
 
-fn opcode(word: u32) -> Op {
-  // SAFETY: snapshots originate in recursively verified chunks.
-  unsafe { Op::from_byte_unchecked((word & 0xff) as u8) }
+fn opcode(word: u32) -> Option<Op> {
+  Op::from_byte((word & 0xff) as u8)
 }
 
 #[cfg(test)]
@@ -343,6 +342,28 @@ mod tests {
     assert_eq!(
       VerifiedTypedFunction::verify(malformed),
       Err(IrError::InvalidSsa)
+    );
+  }
+
+  #[test]
+  fn rejects_malformed_opcode_without_unchecked_decoding() {
+    let mut snapshot = add_snapshot();
+    snapshot.code[0] = (snapshot.code[0] & !0xff) | 0xff;
+    assert_eq!(
+      SemanticFunction::decode(&snapshot),
+      Err(IrError::UnsupportedBody)
+    );
+  }
+
+  #[test]
+  fn rejects_numeric_binaries_with_more_than_two_parameters() {
+    let session = Parser::parse_source("function add(left, right, extra) { return left + right; }")
+      .expect("source parses");
+    let chunk = compiler::compile_session(&session).expect("source compiles");
+    let proto = &chunk.functions[0];
+    assert_eq!(
+      CompilerChunk::from_chunk(&proto.chunk, proto.arity),
+      Err(IrError::TooManyParameters)
     );
   }
 

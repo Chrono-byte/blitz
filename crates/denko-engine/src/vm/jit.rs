@@ -405,7 +405,6 @@ pub(crate) struct NativeBlock {
 pub(crate) struct JitCode {
   pub(crate) version: CodeVersionId,
   pub(crate) state: JitCodeState,
-  pub(crate) preferred_entry: VmPc,
   native_blocks: HashMap<VmPc, NativeBlock>,
   direct_call: Option<DirectCallTarget>,
 }
@@ -656,7 +655,6 @@ impl JitRuntime {
       .push(JitCode {
         version,
         state: JitCodeState::Valid,
-        preferred_entry: 0,
         native_blocks,
         direct_call,
       });
@@ -685,8 +683,11 @@ impl JitRuntime {
     if self.optimizing.disabled {
       return Ok(None);
     }
-    let snapshot = ir::CompilerChunk::from_chunk(chunk, parameter_count)
-      .map_err(|error| format!("optimizing snapshot rejected: {error:?}"))?;
+    let snapshot = match ir::CompilerChunk::from_chunk(chunk, parameter_count) {
+      Ok(snapshot) => snapshot,
+      Err(ir::IrError::TooManyParameters) => return Ok(None),
+      Err(error) => return Err(format!("optimizing snapshot rejected: {error:?}")),
+    };
     let Some(operation) = snapshot.numeric_binary_op() else {
       return Ok(None);
     };
@@ -824,7 +825,6 @@ impl JitRuntime {
               .push(JitCode {
                 version,
                 state: JitCodeState::Valid,
-                preferred_entry: 0,
                 native_blocks: HashMap::new(),
                 direct_call: Some(target),
               });
@@ -1048,7 +1048,11 @@ impl JitRuntime {
     };
     let mut next_pc = frame.vm_pc;
     if !code.native_blocks.contains_key(&next_pc) {
-      next_pc = code.preferred_entry;
+      // A missing interior block is a deoptimization point. Restarting at the
+      // function entry would re-run already executed instructions.
+      return Ok(BaselineOutcome::Interpret {
+        resume_pc: frame.vm_pc,
+      });
     }
     let exit = loop {
       let Some(block) = code.native_blocks.get(&next_pc) else {
@@ -1127,10 +1131,11 @@ mod tests {
   use crate::value::Value;
   use std::sync::Arc;
 
-  fn invoke(
+  fn invoke_at(
     runtime: &JitRuntime,
     function: FunctionId,
     registers: &mut [Value],
+    start_pc: VmPc,
   ) -> BaselineOutcome {
     let mut locals = [];
     runtime
@@ -1138,13 +1143,21 @@ mod tests {
         function,
         BaselineInvocation {
           vm: std::ptr::null_mut(),
-          start_pc: 0,
+          start_pc,
           registers,
           arguments: &[],
           locals: &mut locals,
         },
       )
       .expect("baseline invocation")
+  }
+
+  fn invoke(
+    runtime: &JitRuntime,
+    function: FunctionId,
+    registers: &mut [Value],
+  ) -> BaselineOutcome {
+    invoke_at(runtime, function, registers, 0)
   }
 
   #[cfg(all(unix, target_arch = "x86_64"))]
@@ -1211,7 +1224,6 @@ mod tests {
       vec![JitCode {
         version,
         state: JitCodeState::Valid,
-        preferred_entry: 0,
         native_blocks: HashMap::from([
           (
             0,
@@ -1250,7 +1262,6 @@ mod tests {
       vec![JitCode {
         version: CodeVersionId(1),
         state: JitCodeState::Valid,
-        preferred_entry: 0,
         native_blocks: HashMap::from([
           (
             0,
@@ -1404,6 +1415,25 @@ mod tests {
     assert_eq!(unsafe { code.call_frame(&mut frame) }, 1);
     assert_eq!(frame.vm_pc, 1);
     assert!(matches!(registers[0], Value::Number(value) if value == 42.0));
+  }
+
+  #[cfg(all(unix, target_arch = "x86_64"))]
+  #[test]
+  fn missing_interior_block_resumes_without_restarting_the_function() {
+    let mut chunk = Chunk::new(Arc::new(String::new()));
+    chunk.constants.push(Constant::Number(42.0));
+    chunk.write_instr(Op::Const as u32, 0);
+    chunk.write_instr(Op::Return as u32, 0);
+    let function = FunctionId::new(1);
+    let mut runtime = JitRuntime::default();
+    runtime
+      .install_const_prefix(function, &chunk, 0)
+      .expect("install blocks");
+    let mut registers: [Value; 16] = std::array::from_fn(|_| Value::Undefined);
+    assert_eq!(
+      invoke_at(&runtime, function, &mut registers, 1),
+      BaselineOutcome::Interpret { resume_pc: 1 }
+    );
   }
 
   #[cfg(all(unix, target_arch = "x86_64"))]

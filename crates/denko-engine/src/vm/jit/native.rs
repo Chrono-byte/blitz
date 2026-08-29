@@ -1066,6 +1066,31 @@ mod tests {
   }
 
   #[test]
+  fn executes_a_bounded_numeric_division_loop_batch() {
+    let code =
+      NativeCode::numeric_loop(NumericLoopAddend::DivideConstant).expect("native allocation");
+    let generation = AtomicU64::new(0);
+    let mut frame = NativeNumericLoopFrame {
+      index: 0.0,
+      limit: 4.0,
+      accumulator: 16.0,
+      step: 1.0,
+      addend: 2.0,
+      iteration_budget: 4_096,
+      iterations: 0,
+      exit_code: u32::MAX,
+      requested_generation: &generation,
+      acknowledged_generation: 0,
+      observed_generation: 0,
+    };
+    unsafe { code.call_numeric_loop_frame(&mut frame) };
+    assert_eq!(frame.index, 4.0);
+    assert_eq!(frame.accumulator, 1.0);
+    assert_eq!(frame.iterations, 4);
+    assert_eq!(frame.exit_code, NUMERIC_EXIT_COMPLETED);
+  }
+
+  #[test]
   fn prepares_a_bounded_dense_array_push_batch() {
     let code = NativeCode::dense_array_push_loop().expect("native allocation");
     let mut frame = crate::vm::region::PreparedArrayPushRegion {

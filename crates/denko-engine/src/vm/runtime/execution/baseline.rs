@@ -3,6 +3,55 @@
 use super::*;
 
 impl Vm {
+  pub(crate) fn try_host_baseline_call(
+    &mut self,
+    proto: &Rc<crate::bytecode::FunctionProto>,
+    this_value: &Value,
+    arguments: &[Value],
+  ) -> Result<Option<Value>, RuntimeError> {
+    let function = self.function_id_for_chunk(&proto.chunk);
+    if !self
+      .profiling
+      .functions
+      .get(&function)
+      .is_some_and(|profile| matches!(profile.baseline, crate::vm::jit::BaselineState::Ready(_)))
+    {
+      return Ok(None);
+    }
+    let mut registers: [Value; 16] = std::array::from_fn(|_| Value::Undefined);
+    registers[1] = this_value.clone();
+    let mut locals = [];
+    let vm = self as *mut Vm;
+    let outcome = self
+      .profiling
+      .jit
+      .invoke_baseline(
+        function,
+        crate::vm::jit::BaselineInvocation {
+          vm,
+          start_pc: 0,
+          registers: &mut registers,
+          arguments: &arguments[..arguments.len().min(proto.arity)],
+          locals: &mut locals,
+        },
+      )
+      .map_err(RuntimeError::from)?;
+    let crate::vm::jit::BaselineOutcome::Returned(result) = outcome else {
+      return Ok(None);
+    };
+    self.profiling.jit_stats.baseline_entries = self
+      .profiling
+      .jit_stats
+      .baseline_entries
+      .saturating_add(1);
+    self.profiling.jit_stats.baseline_returns = self
+      .profiling
+      .jit_stats
+      .baseline_returns
+      .saturating_add(1);
+    Ok(Some(result))
+  }
+
   pub(super) fn try_direct_baseline_call(
     &mut self,
     call_site: usize,

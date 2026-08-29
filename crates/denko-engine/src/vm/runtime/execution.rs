@@ -129,7 +129,11 @@ impl Vm {
     gc::reset_allocation_pressure();
     self.begin_opcode_profile_run();
 
-    self.run_risc_loop(true)
+    let result = self.run_risc_loop(true);
+    if result.is_ok() && self.current_module_specifier().is_none() {
+      self.persist_root_bindings();
+    }
+    result
   }
 
   pub(super) fn run_risc_loop(

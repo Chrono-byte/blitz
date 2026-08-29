@@ -34,6 +34,7 @@ impl Vm {
       .root_lexical_tdz
       .clone();
     let mut global_env = self.realm_state.global_env.borrow_mut();
+    let mut global_object = self.realm_state.globals.borrow_mut();
 
     for (index, name) in names.into_iter().enumerate() {
       if skip_lexical && lexical.get(index).copied().unwrap_or(false) {
@@ -42,6 +43,7 @@ impl Vm {
       let (Some(name), Some(cell)) = (name, locals.get(index)) else {
         continue;
       };
+      let property_name = name.clone();
       let initialized = !cell.is_uninitialized();
       if immutable.get(index).copied().unwrap_or(false) {
         global_env.create_immutable_binding(name, cell.clone(), initialized);
@@ -49,6 +51,23 @@ impl Vm {
         global_env.create_mutable_lexical_binding(name, cell.clone(), initialized);
       } else {
         global_env.create_mutable_binding(name, cell.clone(), initialized);
+      }
+      // Root var/function bindings are represented by cells during execution,
+      // while host-facing reads use the global object's properties. Keep the
+      // host view synchronized after the root run. Lexical declarations do not
+      // become global object properties.
+      if !lexical.get(index).copied().unwrap_or(false) && initialized {
+        let property_key = PropertyKey::String(property_name.into());
+        match global_object.properties.get_mut(&property_key) {
+          Some(PropertyDescriptor::Data { value, .. }) => *value = cell.value(),
+          Some(PropertyDescriptor::Accessor { .. }) => {}
+          None => {
+            global_object.properties.insert(
+              property_key,
+              PropertyDescriptor::ordinary_data(cell.value()),
+            );
+          }
+        }
       }
     }
   }
