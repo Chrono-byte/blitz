@@ -56,7 +56,6 @@ impl ModuleLoader {
         return Ok(());
       }
       if temp.get(path).copied().unwrap_or(false) {
-        // cycle detected — per spec cycles are allowed; continue without error
         return Ok(());
       }
       temp.insert(path.clone(), true);
@@ -149,8 +148,6 @@ impl ModuleLoader {
     }
 
     if !self.map.contains_key(&resolved_canon) {
-      // Ensure a caller may pass either a virtual specifier or a filesystem
-      // entry path.
       let base_dir = entry.parent().unwrap_or_else(|| Path::new("."));
       if self
         .virtual_modules
@@ -273,11 +270,6 @@ impl ModuleLoader {
     vm: &mut Vm,
     enable_typecheck: bool,
   ) -> Result<(), crate::errors::RuntimeError> {
-    // Populate vm.module_table with the export slot maps for each
-    // instantiated module. ModuleRecord.module_index must have been set
-    // during instantiate_all(). We clone the HashMap of slots so the VM
-    // receives ownership of the map structure but still shares the live
-    // binding slots.
     for rec_rc in self.map.values() {
       let rec = rec_rc.borrow();
       if let Some(idx) = rec.module_index {
@@ -295,8 +287,6 @@ impl ModuleLoader {
       if let Some(rec_rc) = self.map.get(&path) {
         let mut rec = rec_rc.borrow_mut();
         if matches!(rec.state, ModuleState::Evaluating) {
-          // Basic cycle-tolerance: if this record is already in-progress,
-          // do not recursively re-enter evaluation.
           continue;
         }
         if matches!(rec.state, ModuleState::Instantiated) {
@@ -382,7 +372,6 @@ impl ModuleLoader {
     }
     self.initialize_namespace_reexports(vm);
     let declarations = self.virtual_declarations_for_typecheck();
-    // For simplicity evaluate modules in insertion order after instantiation.
     for rec_rc in self.map.values() {
       let mut rec = rec_rc.borrow_mut();
       if matches!(rec.state, ModuleState::Instantiated) {

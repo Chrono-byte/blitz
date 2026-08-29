@@ -84,8 +84,6 @@ pub(crate) fn iterator_close(
   vm: &mut Vm,
   iterator: &Value,
 ) -> Result<(), RuntimeError> {
-  // Closing from a fork keeps a pending exception from a failed `next`, mapfn,
-  // or element definition intact while still observing effects of `return`.
   vm.close_iterator_in_fork(iterator)
 }
 
@@ -217,18 +215,12 @@ fn resolve_promise_with_value_inner(
   if value.is_object() {
     let then_val = vm.get_property_host(&value, &PropertyKey::String("then".to_string().into()))?;
     if Vm::is_callable_value(&then_val) {
-      // Per-spec PromiseResolveThenableJob semantics: calling a thenable's
-      // `then` should not synchronously settle the outer promise. Instead
-      // schedule a microtask that will invoke `then` with resolve/reject
-      // callbacks. This preserves observable job ordering when a thenable
-      // calls back synchronously.
       let resolve_called = Rc::clone(&already_resolved);
       let res_p = Rc::clone(result_promise);
       let thenable = value;
       let then_func = then_val;
 
       vm.queue_microtask(move |vm| {
-        // Build resolve and reject callbacks that will settle res_p
         let resolve_called_inner = Rc::clone(&resolve_called);
         let res_p_inner = Rc::clone(&res_p);
         let resolve_cb = Value::Builtin(Rc::new(move |vm, args| {
@@ -255,8 +247,6 @@ fn resolve_promise_with_value_inner(
           Ok(Value::Undefined)
         }));
 
-        // Call the then function with the thenable as `this`.
-        // Errors thrown here should reject the promise.
         match vm.call_value_with_this(&then_func, &thenable, &[resolve_cb, reject_cb]) {
           Ok(_) => Ok(()),
           Err(err) => {
@@ -423,24 +413,12 @@ pub(crate) fn shadowrealm_evaluate(
   let chunk = compiler::compile_session(&session)
     .map_err(|e| syntax_error(vm, format!("ShadowRealm evaluate compile: {}", e)))?;
 
-  // Run the code inside the ShadowRealm VM and clone the resulting value
-  // into the current (host) VM using a pragmatic structured-clone that
-  // supports primitives, plain objects, arrays, and cycles. Non-cloneable
-  // values (functions, promises, symbols, and accessors) result in a TypeError
-  // to avoid leaking object identity across realms.
-  // Parse optional transfer list argument (third argument) as an Array of
-  // ArrayBuffer objects. We collect backing-store addresses (Rc pointer
-  // addresses of the [[ArrayBufferData]] Array) into a HashSet and pass it
-  // to the clone helper so it can detach transferred buffers in the source
-  // realm.
   let mut transfer_set: Option<HashSet<usize>> = None;
   if let Some(Value::Array(arr_rc, _)) = args.get(2) {
     let mut set = HashSet::new();
     for v in arr_rc.borrow().iter().flatten().cloned() {
       match v {
         Value::Object(obj_rc) => {
-          // Look up [[ArrayBufferData]] slot and grab underlying
-          // array backing Rc pointer address.
           if let Some(backing_rc) = array_buffer_backing(&Value::Object(Rc::clone(&obj_rc))) {
             if !set.insert(Rc::as_ptr(&backing_rc) as usize) {
               return Err(vm.throw_type_error("Transfer list contains a duplicate ArrayBuffer"));
@@ -462,8 +440,6 @@ pub(crate) fn shadowrealm_evaluate(
     .run(chunk)
     .map_err(|err| vm.throw_type_error(&format!("ShadowRealm evaluate error: {}", err)))?;
 
-  // Pass transfer_set.as_ref() to clone helper so it may detach transferred
-  // ArrayBuffers in the source realm.
   clone_value_across_realms(vm, &inner_result, transfer_set.as_ref())
     .map_err(|s| vm.throw_type_error(&s))
 }
@@ -493,8 +469,6 @@ pub(crate) fn shadowrealm_import_value(
   })));
   let promise_value = vm.promise_value(Rc::clone(&promise));
 
-  // The optional transfer list follows the export name in this builtin's
-  // normalized argument array.
   let mut transfer_set_arg: Option<Value> = None;
   if args.len() > 2 {
     transfer_set_arg = args.get(2).cloned();
@@ -536,7 +510,6 @@ pub(crate) fn shadowrealm_import_value(
 
     match result {
       Ok(value) => {
-        // Build transfer set from transfer_set_arg if present.
         let mut transfer_set: Option<HashSet<usize>> = None;
         if let Some(Value::Array(arr_rc, _)) = transfer_set_arg.clone() {
           let mut set = HashSet::new();
@@ -622,7 +595,6 @@ pub(crate) fn dynamic_import_value(
 ) -> Result<Value, RuntimeError> {
   let undefined = Value::Undefined;
   let specifier = args.first().unwrap_or(&undefined);
-  let options = args.get(1).unwrap_or(&undefined);
 
   let promise = gc::track_promise(Rc::new(RefCell::new(PromiseState::Pending {
     on_fulfilled: Vec::new(),
@@ -657,9 +629,6 @@ pub(crate) fn dynamic_import_value(
     Some(specifier) => (resolve_shadowrealm_base_dir(vm), Some(specifier)),
     None => (resolve_shadowrealm_base_dir(vm), None),
   };
-  // Keep the parent realm's loader explicit. Its prelinked public roots are
-  // the selected compatibility profile, while its private records remain
-  // inaccessible to source resolution in the child VM.
   let loader_handle = vm.module_loader_handle();
   let globals = vm.globals_rc();
   vm.queue_dynamic_import_job(move |vm| {
@@ -745,11 +714,6 @@ pub(crate) fn dynamic_import_value(
     }
     Ok(())
   });
-
-  if !matches!(options, Value::Undefined) {
-    // The options expression has already been evaluated. Import attributes
-    // are not implemented yet, so no option state needs to cross the job.
-  }
 
   Ok(promise_value)
 }

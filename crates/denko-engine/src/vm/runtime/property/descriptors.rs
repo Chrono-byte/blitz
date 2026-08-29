@@ -165,9 +165,6 @@ impl Vm {
         }
       };
       if let Some(export_value) = export_value {
-        // Module namespace exports are non-configurable, enumerable, writable
-        // data descriptors whose value stays connected to the export binding.
-        // Only a descriptor compatible with that current live value succeeds.
         if desc.has_get
           || desc.has_set
           || desc.configurable == Some(true)
@@ -229,10 +226,6 @@ impl Vm {
         if truncated != len_num || truncated > u32::MAX as f64 {
           return Err(self.throw_range_error("Invalid array length"));
         }
-        // Convert the verified integer `truncated` into a `usize` via `u32`.
-        // We first cast to `i64` (safe because we've checked bounds) and then
-        // use `u32::try_from` to avoid any unchecked truncation. Propagate a
-        // RangeError if conversion unexpectedly fails.
         let truncated_i64 = truncated as i64;
         let truncated_u32 = u32::try_from(truncated_i64)
           .map_err(|_| self.throw_range_error("Invalid array length"))?;
@@ -400,7 +393,6 @@ impl Vm {
     };
 
     if let Some(ref cur) = current {
-      // Non-configurable restrictions.
       let cur_configurable = match &cur {
         PropertyDescriptor::Data { configurable, .. } => *configurable,
         PropertyDescriptor::Accessor { configurable, .. } => *configurable,

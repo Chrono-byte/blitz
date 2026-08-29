@@ -234,7 +234,6 @@ impl Lexer {
     quote: char,
   ) -> Result<Token, String> {
     let mut s = String::new();
-    // Opening quote already consumed by next_token() before calling us.
     while let Some(c) = self.advance() {
       if c == quote {
         crate::trace::string("lexer read_string", &s);

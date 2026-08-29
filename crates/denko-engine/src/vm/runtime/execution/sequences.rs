@@ -64,8 +64,6 @@ impl Vm {
     registers: &mut [Value; 16],
   ) -> Result<bool, RuntimeError> {
     let ip = self.execution.active.ip;
-    // The quickening pass has already validated this complete instruction
-    // shape and all register relationships.
     let words = &self.execution.active.chunk.code[ip..ip + 12];
     let receiver_register = decode_rd(words[0]) as usize;
     let callee_register = decode_rd(words[3]) as usize;
@@ -188,8 +186,6 @@ impl Vm {
     registers: &mut [Value; 16],
   ) -> Result<bool, RuntimeError> {
     let ip = self.execution.active.ip;
-    // The quickening pass has already validated this complete instruction
-    // shape, register flow, and slot flow.
     let words = &self.execution.active.chunk.code[ip..ip + 9];
     let accumulator_register = decode_rd(words[0]) as usize;
     let property_register = decode_rd(words[1]) as usize;

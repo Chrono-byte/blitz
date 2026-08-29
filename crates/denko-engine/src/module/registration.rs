@@ -6,10 +6,6 @@ impl ModuleLoader {
   ) -> Vec<crate::typecheck::VirtualDeclaration> {
     let mut declarations = HashMap::new();
     for registration in &self.prelinked_graphs {
-      // Declaration imports can reference public roots that are not runtime
-      // dependencies of the importing JavaScript module. Include every
-      // declaration validated for this registration so those type-only edges
-      // remain resolvable without relying on hard-coded specifier prefixes.
       declarations.extend(
         registration
           .declarations
@@ -461,8 +457,6 @@ impl ModuleLoader {
       content_hash,
       host_initialized,
     )));
-    // Preallocate the record identity before traversing bundled edges so
-    // cycles always reuse this exact record.
     self
       .records_by_specifier
       .insert(module.specifier.clone(), Rc::clone(&record));

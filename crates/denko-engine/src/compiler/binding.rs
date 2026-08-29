@@ -411,9 +411,6 @@ impl super::Compiler {
             self.emit(Op::Call, LINE);
             self.emit_byte(2, LINE);
           }
-          // Inside `with`, a `var` initializer should resolve
-          // through the scope chain at runtime so an object
-          // property can shadow the hoisted binding.
           self.emit_set_global_name(name);
         }
         continue;
@@ -429,12 +426,6 @@ impl super::Compiler {
         names.sort();
         for name in names {
           let slot = self.predeclare_lexical_binding(&name, v.kind)?;
-          // A loop body can execute the same bytecode repeatedly. Each entry
-          // creates fresh lexical bindings in the TDZ before any initializer
-          // is evaluated. Ordinary blocks and function bodies already start
-          // with fresh frame cells; replacing those would detach closures
-          // created during declaration instantiation from the initialized
-          // binding.
           if self.loop_depth > 0 {
             self.emit(Op::ResetLocalCell, LINE);
             self.emit_slot(slot, LINE);
@@ -601,9 +592,6 @@ impl super::Compiler {
       let value_slot = self.alloc_reusable_temp_local("assignment_identifier_value");
       self.emit(Op::StoreLocal, LINE);
       self.emit_slot(value_slot, LINE);
-      // PutValue cannot initialize a lexical binding. Read the existing cell
-      // first so assignment during its TDZ throws instead of silently acting
-      // like declaration initialization.
       self.emit(Op::LoadLocal, LINE);
       self.emit_slot(slot, LINE);
       self.emit(Op::Discard, LINE);
@@ -688,9 +676,6 @@ impl super::Compiler {
     self.emit(Op::StoreLocal, LINE);
     self.emit_slot(iterator_active_slot, LINE);
 
-    // IteratorDestructuringAssignmentEvaluation closes the iterator when any
-    // subsequent step completes abruptly. Keep the original completion while
-    // running IteratorClose; an abrupt close must not replace it.
     let thrown_slot = self.alloc_temp_local("array_destructuring_thrown");
     let push_handler_ip = self.current_ip();
     self.emit(Op::PushHandler, LINE);
@@ -774,8 +759,6 @@ impl super::Compiler {
   ) -> Result<(), crate::errors::CompilerError> {
     self.handler_depth = self.handler_depth.saturating_sub(1);
     self.emit(Op::PopHandler, LINE);
-    // A rest element exhausts the iterator through iteratorToArray; the
-    // existing rest path deliberately has no separate normal close.
     if close_on_normal {
       self.close_array_destructuring_iterator_if_active(iterator_slot, iterator_active_slot)?;
     }
@@ -788,8 +771,6 @@ impl super::Compiler {
     self.emit(Op::StoreLocal, LINE);
     self.emit_slot(thrown_slot, LINE);
 
-    // Protect the close itself so that an abrupt IteratorClose preserves the
-    // completion that caused the destructuring operation to be closed.
     self.emit(Op::PushHandler, LINE);
     let close_handler_jump = self.current_ip();
     self.emit_byte(0, LINE);
@@ -808,10 +789,6 @@ impl super::Compiler {
     self.emit_slot(thrown_slot, LINE);
     self.emit(Op::Throw, LINE);
 
-    // A generator can suspend while evaluating a default initializer. A
-    // later generator.return() is an abrupt return completion, not a thrown
-    // exception, so register a return-only cleanup for the same protected
-    // region. The VM enters this block through its existing finally metadata.
     let return_slot = self.alloc_temp_local("array_destructuring_return");
     let did_return_slot = self.alloc_temp_local("array_destructuring_did_return");
     let return_cleanup_ip = self.current_ip();
@@ -845,7 +822,6 @@ impl super::Compiler {
         self.emit(Op::LoadLocal, LINE);
         self.emit_slot(temp_slot, LINE);
         self.emit(Op::Undefined, LINE);
-        // Use CompareJump: cond_type 6 = StrictEq, jump if false.
         self.emit_with_payload(Op::CompareJump, 6, LINE);
         let skip_default = self.current_ip();
         self.emit_byte(0, LINE);
@@ -978,7 +954,6 @@ impl super::Compiler {
             self.emit(Op::LoadLocal, LINE);
             self.emit_slot(temp_slot, LINE);
             self.emit(Op::Undefined, LINE);
-            // Use CompareJump: cond_type 6 = StrictEq, jump if false.
             self.emit_with_payload(Op::CompareJump, 6, LINE);
             let skip_default = self.current_ip();
             self.emit_byte(0, LINE);
@@ -1073,7 +1048,6 @@ impl super::Compiler {
         self.emit(Op::LoadLocal, LINE);
         self.emit_slot(temp_slot, LINE);
         self.emit(Op::Undefined, LINE);
-        // Use CompareJump: cond_type 6 = StrictEq, jump if false.
         self.emit_with_payload(Op::CompareJump, 6, LINE);
         let skip_default = self.current_ip();
         self.emit_byte(0, LINE);
@@ -1140,10 +1114,6 @@ impl super::Compiler {
         for prop in &o.properties {
           self.emit(Op::Copy, LINE);
           let key = self.compile_destructuring_property_key(&prop.key, prop.computed)?;
-          // KeyedBindingInitialization resolves a var binding before reading
-          // the source property. Preserve that reference so object
-          // environment HasBinding/unscopables hooks run exactly once and in
-          // the specified order.
           let resolved_identifier = if matches!(kind, oast::VariableDeclarationKind::Var)
             && (self.with_depth > 0 || self.may_capture_with)
           {

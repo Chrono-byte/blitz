@@ -63,10 +63,6 @@ pub(crate) use partial_descriptor::PartialDescriptor;
 pub(crate) use stack::{CallStack, HandlerStack};
 pub(crate) use yield_star::{YieldStarResume, YieldStarState};
 
-// ---------------------------------------------------------------------------
-// Tuning constants
-// ---------------------------------------------------------------------------
-
 /// Initial locals vector capacity per call frame.
 pub(super) const LOCALS_INITIAL_CAPACITY: usize = 64;
 
@@ -112,16 +108,8 @@ pub(super) struct PropertyGetIcEntry {
   pub(super) value: Value,
 }
 
-// Factor complex hook type into aliases to satisfy clippy's `type_complexity` suggestions.
-//
-// - `UnhandledRejectionHookInner` captures the underlying FnMut signature.
-// - `UnhandledRejectionHook` wraps the inner type in the `Rc<RefCell<...>>` used throughout the VM.
 pub(super) type UnhandledRejectionHookInner = dyn FnMut(&mut Vm, Value, Value);
 pub(super) type UnhandledRejectionHook = Rc<RefCell<UnhandledRejectionHookInner>>;
-
-// ---------------------------------------------------------------------------
-// Global background Tokio runtime (lazy, shared across all Vm instances)
-// ---------------------------------------------------------------------------
 
 static GLOBAL_BG_RUNTIME: OnceLock<Arc<Runtime>> = OnceLock::new();
 pub(super) fn get_global_bg_runtime() -> Arc<Runtime> {
@@ -129,11 +117,10 @@ pub(super) fn get_global_bg_runtime() -> Arc<Runtime> {
     let threads_from_env = env::var("TSBLITZ_BG_THREADS")
       .ok()
       .and_then(|s| s.parse::<usize>().ok())
-      .filter(|&n| n > 0 && n <= 1024); // upper bound for sanity
+      .filter(|&n| n > 0 && n <= 1024);
 
     let cpus = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
 
-    // Reserve 1 core for main thread, but at least 1 worker
     let threads = threads_from_env.unwrap_or_else(|| cpus.saturating_sub(1).max(1));
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -146,10 +133,6 @@ pub(super) fn get_global_bg_runtime() -> Arc<Runtime> {
     Arc::new(rt)
   }))
 }
-
-// ---------------------------------------------------------------------------
-// VM
-// ---------------------------------------------------------------------------
 
 /// Virtual machine for executing RISC bytecode.
 pub struct Vm {

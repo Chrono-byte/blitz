@@ -101,7 +101,6 @@ fn random_uuid(
     return Ok(entropy_failure(vm, "randomUUID", error.to_string()));
   }
 
-  // RFC 4122 section 4.4: version 4 and the RFC variant bits.
   bytes[6] = (bytes[6] & 0x0f) | 0x40;
   bytes[8] = (bytes[8] & 0x3f) | 0x80;
 
@@ -178,8 +177,6 @@ fn random_fill(
     ));
   }
 
-  // Generate the complete result before touching the target. An entropy
-  // failure therefore cannot leave a partially filled VM value behind.
   let mut bytes = vec![0_u8; size];
   if let Err(error) = getrandom(&mut bytes) {
     return Ok(entropy_failure(vm, "randomFill", error.to_string()));
@@ -283,8 +280,6 @@ fn timing_safe_equal(
       "the Uint8Array became detached during timingSafeEqual",
     ));
   }
-  // Do not return on a byte mismatch. The length check above is intentionally
-  // separate because Node rejects unequal lengths before comparing bytes.
   let mut difference = 0_u8;
   for (left_byte, right_byte) in left_bytes.into_iter().zip(right_bytes) {
     difference |= left_byte ^ right_byte;
@@ -294,8 +289,6 @@ fn timing_safe_equal(
 
 fn secure_below(range: u64) -> Result<u64, getrandom::Error> {
   debug_assert!(range > 0 && range < MAX_RANDOM_INT_RANGE);
-  // The rejected prefix makes every remainder equally likely. `wrapping_neg`
-  // computes 2^64 - range without representing 2^64 in a u64.
   let threshold = range.wrapping_neg() % range;
   loop {
     let mut bytes = [0_u8; 8];

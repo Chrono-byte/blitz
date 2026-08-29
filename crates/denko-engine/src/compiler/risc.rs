@@ -1245,9 +1245,6 @@ fn stage_window_at(
   window_offset: usize,
   line: u32,
 ) -> Result<(), CompilerError> {
-  // Capture register-homed values before loading any spills into scratch
-  // registers. Calls are a parallel operand shuffle: moving one operand first
-  // must not overwrite another operand that still occupies that register.
   for (index, value) in inputs.iter().copied().enumerate() {
     let ValueLocation::Register(source) = plan.get(value)? else {
       continue;
@@ -1415,7 +1412,6 @@ fn operation_shape(
     Op::JumpIfFalse | Op::JumpIfTrue | Op::JumpIfNullish => ValueShape::new(1, false),
     Op::CompareJump => ValueShape::new(2, false),
     Op::Return => ValueShape::new(0, false),
-    // Generator resume supplies the expression result before the successor executes.
     Op::Yield | Op::YieldStar | Op::AwaitPromise => ValueShape::new(1, true),
     Op::CloneLocalCell
     | Op::ResetLocalCell

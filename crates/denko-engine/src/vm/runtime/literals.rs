@@ -270,8 +270,6 @@ impl Vm {
       );
     }
 
-    // Function instances expose `length` before `name`; own-key order is
-    // observable and class static definitions preserve that initial order.
     props.borrow_mut().properties.insert(
       PropertyKey::String("length".to_string().into()),
       PropertyDescriptor::Data {

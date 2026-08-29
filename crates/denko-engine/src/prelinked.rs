@@ -201,8 +201,6 @@ impl PrelinkedModuleGraph {
       imports_by_module.insert(module.module_index, import_bindings);
     }
 
-    // Unique in-range indices with exactly `module_count` entries prove that
-    // the initial format's reserved range is contiguous and begins at zero.
     for index in 0..module_count {
       if !module_indices.contains(&index) {
         return Err(invalid(format!(
@@ -587,10 +585,6 @@ fn validate_chunk_tree(
         format!("instruction {instruction_index} writes the synthetic namespace export"),
       ));
     }
-    // The compiler stores top-level module-private bindings in the owner
-    // module table so nested functions can access them. They are intentionally
-    // absent from the public export map and namespace object. Cross-module
-    // descriptors must still target declared exports.
     let target_binding = if target_name == "*"
       || (target_index == owner_index && !target_exports.contains_key(target_name))
     {

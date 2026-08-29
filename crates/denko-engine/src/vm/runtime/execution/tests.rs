@@ -297,9 +297,6 @@ mod test {
   #[cfg(all(unix, target_arch = "x86_64"))]
   #[test]
   fn numeric_division_body_compiles_once() {
-    // Divide is supported via the optimizing JIT (see `NumericBinaryOp::Divide`).
-    // This test verifies that a numeric division body is successfully compiled
-    // and executed natively.
     let (vm, _) = run_script(
       "function divide(left, right) { return left / right; } let total = 1; for (let i = 0; i < 3000; i += 1) total = divide(total, 1); globalThis.typed_divide_total = total;",
     );

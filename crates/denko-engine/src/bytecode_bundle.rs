@@ -538,7 +538,6 @@ impl Encoder {
       is_class_constructor: function.is_class_constructor,
       is_async: function.is_async,
       is_generator: function.is_generator,
-      // Retain the legacy wire field so the current layout remains explicit.
       ic_table: Vec::new(),
     })
   }
@@ -688,8 +687,6 @@ impl Decoder {
       is_class_constructor: wire.is_class_constructor,
       is_async: wire.is_async,
       is_generator: wire.is_generator,
-      // Version-2 bundles may contain obsolete cache hints. They have no
-      // language semantics and are intentionally discarded.
     })
   }
 }

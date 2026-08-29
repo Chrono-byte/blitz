@@ -148,9 +148,6 @@ impl Compiler {
       }
     }
 
-    // `var` declarations are instantiated for the whole function even when
-    // their declaration is nested in a statement. Lexical declarations are
-    // deliberately handled only by their own statement-list scope.
     let mut nested_var_names = HashSet::new();
     for stmt in stmts {
       self.add_var_names_from_statement(stmt, &mut nested_var_names);

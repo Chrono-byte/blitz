@@ -68,9 +68,6 @@ fn resolve_with_options(
   }
   let resolver = Resolver::new(options);
 
-  // Resolve expects an absolute base directory; prefer to canonicalize, but
-  // fall back to the original path if canonicalization fails (e.g. path
-  // doesn't exist).
   let base_dir = std::fs::canonicalize(base).unwrap_or_else(|_| base.to_path_buf());
 
   resolver
@@ -86,8 +83,6 @@ fn nearest_tsconfig(base: &Path) -> Option<PathBuf> {
     if candidate.is_file() {
       return Some(candidate);
     }
-    // A dependency is its own project. Do not leak the consumer's config into
-    // package-internal imports when searching upward from node_modules.
     if directory
       .file_name()
       .is_some_and(|name| name == "node_modules")
@@ -109,7 +104,6 @@ fn module_options(additional_conditions: &[String]) -> oxc_resolver::ResolveOpti
     }
   }
   oxc_resolver::ResolveOptions {
-    // Keep JavaScript precedence while allowing TypeScript module graphs.
     extensions: vec![
       ".js".into(),
       ".mjs".into(),
@@ -121,8 +115,6 @@ fn module_options(additional_conditions: &[String]) -> oxc_resolver::ResolveOpti
     ],
     condition_names,
     tsconfig: Some(TsconfigDiscovery::Auto),
-    // NODE_PATH is a deprecated CommonJS feature and is not part of the
-    // TypeScript 6/7 or Node ESM project-resolution model.
     node_path: false,
     ..Default::default()
   }

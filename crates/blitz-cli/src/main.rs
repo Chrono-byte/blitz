@@ -16,7 +16,6 @@ use args::{Cli, CliCommand, ExecutionArgs};
 use clap::Parser;
 
 fn main() -> Result<(), denko::errors::Error> {
-  // Parse before runtime setup so clap handles --help and --version immediately.
   let cli = Cli::parse();
   if let Some(cwd) = &cli.cwd {
     std::env::set_current_dir(cwd).map_err(|error| {

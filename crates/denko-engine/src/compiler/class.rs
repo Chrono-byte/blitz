@@ -81,7 +81,6 @@ impl Compiler {
         self.emit(Op::LoadLocal, LINE);
         self.emit_slot(temp_slot, LINE);
         self.emit(Op::Undefined, LINE);
-        // Use CompareJump: cond_type 6 = StrictEq, jump if false.
         self.emit_with_payload(Op::CompareJump, 6, LINE);
         let skip_jump = self.current_ip();
         self.emit_byte(0, LINE);
@@ -129,7 +128,6 @@ impl Compiler {
       self.emit(Op::LoadLocal, LINE);
       self.emit_slot(idx, LINE);
       self.emit(Op::Undefined, LINE);
-      // Use CompareJump: cond_type 6 = StrictEq, jump if false.
       self.emit_with_payload(Op::CompareJump, 6, LINE);
       let skip_jump = self.current_ip();
       self.emit_byte(0, LINE);
@@ -578,8 +576,6 @@ impl Compiler {
       .or_else(|| declaration_name.map(ToString::to_string))
       .unwrap_or_else(|| "<anonymous>".to_string());
 
-    // Each class declaration creates fresh private-name identities while retaining
-    // access to private names from enclosing classes.
     let enclosing_private_names = self.private_names.clone();
     let mut declared_private_names = HashSet::new();
     for element in &c.body.body {

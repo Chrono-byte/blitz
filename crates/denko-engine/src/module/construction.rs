@@ -82,7 +82,6 @@ impl ModuleLoader {
       );
       record.module_index = module_index;
       let record = Rc::new(RefCell::new(record));
-      // Insert before walking dependencies so cycles observe the same record.
       self
         .records_by_specifier
         .insert(canonical.clone(), Rc::clone(&record));
@@ -153,8 +152,6 @@ impl ModuleLoader {
       .parent()
       .unwrap_or_else(|| Path::new("."));
     for dependency in imports {
-      // Every static import is a required graph edge. This includes bare
-      // package specifiers resolved through the nearest node_modules tree.
       self.construct(base_dir, &dependency)?;
     }
 

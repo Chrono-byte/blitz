@@ -191,8 +191,6 @@ pub(super) fn install(
                 Ok(Some(value)) => value,
                 Ok(None) => break,
                 Err(error) => {
-                  // IteratorClose must not replace the original abrupt
-                  // completion with an error from the close operation.
                   drop(crate::runtime_utils::iterator_close(vm, &iterator));
                   return Err(error);
                 }

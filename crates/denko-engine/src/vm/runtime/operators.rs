@@ -128,7 +128,6 @@ impl Vm {
     &self,
     value: &Value,
   ) -> String {
-    // `typeof null` is 'object'
     value.type_name().to_string()
   }
 }

@@ -1508,7 +1508,6 @@ fn module_exports(
           let dependency =
             module_exports(&dependency_path, overlays, dependencies, cache, visiting);
           if let Some(exported_name) = object.get("exported").and_then(node_name) {
-            // Namespace exports resolve their members when imported as a namespace.
             for (name, targets) in dependency {
               exports.insert(format!("{exported_name}.{name}"), targets);
             }

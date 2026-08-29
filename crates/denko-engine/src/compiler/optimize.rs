@@ -20,9 +20,6 @@ fn constant_fold(
   builder: &mut RiscBuilder,
   chunk: &mut Chunk,
 ) -> usize {
-  // ValueId homes are stack-shaped and can be reused at control-flow merges.
-  // Until propagation is block-aware, restrict folding to straight-line code
-  // so a value from one predecessor cannot become a fact for another.
   if builder
     .instructions
     .iter()
@@ -79,8 +76,6 @@ fn constant_fold(
         .ok()
         .filter(|index| *index <= u32::from(u16::MAX))
       else {
-        // RISC constants carry a 16-bit index. Do not wrap a large index into
-        // a different constant; leave the original operation intact.
         chunk.constants.pop();
         if let Some(out) = output {
           value_to_const.insert(out.0, None);
@@ -281,7 +276,6 @@ fn dead_code_elimination(
   let mut reachable = vec![false; len];
   let mut worklist = vec![0];
   reachable[0] = true;
-  // Also mark finally handler targets as reachable roots
   for handler in &chunk.finally_handlers {
     if handler.push_ip < len {
       reachable[handler.push_ip] = true;
@@ -393,7 +387,6 @@ fn dead_code_elimination(
   }
   builder.branch_values = new_branch_values;
 
-  // Remap finally handlers
   let mut new_handlers = Vec::with_capacity(chunk.finally_handlers.len());
   for handler in std::mem::take(&mut chunk.finally_handlers) {
     if let (Some(new_push), Some(new_finalizer)) = (

@@ -265,8 +265,6 @@ const main = async () => {
       const entryName = `${moduleName}__${exportName}`;
       const entryPath = join(temp, "entries", `${entryName}.ts`);
       const upstreamName = RUNTIME_EXPORT_ALIASES[`${moduleName}.${exportName}`] ?? exportName;
-      // Effect's declaration exposes Fiber.await through a private local name,
-      // while the runtime module exports the public alias only.
       const entrySource = moduleName === "Fiber" && exportName === "await"
         ? `import { await as ${upstreamName} } from ${JSON.stringify(sourcePath)};\nexport { ${upstreamName} as ${exportName} };\n`
         : `export { ${upstreamName} as ${exportName} } from ${JSON.stringify(sourcePath)};\n`;

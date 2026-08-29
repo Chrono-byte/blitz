@@ -287,8 +287,6 @@ fn build_artifact(root: &Path) -> Result<Vec<u8>, String> {
   loader
     .register_virtual_modules(registry)
     .map_err(|error| format!("register runtime source graph: {error}"))?;
-  // Construct every public root first, then every manifest entry. The latter
-  // makes coverage explicit while still using the loader's normal graph walk.
   for specifier in &public_roots {
     loader
       .construct(Path::new("."), specifier)
@@ -987,16 +985,12 @@ fn verify_stdlib_manifest(
     for dependency in &entry.dependencies {
       if !effect_specifiers.contains(dependency.as_str())
         && !specifiers.contains(dependency.as_str())
-      {
-        // Entries are sorted, so a later stdlib entry is checked below after
-        // the complete set is known.
-        if !manifest
+        && !manifest
           .entries
           .iter()
           .any(|candidate| candidate.specifier == *dependency)
-        {
-          return Err(format!("unresolved stdlib dependency {dependency}"));
-        }
+      {
+        return Err(format!("unresolved stdlib dependency {dependency}"));
       }
     }
     for primitive in &entry.host_primitives {

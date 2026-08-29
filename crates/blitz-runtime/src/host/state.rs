@@ -65,9 +65,6 @@ pub enum NodeCompatProfile {
 }
 
 impl NodeCompatProfile {
-  // Keep these lists explicit. A new generated `node:*` root must not become
-  // available merely by being added to the runtime graph; it needs a reviewed
-  // compatibility entry in each profile that should expose it.
   const CORE_MODULES: &'static [&'static str] = &[
     "node:assert",
     "node:assert/strict",
@@ -434,10 +431,6 @@ impl RuntimeHandle {
     &mut self,
     vm: &mut Vm,
   ) -> Result<(), RuntimeError> {
-    // Promise-driven runtimes (including Effect) register their first
-    // scheduler task from a microtask queued during entry evaluation. Drain
-    // that queue before checking host liveness so the newly referenced timer
-    // or event resource is visible to the event loop.
     vm.flush_microtasks()?;
     while self.run_once(vm)? {}
     Ok(())

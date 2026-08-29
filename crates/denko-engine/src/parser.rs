@@ -116,13 +116,6 @@ pub struct Parser {
   source: Option<String>,
 }
 
-// Helper methods for ParserSession are defined after the macro-generated type.
-
-// ParserSession: safe self-referencing wrapper that owns the allocator and
-// source string while exposing an `oxc_ast::ast::Program` that borrows them.
-// We use `ouroboros::self_referencing` to safely model the self-referencing
-// lifetime of `oast::Program<'this>`.
-
 #[self_referencing]
 pub struct ParserSession {
   alloc: Allocator,
@@ -171,10 +164,6 @@ impl Parser {
   /// # Errors
   ///
   pub fn parse_source(source: &str) -> Result<ParserSession, ParserError> {
-    // Default to ordinary script parsing for callers that don't provide
-    // filename/extension information. Callers that need module semantics
-    // must opt in explicitly via `parse_source_with_type(..., SourceType::mjs())`
-    // or the appropriate TypeScript variant.
     Self::parse_source_with_type(source, SourceType::script())
   }
 
@@ -221,7 +210,6 @@ impl Parser {
     source_type: SourceType,
   ) -> Result<ParserSession, ParserError> {
     let _p = Parser::new_from_source(source);
-    // Build a ParserSession with the source type requested by the caller.
     ParserSession::try_new(Allocator::default(), source.to_string(), |alloc, source| {
       let ret = OxcParser::new(alloc, source, source_type)
         .with_options(ParseOptions {
@@ -260,8 +248,6 @@ impl Parser {
       }
     };
 
-    // Build a self-referencing ParserSession using try_new so we can return
-    // parsing errors as ParserError when the underlying Oxc parser fails.
     ParserSession::try_new(Allocator::default(), source_owned, |alloc, source| {
       let ret = OxcParser::new(alloc, source, SourceType::unambiguous())
         .with_options(ParseOptions {
@@ -296,11 +282,8 @@ impl Parser {
   /// - In each case the returned ParserError contains a human-readable description
   ///   of the failure.
   pub fn extract_imports_from_source(source: &str) -> Result<Vec<String>, ParserError> {
-    // Run Oxc parser using a temporary allocator and borrowed source string.
-    // We only need the ESTree JSON here so keeping allocator scoped is fine.
     let alloc = Allocator::default();
-    let leaked_source = source; // short-lived borrow for parser
-    // Default to JavaScript parsing for import extraction.
+    let leaked_source = source;
     let ret = OxcParser::new(&alloc, leaked_source, SourceType::unambiguous())
       .with_options(ParseOptions {
         parse_regular_expression: true,
@@ -328,8 +311,6 @@ impl Parser {
 
     let mut imports = Vec::new();
     for item in body {
-      // Treat `import ...` and re-export forms (`export * from`,
-      // `export { ... } from`) as module dependencies for the module loader.
       let type_only = item
         .get("importKind")
         .or_else(|| item.get("exportKind"))
@@ -412,9 +393,6 @@ impl Parser {
   }
 }
 
-// Implement a small accessor for the generated ParserSession type. The
-// `self_referencing` macro generates a `borrow_program` method; expose a
-// convenient `program()` method that returns the borrowed `Program`.
 impl ParserSession {
   /// Simple get borrow program
   pub fn program(&self) -> &oast::Program<'_> {

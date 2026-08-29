@@ -122,11 +122,6 @@ pub(super) struct CompilerWorker {
 
 impl CompilerWorker {
   pub(super) fn start() -> Result<Self, String> {
-    // Bounded request channel prevents unbounded queue growth if the
-    // interpreter produces many compilation requests faster than the worker
-    // can drain them. 64 is enough for the current workload (numeric
-    // binaries) while bounding memory. Completions are unbounded because they
-    // are small and must not block the worker.
     let (request_tx, request_rx) = std::sync::mpsc::sync_channel(64);
     let (completion_tx, completion_rx) = std::sync::mpsc::channel();
     let join = std::thread::Builder::new()
@@ -168,9 +163,6 @@ impl CompilerWorker {
 
 impl Drop for CompilerWorker {
   fn drop(&mut self) {
-    // Shutdown must be delivered even when the bounded queue is full. A
-    // non-blocking send could drop the command and leave the worker blocked
-    // in `recv`, causing the join below to hang forever.
     let _ = self.requests.send(WorkerCommand::Shutdown);
     if let Some(join) = self.join.take() {
       let _ = join.join();

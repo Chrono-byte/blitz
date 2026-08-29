@@ -120,9 +120,6 @@ impl Vm {
       })
       .unwrap_or(Value::Undefined);
     self.initialize_root_bindings();
-    // Global declaration instantiation precedes script evaluation. Link the
-    // live root cells now so indirect eval observes lexical declarations from
-    // the currently running script, including their TDZ state.
     if self.current_module_specifier().is_none() {
       self.persist_root_bindings();
     }
@@ -348,8 +345,6 @@ impl Vm {
           }
         }
       }
-      // Portable RISC remains unchanged; the VM quickens recognized sites once
-      // per chunk and only invokes the matching guarded operation here.
       let action = if crate::trace::enabled() || !self.caches.optimized_execution_enabled {
         SiteAction::Interpret
       } else {
@@ -605,8 +600,6 @@ impl Vm {
               };
             let initializes = immutable && was_uninitialized;
             if wrote_with_environment {
-              // The resolved object-environment reference takes precedence
-              // over a same-named immutable binding in an outer environment.
             } else if immutable && !initializes {
               let sloppy_silent = self
                 .execution
@@ -1590,10 +1583,6 @@ impl Vm {
     let saved_handlers = std::mem::take(&mut self.exceptions.handlers);
     let saved_unwound_risc_state = self.exceptions.unwound_risc_state.take();
     let saved_direct_eval_outer = self.execution.direct_eval_outer.clone();
-    // A nested script has its own return boundary. Keep the caller frames
-    // available for direct-eval context such as new.target and super, but
-    // detach their suspended RISC continuations so the nested root Return
-    // cannot resume or pop the caller as though it were an ordinary callee.
     let saved_frame_risc_states = self
       .execution
       .call_stack
@@ -1601,9 +1590,6 @@ impl Vm {
       .map(|frame| frame.risc_state.take())
       .collect::<Vec<_>>();
 
-    // `saved_context` and the detached RISC continuations live in Rust locals
-    // while the nested script runs, so make their JavaScript values explicit
-    // GC roots for the duration of the run.
     self.memory.temporary.extend(
       saved_context
         .locals
@@ -1670,9 +1656,6 @@ impl Vm {
     if !direct_eval {
       self.execution.active.lexical_env = Rc::clone(&self.realm_state.global_env);
     }
-    // Retain the caller's temporary roots while nested code runs. A nested
-    // evaluation may trigger GC in another realm; dropping these roots would
-    // allow live caller objects and its realm graph to be swept mid-call.
     self.execution.active.yield_star = None;
     if !direct_eval {
       self.execution.active.locals.clear();
@@ -1827,10 +1810,6 @@ impl Vm {
     result
   }
 
-  // -----------------------------------------------------------------------
-  // Opcode helpers (called from the main loop)
-  // -----------------------------------------------------------------------
-
   pub(super) fn make_iterator_result(
     &self,
     value: Value,
@@ -1850,9 +1829,6 @@ impl Vm {
     Value::Object(obj)
   }
 
-  // Iterator factories own their state in iterator objects; this helper only
-  // creates the `{ value, done }` result returned by generator operations.
-
   /// Restore the caller's frame and return the callee's result.
   pub(super) fn execute_return(
     &mut self,
@@ -1863,9 +1839,6 @@ impl Vm {
       .call_stack
       .pop()
       .ok_or("Return without call frame")?;
-
-    // Runtime return-type check intentionally disabled in JS-first mode.
-    // TypeScript return annotations are erased at runtime.
 
     self.execution.active = frame.context;
     self.leave_function_realm(frame.previous_realm);
@@ -1928,10 +1901,6 @@ impl Vm {
     }
   }
 }
-
-// ---------------------------------------------------------------------------
-// Free functions
-// ---------------------------------------------------------------------------
 
 use patterns::build_quickened_sites;
 

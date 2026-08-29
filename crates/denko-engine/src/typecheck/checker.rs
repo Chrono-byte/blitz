@@ -582,9 +582,6 @@ impl TypeContext {
           }
         }
 
-        // Infer from the uncontextualized arguments first. This lets a sibling
-        // property such as `value: T` instantiate `T` before a callback is
-        // contextually typed as `(value: T) => ...`.
         if !generic_names.is_empty() {
           let mut raw_arguments = Vec::new();
           for argument in &call.arguments {

@@ -1495,14 +1495,9 @@ pub(crate) fn install_string_boolean_symbol_builtins(
   };
   install_case_conversion("toLowerCase", false);
   install_case_conversion("toUpperCase", true);
-  // ECMA-402 `Intl` is not available in this engine, so the permitted
-  // non-Intl fallback is the default Unicode case conversion and ignores
-  // locale arguments.
   install_case_conversion("toLocaleLowerCase", false);
   install_case_conversion("toLocaleUpperCase", true);
 
-  // Without ECMA-402, locale-sensitive collation is implementation-defined.
-  // Keep the fallback exact over UTF-16 code units rather than lossy UTF-8.
   let string_locale_compare = builtin_object(
     Rc::new(|vm, args| {
       let receiver = args.first().unwrap_or(&Value::Undefined);

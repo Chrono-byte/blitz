@@ -335,8 +335,6 @@ impl Vm {
       (iterator, next, true)
     };
 
-    // This object is a VM-private iterator record. Its state lives in internal
-    // slots so acquisition details cannot be observed or forged by JavaScript.
     let mut wrapper = ObjectData::new();
     wrapper.set_internal_slot(ASYNC_ITERATOR_RECORD_SLOT, Value::Bool(true));
     wrapper.set_internal_slot(ASYNC_ITERATOR_SLOT, iterator);
@@ -351,15 +349,11 @@ impl Vm {
     iterator: Value,
   ) -> Result<Value, RuntimeError> {
     if let Some(record) = sync_iterator_record(&iterator) {
-      // An abrupt IteratorNext marks the record done for consumers such as
-      // for-of and destructuring, which must not call IteratorClose then.
       mark_sync_iterator_done(&record.wrapper, true);
       let result = self.call_value_with_this(&record.next, &record.iterator, &[])?;
       if !result.is_object() {
         return Err(self.throw_type_error("Iterator result must be an object"));
       }
-      // IteratorNext does not inspect `done`; IteratorStep and its consumers
-      // perform that observable property access exactly once.
       mark_sync_iterator_done(&record.wrapper, false);
       return Ok(result);
     }
@@ -379,9 +373,6 @@ impl Vm {
           Err(error) => {
             if !done {
               mark_async_iterator_done(&record.wrapper);
-              // AsyncFromSyncIteratorContinuation closes the synchronous
-              // iterator when a yielded value rejects. The original rejection
-              // wins over any close error.
               drop(self.close_iterator_in_fork(&record.iterator));
             }
             return Err(error);
@@ -617,8 +608,6 @@ impl Vm {
         if !result.is_object() {
           return Err(self.throw_type_error("Iterator return result is not an object"));
         }
-        // AsyncFromSyncIteratorContinuation observes both fields and awaits
-        // the returned value, even though AsyncIteratorClose discards them.
         let done =
           self.get_property_host(&result, &PropertyKey::String("done".to_string().into()))?;
         let value =

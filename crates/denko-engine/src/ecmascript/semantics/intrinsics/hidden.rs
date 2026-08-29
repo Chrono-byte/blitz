@@ -38,9 +38,6 @@ pub(crate) fn install_hidden_builtins(
     };
     let inherited_strict = vm.active_strict_mode();
     let eval_src = if inherited_strict {
-      // The strict directive is an implementation detail, not part of the
-      // caller-provided eval source. Seed completion with `undefined` so an
-      // empty declaration or block does not expose the artificial directive.
       crate::js!(format(script), "'use strict'; void 0;\n{src}")
     } else {
       src.to_string()

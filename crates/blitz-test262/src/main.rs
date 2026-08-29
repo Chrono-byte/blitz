@@ -214,7 +214,6 @@ fn print_args(
   let value = args.first().cloned().unwrap_or(Value::Undefined);
   match vm.to_string(&value) {
     Ok(s) => s.to_string_lossy(),
-    // `print` is a host helper, so degrade gracefully if coercion fails.
     Err(_) => format!("{}", value),
   }
 }
@@ -268,8 +267,6 @@ fn resolve_job_count(
   selected_count: usize,
   available_parallelism: Option<usize>,
 ) -> usize {
-  // Keep default memory usage bounded when user did not set --workers.
-  // Explicit --workers still wins.
   let bounded_default = available_parallelism.map(|n| n.min(2));
   requested_jobs
     .or(bounded_default)
@@ -350,9 +347,6 @@ fn run_selected_tests(
       }));
     }
 
-    // Collect the results of all test runs concurrently.
-    // The spawned tasks are already running; use join_all to await all
-    // dispatch tasks and preserve the original panic message on join error.
     let mut results = Vec::with_capacity(handles.len());
     let collected = join_all(handles).await;
     for res in collected {
@@ -369,7 +363,7 @@ fn run_test_in_thread(
   log_tests: bool,
   release_handle: Option<Arc<PermitReleaser>>,
 ) -> TestResult {
-  const STACK_SIZE: usize = 2 * 1024 * 1024; // 2 MB stack for tests
+  const STACK_SIZE: usize = 2 * 1024 * 1024;
 
   let (tx, rx) = mpsc::channel();
 
@@ -384,15 +378,12 @@ fn run_test_in_thread(
         let result = catch_unwind(AssertUnwindSafe(|| {
           let globals = make_test_globals();
 
-          // Retain the baseline for auxiliary runner paths; normal test modes
-          // create fresh globals below.
           #[expect(
             clippy::mutable_key_type,
             reason = "PropertyKey's interior mutability is limited to JsString's derived UTF-8 cache"
           )]
           let baseline_snapshot = snapshot_globals(&globals);
 
-          // Run the test
           run_test_file(
             &file,
             &test262_dir,
@@ -432,9 +423,6 @@ fn run_test_in_thread(
         }
       };
 
-      // At this point the per-test VM/realm created inside `run_test_file`
-      // has gone out of scope. Run an explicit collector cycle so passed
-      // tests do not leave cyclic JS heaps hanging around until thread exit.
       force_runner_gc();
       maybe_trim_allocator();
 
@@ -450,7 +438,6 @@ fn run_test_in_thread(
     }) {
     Ok(handle) => handle,
     Err(e) => {
-      // Failed to spawn the test thread; return an explicit failure result.
       return TestResult::Panic(format!("Failed to spawn thread: {}", e));
     }
   };
@@ -461,7 +448,6 @@ fn run_test_in_thread(
   };
 
   if let Err(join_err) = join_handle.join() {
-    // If join fails, log the panic payload for debugging. Do not panic the runner.
     let join_msg = if let Some(s) = join_err.downcast_ref::<String>() {
       s.clone()
     } else if let Some(s) = join_err.downcast_ref::<&str>() {
@@ -1183,7 +1169,6 @@ fn run_selected_tests_via_subprocess_batches(
 fn parse_args() -> RunnerOptions {
   let mut opts = RunnerOptions::parse();
 
-  // Keep historical env-var behavior as fallback when CLI flags are omitted.
   if opts.includes.is_empty() {
     opts.includes = parse_csv_env("TEST262_SEGMENTS");
   }
@@ -1560,7 +1545,6 @@ fn edition_label(edition: u8) -> Option<&'static str> {
 #[allow(clippy::too_many_lines)]
 fn feature_edition(feature: &str) -> Option<u8> {
   match feature {
-    // ES2026
     "Array.fromAsync" => Some(17),
     "Error.isError" => Some(17),
     "Intl.Locale-info" => Some(17),
@@ -1570,7 +1554,6 @@ fn feature_edition(feature: &str) -> Option<u8> {
     "uint8array-base64" => Some(17),
     "upsert" => Some(17),
 
-    // ES2025
     "Float16Array" => Some(16),
     "import-attributes" => Some(16),
     "Intl.DurationFormat" => Some(16),
@@ -1582,7 +1565,6 @@ fn feature_edition(feature: &str) -> Option<u8> {
     "regexp-modifiers" => Some(16),
     "set-methods" => Some(16),
 
-    // ES2024
     "Atomics.waitAsync" => Some(15),
     "array-grouping" => Some(15),
     "arraybuffer-transfer" => Some(15),
@@ -1592,13 +1574,11 @@ fn feature_edition(feature: &str) -> Option<u8> {
     "String.prototype.isWellFormed" => Some(15),
     "String.prototype.toWellFormed" => Some(15),
 
-    // ES2023
     "array-find-from-last" => Some(14),
     "change-array-by-copy" => Some(14),
     "hashbang" => Some(14),
     "symbols-as-weakmap-keys" => Some(14),
 
-    // ES2022
     "arbitrary-module-namespace-names" => Some(13),
     "Array.prototype.at" => Some(13),
     "class-fields-private" => Some(13),
@@ -1620,7 +1600,6 @@ fn feature_edition(feature: &str) -> Option<u8> {
     "top-level-await" => Some(13),
     "TypedArray.prototype.at" => Some(13),
 
-    // ES2021
     "AggregateError" => Some(12),
     "align-detached-buffer-semantics-with-web-reality" => Some(12),
     "FinalizationRegistry" => Some(12),
@@ -1636,7 +1615,6 @@ fn feature_edition(feature: &str) -> Option<u8> {
     "String.prototype.replaceAll" => Some(12),
     "WeakRef" => Some(12),
 
-    // ES2020
     "BigInt" => Some(11),
     "coalesce-expression" => Some(11),
     "Intl.NumberFormat-unified" => Some(11),
@@ -1651,7 +1629,6 @@ fn feature_edition(feature: &str) -> Option<u8> {
     "String.prototype.matchAll" => Some(11),
     "Symbol.matchAll" => Some(11),
 
-    // ES2019
     "Array.prototype.flat" => Some(10),
     "Array.prototype.flatMap" => Some(10),
     "json-superset" => Some(10),
@@ -1665,7 +1642,6 @@ fn feature_edition(feature: &str) -> Option<u8> {
     "Symbol.prototype.description" => Some(10),
     "well-formed-json-stringify" => Some(10),
 
-    // ES2018
     "async-iteration" => Some(9),
     "IsHTMLDDA" => Some(9),
     "object-rest" => Some(9),
@@ -1677,19 +1653,16 @@ fn feature_edition(feature: &str) -> Option<u8> {
     "regexp-unicode-property-escapes" => Some(9),
     "Symbol.asyncIterator" => Some(9),
 
-    // ES2017
     "async-functions" => Some(8),
     "Atomics" => Some(8),
     "Intl.DateTimeFormat-dayPeriod" => Some(8),
     "intl-normative-optional" => Some(8),
     "SharedArrayBuffer" => Some(8),
 
-    // ES2016
     "Array.prototype.includes" => Some(7),
     "exponentiation" => Some(7),
     "u180e" => Some(7),
 
-    // ES6
     "ArrayBuffer" => Some(6),
     "Array.prototype.values" => Some(6),
     "arrow-function" => Some(6),
@@ -1755,15 +1728,12 @@ fn feature_edition(feature: &str) -> Option<u8> {
     "WeakMap" => Some(6),
     "WeakSet" => Some(6),
 
-    // ES5
     "caller" => Some(5),
 
-    // Legacy additions used by test262-fyi.
     "__proto__" => Some(6),
     "__getter__" => Some(8),
     "__setter__" => Some(8),
 
-    // Experimental and proposal-stage features group under ESNext.
     "Intl.NumberFormat-v3" => Some(99),
     "legacy-regexp" => Some(99),
     "ShadowRealm" => Some(99),
@@ -2048,7 +2018,6 @@ fn unsupported_reason(
       .iter()
       .any(|f| matches!(f.as_str(), "module" | "noStrict" | "onlyStrict"))
   {
-    // We will still handle onlyStrict/noStrict below in a limited way.
     let allow_module = env::var("TSBLITZ_TEST262_ENABLE_MODULE")
       .ok()
       .is_none_or(|v| v == "1" || v.eq_ignore_ascii_case("true"));
@@ -2084,10 +2053,8 @@ fn restore_globals(
   baseline: &HashMap<PropertyKey, PropertyDescriptor>,
 ) {
   let mut g = globals.borrow_mut();
-  // Remove keys that were added during the test
   g.properties
     .retain(|k, _| baseline.contains_key(k));
-  // Restore keys that were modified
   for (k, baseline_desc) in baseline {
     g.properties
       .insert(k.clone(), baseline_desc.clone());
@@ -2135,7 +2102,6 @@ fn run_test_file(
     return Err(Test262Error::without_mode(path, reason).into_string());
   }
 
-  // Unless the test is `raw`, harness files should be evaluated first in the test realm.
   let raw_flag = meta
     .as_ref()
     .and_then(|m| m.flags.as_ref())
@@ -2149,10 +2115,6 @@ fn run_test_file(
     .and_then(|m| m.flags.as_ref())
     .is_some_and(|f| f.iter().any(|s| s == "module"));
 
-  // Determine the run modes (non-strict / strict) according to flags:
-  // - onlyStrict -> run strict only
-  // - noStrict -> run non-strict only
-  // - default -> run both non-strict and strict
   let mut run_non_strict = true;
   let mut run_strict = true;
   if let Some(m) = &meta
@@ -2175,23 +2137,16 @@ fn run_test_file(
     run_strict = true;
   }
 
-  // Required harness files as per Test262 interpreting instructions.
   let mut harness_files: Vec<String> = vec!["assert.js".to_string(), "sta.js".to_string()];
   if has_async_flag && !raw_flag {
     harness_files.push("doneprintHandle.js".to_string());
   }
 
-  // Include metadata-specified files after the harness.
   let mut include_files: Vec<String> = Vec::new();
   if let Some(m) = &meta
     && let Some(includes) = &m.includes
   {
     for inc in includes {
-      // Normalize harness include paths: tests sometimes list includes
-      // as "harness/assert.js" but we store and later load harness
-      // files from test262/harness/<name>. Ensure we only keep the
-      // basename when encountering a harness/ prefix to avoid
-      // constructing paths like test262/harness/harness/assert.js.
       let normalized = if let Some(rest) = inc.strip_prefix("harness/") {
         rest.to_string()
       } else {
@@ -2228,7 +2183,6 @@ fn run_test_file(
     sources
   };
 
-  // For both modes, run and validate according to `negative` metadata.
   struct ResetStrict;
   impl Drop for ResetStrict {
     fn drop(&mut self) {
@@ -2240,10 +2194,8 @@ fn run_test_file(
       continue;
     }
 
-    // Configure strictness through the test-only type-checker override.
     let is_strict = *mode_name == "strict";
     let is_async = has_async_flag;
-    // Use the test-friendly override rather than setting process env vars.
     typecheck::set_strict_override(Some(false));
     let _reset_strict = ResetStrict;
 
@@ -2254,10 +2206,6 @@ fn run_test_file(
     );
     let mut vm = Vm::new(Clone::clone(&globals));
 
-    // The harness self-test `test/harness/detachArrayBuffer.js` verifies
-    // the fallback behavior when hosts do NOT provide `$262` at all.
-    // Our runner normally installs `$262`, so remove it only for this
-    // specific self-test.
     if path.ends_with("test/harness/detachArrayBuffer.js") {
       globals
         .borrow_mut()
@@ -2265,7 +2213,6 @@ fn run_test_file(
         .shift_remove(&PropertyKey::String("$262".to_string().into()));
     }
 
-    // Async tests must signal completion through $DONE(error?).
     let done_state: Rc<RefCell<Option<Option<String>>>> = Rc::new(RefCell::new(None));
     if is_async {
       let done_state_for_print = Clone::clone(&done_state);
@@ -2290,13 +2237,11 @@ fn run_test_file(
       define_native_global(&vm.globals_rc(), "print", async_print);
     }
 
-    // Evaluate harness files unless `raw`: compile & run them into the provided VM.
     if !raw_flag {
       for h in &harness_files {
         let p = test262_root.join("harness").join(h);
         if p.exists() {
           let hsrc = read_harness_source(&p)?;
-          // Parse/typecheck/compile the harness and run it in the provided VM
           let session = match parse_source_for_path(&hsrc, &p) {
             Ok(s) => s,
             Err(e) => {
@@ -2444,11 +2389,9 @@ fn run_test_file(
         }
       }
     }
-    // Apply strict override for the test source after harness setup.
     typecheck::set_strict_override(Some(is_strict));
 
     let run_result = if is_module {
-      // Module tests are evaluated as modules, not as concatenated scripts.
       if let Some(m) = &meta
         && let Some(neg) = &m.negative
         && neg.phase == "parse"
@@ -2505,10 +2448,8 @@ fn run_test_file(
         Err(e) => Err(e.to_string()),
       }
     } else {
-      // Prepare source for this run (includes + test, with optional strict directive)
       let mut run_src = String::new();
       if *mode_name == "strict" && !raw_flag {
-        // Per INTERPRETING.md: strict-mode run prefixes the entire source with "use strict".
         run_src.push_str(denko::js!("\"use strict\";\n"));
       }
       for inc_src in &include_sources {
@@ -2517,18 +2458,14 @@ fn run_test_file(
       }
       run_src.push_str(&src);
 
-      // Handle parse-phase negative expectations first
       if let Some(m) = &meta
         && let Some(neg) = &m.negative
         && neg.phase == "parse"
       {
-        // Expect parse to fail
         match Parser::parse_source(&run_src) {
           Ok(session) => {
-            // Parser succeeded, but check if compiler would catch this as a SyntaxError
             if let Err(e) = compiler::compile_session(&session) {
               let err_str = e.to_string();
-              // If the compiler caught a SyntaxError, treat this as the parser catching it
               if err_str.contains("SyntaxError") || err_str.contains("redeclaration") {
                 continue;
               }
@@ -2543,7 +2480,6 @@ fn run_test_file(
             );
           }
           Err(_) => {
-            // got parse error as expected for this mode; continue to next mode
             continue;
           }
         }
@@ -2559,7 +2495,6 @@ fn run_test_file(
         );
       }
 
-      // Otherwise, parse must succeed
       let session = match Parser::parse_source(&run_src) {
         Ok(s) => s,
         Err(e) => {
@@ -2569,7 +2504,6 @@ fn run_test_file(
           );
         }
       };
-      // Compile the JS source directly; Test262 should not be gated on TS-only checks.
       let chunk = match compiler::compile_session(&session) {
         Ok(c) => c,
         Err(e) => {
@@ -2579,21 +2513,16 @@ fn run_test_file(
         }
       };
 
-      // Execute in the fresh VM created for this test mode.
       vm.run(chunk).map_err(|e| e.to_string())
     };
 
-    // For async tests, drain the microtask queue to ensure promise callbacks execute
     let run_result = if is_async {
-      // First check if synchronous execution failed
       match run_result {
         Err(e) => Err(e),
         Ok(v) => {
-          // Drain microtasks to allow promise callbacks to run
           if let Err(e) = vm.flush_microtasks() {
             Err(e.to_string())
           } else {
-            // Now check if $DONE was called
             let start = Instant::now();
             let warn_threshold = Duration::from_secs(10);
             let hard_timeout = Duration::from_secs(30);
@@ -2646,7 +2575,6 @@ fn run_test_file(
       run_result
     };
 
-    // If the test expects a runtime error, ensure one occurred.
     if let Some(m) = &meta
       && let Some(neg) = &m.negative
       && neg.phase == "runtime"
@@ -2681,7 +2609,6 @@ fn run_test_file(
       }
     }
 
-    // For non-negative tests, execution must succeed.
     if run_result.is_err() {
       return Err(
         Test262Error::new(
@@ -2694,7 +2621,6 @@ fn run_test_file(
     }
   }
 
-  // If we reached here for all required modes, the test passed.
   Ok(())
 }
 
@@ -2785,7 +2711,6 @@ fn run_harness_only(
           continue;
         }
         if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
-          // Just store the filename, not the full path - it will be joined with harness dir later.
           if name == "sta.js" || name == "assert.js" {
             continue;
           }
@@ -2967,9 +2892,6 @@ fn run_scope_dump_test(
 fn main() {
   let opts = parse_args();
 
-  // Use the workspace's local Test262 checkout only. This runner is intended
-  // to be hermetic. If the checkout is missing we skip the connector rather than using a
-  // remote or environment-provided path.
   let test262_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
     .join("..")
     .join("..")
@@ -3008,13 +2930,10 @@ fn main() {
   let mut subsections: HashMap<String, BucketStats> = HashMap::new();
   let mut editions: HashMap<String, BucketStats> = HashMap::new();
 
-  // Bootstrap shared globals for the harness-only and scope-dump modes.
-  // Normal tests create fresh globals per mode in `run_test_file`.
   let globals = make_test_globals();
 
   let _vm = Vm::new(Clone::clone(&globals));
 
-  // Auxiliary modes restore these shared globals between their runs.
   #[expect(
     clippy::mutable_key_type,
     reason = "PropertyKey's interior mutability is limited to JsString's derived UTF-8 cache"

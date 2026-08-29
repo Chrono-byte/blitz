@@ -184,7 +184,6 @@ impl Vm {
   ) {
     let namespace = build_module_namespace_object(&exports);
     exports.insert("*".to_string(), BindingCell::new(namespace));
-    // Ensure table is large enough
     while self.modules.table.len() <= module_index {
       self.modules.table.push(HashMap::new());
     }
@@ -258,7 +257,6 @@ pub(crate) fn build_module_namespace_object(exports: &HashMap<String, BindingCel
       configurable: false,
     },
   );
-  // Namespace objects are non-extensible per the ECMAScript specification.
   namespace.borrow_mut().extensible = false;
   Value::Object(namespace)
 }

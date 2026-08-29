@@ -211,13 +211,8 @@ impl Vm {
       self.memory.kept_alive.clear();
       self.maybe_collect_garbage_prototype();
       if let Err(err) = result {
-        // Record the last uncaught exception so callers or host hooks
-        // can inspect it. Convert the runtime error into a JS value
-        // string for now; hosts may implement richer reporting.
         let exc_val = Value::String(format!("{}", err).into());
         self.exceptions.last_uncaught = Some(exc_val.clone());
-        // If a host hook is installed, call it with Undefined promise
-        // to indicate this was a microtask exception.
         if let Some(hook_rc) = self
           .jobs
           .unhandled_rejection_hook
@@ -227,7 +222,6 @@ impl Vm {
           let mut hook = hook_rc.borrow_mut();
           (hook)(self, Value::Undefined, exc_val.clone());
         }
-        // Continue draining remaining microtasks rather than returning.
         continue;
       }
     }

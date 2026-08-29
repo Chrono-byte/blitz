@@ -29,7 +29,6 @@ use std::rc::Rc;
 /// builtins and typed-array constructor variants.
 #[derive(Clone, Debug, Default)]
 pub struct Intrinsics {
-  // --- Constructors (callable objects) ---
   /// Object constructor for this realm.
   pub object_constructor: Option<Value>,
   /// Array constructor for this realm.
@@ -89,7 +88,6 @@ pub struct Intrinsics {
   /// TypedArray constructor for this realm.
   pub typed_array_constructor: Option<Value>,
 
-  // --- Prototypes ---
   /// Object prototype for this realm.
   pub object_prototype: Option<Value>,
   /// Array prototype for this realm.
@@ -135,7 +133,6 @@ pub struct Intrinsics {
   /// DataView prototype for this realm.
   pub data_view_prototype: Option<Value>,
 
-  // --- Iterators & generators ---
   /// Iterator prototype for this realm.
   pub iterator_prototype: Option<Value>,
   /// AsyncIterator prototype for this realm.
@@ -161,7 +158,6 @@ pub struct Intrinsics {
   /// AsyncFromSyncIterator prototype for this realm.
   pub async_from_sync_iterator_prototype: Option<Value>,
 
-  // --- Special helpers ---
   /// Helper for throwing a TypeError.
   pub throw_type_error: Option<Value>,
   /// Typed array constructors for this realm.

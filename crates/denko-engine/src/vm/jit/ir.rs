@@ -31,9 +31,6 @@ impl CompilerChunk {
     parameter_count: usize,
   ) -> Result<Self, IrError> {
     if parameter_count > 2 {
-      // Numeric binary specialization only proves the first two formal
-      // parameters. Keep larger signatures on the ordinary call path until
-      // the ABI carries a complete formal-parameter contract.
       return Err(IrError::TooManyParameters);
     }
     Ok(Self {
@@ -43,12 +40,6 @@ impl CompilerChunk {
   }
 
   pub(crate) fn revision(&self) -> u64 {
-    // DefaultHasher is intentionally used only as an in-process cache key
-    // (SnapshotStamp). It is not stable across Rust versions or processes,
-    // which is why `CAPABILITY_REVISION` in `worker.rs` must be bumped
-    // whenever the hashing or `CompilerChunk` layout changes. For stability
-    // across versions, replace with a fixed hasher (e.g., FxHash or SipHash
-    // with fixed keys).
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     self.parameter_count.hash(&mut hasher);
     self.code.hash(&mut hasher);
@@ -321,7 +312,6 @@ mod tests {
   #[test]
   fn rejects_unsupported_binary_and_malformed_typed_ssa() {
     let mut snapshot = add_snapshot();
-    // Div is now supported; test with Mod which remains unsupported for direct binary.
     snapshot.code[2] = (snapshot.code[2] & !0xff) | Op::Mod as u32;
     assert_eq!(
       SemanticFunction::decode(&snapshot),

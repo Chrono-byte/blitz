@@ -46,8 +46,6 @@ fn time_clip(value: f64) -> f64 {
   }
 }
 
-// Howard Hinnant's proleptic Gregorian calendar algorithms, expressed with
-// Euclidean division so years before 1970 behave the same as later years.
 fn days_from_civil(
   year: i64,
   month: i64,

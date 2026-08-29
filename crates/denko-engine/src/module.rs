@@ -275,8 +275,6 @@ fn estree_binding_names(
 }
 
 fn stable_hash_bytes(bytes: impl IntoIterator<Item = u8>) -> u64 {
-  // FNV-1a is deliberately used instead of the process-randomized standard
-  // hasher: generated assets must have the same hash across hosts and runs.
   bytes
     .into_iter()
     .fold(0x0cbf_29ce_4842_2325_u64, |hash, byte| {

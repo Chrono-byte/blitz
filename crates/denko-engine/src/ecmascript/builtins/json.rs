@@ -475,10 +475,7 @@ fn stringify_gap(
         .expect("space slice is in bounds")
         .to_string(),
     ),
-    Value::Object(_) => {
-      // A forged primitive slot is not a boxed String/Number.
-      Ok(String::new())
-    }
+    Value::Object(_) => Ok(String::new()),
     _ => Ok(String::new()),
   }
 }

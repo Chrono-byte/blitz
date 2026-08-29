@@ -59,8 +59,6 @@ pub(in crate::vm::runtime) fn list_own_keys_of_value(
 pub(in crate::vm::runtime) fn object_identity(obj: &Value) -> Option<usize> {
   match obj {
     Value::Object(map) => Some(map.borrow().identity as usize),
-    // Use the array's props object identity so IC keys remain stable across
-    // dense storage reallocations.
     Value::Array(_, props) => Some(props.borrow().identity as usize),
     Value::Proxy(proxy) => Some(proxy.borrow().identity as usize),
     Value::Closure { props, .. } => Some(props.borrow().identity as usize),
@@ -79,16 +77,12 @@ pub(in crate::vm::runtime) fn values_equal(
 ) -> bool {
   match (a, b) {
     (Value::Undefined, Value::Undefined) => true,
-    (Value::Number(x), Value::Number(y)) => {
-      // IEEE 754: NaN !== NaN, +0 === -0
-      x == y
-    }
+    (Value::Number(x), Value::Number(y)) => x == y,
     (Value::String(x), Value::String(y)) => x == y,
     (Value::Bool(x), Value::Bool(y)) => x == y,
     (Value::BigInt(x), Value::BigInt(y)) => x == y,
     (Value::Symbol(x, _), Value::Symbol(y, _)) => x == y,
     (Value::Null, Value::Null) => true,
-    // Reference equality for heap objects.
     (Value::Object(am), Value::Object(bm)) => Rc::ptr_eq(am, bm),
     (Value::Array(ar, _), Value::Array(br, _)) => Rc::ptr_eq(ar, br),
     (Value::Proxy(ap), Value::Proxy(bp)) => Rc::ptr_eq(ap, bp),
@@ -183,7 +177,6 @@ pub(in crate::vm::runtime) fn get_property(
       if let Some(desc) = d.properties.get(key) {
         return match desc {
           PropertyDescriptor::Data { value, .. } => Ok(value.clone()),
-          // Accessor invocation is handled in Vm::get_property_value.
           PropertyDescriptor::Accessor { .. } => Ok(Value::Undefined),
         };
       }
@@ -345,7 +338,6 @@ pub(in crate::vm::runtime) fn set_property(
         }
         return Ok(());
       }
-      // Special handling: setting array.length truncates the dense store.
       if matches!(key, PropertyKey::String(s) if s == "length")
         && let Value::Number(new_len_f) = value
       {
@@ -448,12 +440,7 @@ pub(in crate::vm::runtime) fn set_property(
         .insert(key.clone(), PropertyDescriptor::ordinary_data(value));
       Ok(())
     }
-    _ => {
-      // Non-object property assignments are no-ops in sloppy mode.
-      //
-      // this should probably check the strict mode behavior as well
-      Ok(())
-    }
+    _ => Ok(()),
   }
 }
 impl Vm {

@@ -247,8 +247,6 @@ pub(crate) fn install_object_intrinsics(
     PKey::String("valueOf".to_string().into()),
     PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(|_vm, args| {
-        // Builtins invoked as methods receive the receiver as args[0].
-        // Return the receiver (this) per standard Object.prototype.valueOf.
         let res = args.first().cloned().unwrap_or(Value::Null);
         if crate::trace::enabled() {
           crate::trace::value_string(

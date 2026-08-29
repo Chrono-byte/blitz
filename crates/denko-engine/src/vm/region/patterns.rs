@@ -3,7 +3,6 @@
 use crate::bytecode::{Chunk, Op, decode_risc_aux16};
 
 pub(super) fn opcode(word: u32) -> Op {
-  // The VM verifies chunks before building optimization plans.
   unsafe { Op::from_byte_unchecked((word & 0xff) as u8) }
 }
 

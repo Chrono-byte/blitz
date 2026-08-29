@@ -108,7 +108,6 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     &async_function_proto_map,
   );
 
-  // 27.2 Promise Objects
   let (promise_proto_map, _promise_ctor_map, promise_ctor_val) =
     builtins::promise::create_promise_intrinsics(&object_proto_map, &function_proto_map);
 

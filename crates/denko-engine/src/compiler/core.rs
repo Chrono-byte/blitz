@@ -297,9 +297,6 @@ impl Compiler {
     let is_patchable_jump_at =
       |idx: usize| op_at(idx).is_some_and(|op| op.is_jump() || matches!(op, Op::PushHandler));
 
-    // Some call sites capture the instruction position immediately after
-    // emitting the jump opcode, which points one instruction past the jump
-    // while its fixed-width word is still pending. Prefer that interpretation.
     if offset > 0 && is_patchable_jump_at(offset - 1) {
       offset - 1
     } else {
@@ -381,7 +378,6 @@ impl Compiler {
     if offset > source.len() {
       return 1;
     }
-    // Count newlines before offset; oxc spans are byte offsets.
     source[..offset]
       .bytes()
       .filter(|&b| b == b'\n')
@@ -395,9 +391,7 @@ impl Compiler {
     op: Op,
     line: u32,
   ) {
-    // Emit an instruction word with opcode in low 8 bits and zero payload.
     self.risc.emit(op, 0, line);
-    // Reset pending operand byte counter for this new instruction.
     self.pending_operand_bytes = 0;
   }
 
@@ -421,7 +415,6 @@ impl Compiler {
     line: u32,
   ) {
     self.risc.emit(op, payload24, line);
-    // We're writing the full instruction at once so reset pending bytes.
     self.pending_operand_bytes = 0;
   }
 
@@ -435,8 +428,6 @@ impl Compiler {
     byte: u8,
     line: u32,
   ) {
-    // Pack a single operand byte into the pending instruction's 24-bit payload
-    // using little-endian order: first emitted byte occupies bits 8..15, next 16..23, etc.
     if self.risc.is_empty() {
       self
         .emission_error
@@ -444,7 +435,6 @@ impl Compiler {
       return;
     }
     if self.pending_operand_bytes >= 3 {
-      // Avoid writing beyond the instruction payload.
       self.emission_error.get_or_insert_with(|| {
         CompilerError::from("too many operand bytes for instruction payload")
       });
@@ -479,12 +469,7 @@ impl Compiler {
     value: u16,
     line: u32,
   ) {
-    // Pack the u16 into the low 16 bits of the 24-bit payload and emit
-    // as a single instruction word. This avoids emitting multiple operand
-    // bytes separately which can desynchronize instruction indices.
     let payload = value as u32 & 0xFFFF;
-    // The caller must have emitted the opcode previously. Update that
-    // pending instruction rather than emitting another instruction word.
     self.risc.set_last_payload(payload, line);
     self.pending_operand_bytes = 0;
   }
@@ -507,9 +492,6 @@ impl Compiler {
       }
     };
     let idx = self.chunk.add_constant(constant);
-    // Emit the Const instruction with the constant index encoded into
-    // the 24-bit payload in a single instruction word to avoid
-    // multi-write emissions which break the fixed-width instruction model.
     let Ok(idx) = u16::try_from(idx) else {
       self
         .emission_error
@@ -1127,10 +1109,6 @@ impl Compiler {
           sloppy_immutable_silent,
         });
     }
-    // Allow pass-through capture for grandparent bindings needed by
-    // deeper nested functions. Root bindings must remain capturable so
-    // callbacks created inside a top-level function can still see the
-    // surrounding module scope after that function returns.
     let mut outer_names: Vec<String> = self.outer_bindings.keys().cloned().collect();
     outer_names.sort();
     for name in outer_names {
@@ -1303,8 +1281,6 @@ impl Compiler {
     export_name: &str,
   ) -> Result<(), CompilerError> {
     if !self.owns_module_export(export_name) {
-      // Keep the virtual value stack balanced when a caller found a module
-      // context by name but not the binding that owns that export.
       self.emit(Op::Discard, LINE);
       return Ok(());
     }
@@ -1377,18 +1353,11 @@ impl Compiler {
     &mut self,
     name: &str,
   ) -> usize {
-    // If we previously cached an index for this global name, it may
-    // refer to a constant stored in a different chunk (e.g. from an
-    // enclosing function/proto). Ensure the returned index always points
-    // into the current compilation chunk by validating the cached index
-    // and, if necessary, adding a fresh constant into this chunk.
     if let Some(&idx) = self.globals.get(name)
       && idx < self.chunk.constants.len()
     {
       return idx;
     }
-    // Cached index is out-of-range for current chunk; fall through to
-    // add a local constant instead of reusing the stale index.
     let idx = self
       .chunk
       .add_constant(Constant::String(name.to_string().into()));
@@ -1540,10 +1509,6 @@ impl Compiler {
     &mut self,
     offset: usize,
   ) {
-    // `offset` is the instruction index where the jump instruction resides
-    // (this follows the previous emitter pattern of recording `code.len()`
-    // before adding operand bytes). The relative offset is computed in
-    // instruction units: target - (offset + 1)
     let patch_idx = self.resolve_jump_patch_index(offset);
     let target = self.current_ip() as isize;
     let rel = target - (patch_idx as isize) - 1;
@@ -1588,8 +1553,6 @@ impl Compiler {
     val: isize,
     line: u32,
   ) {
-    // Store signed jump offsets as sign-extended i24 payload so runtime
-    // jump decoding (`read_i24_payload_at`) preserves negative back-jumps.
     let Ok(v) = i32::try_from(val) else {
       self
         .emission_error
@@ -1609,7 +1572,6 @@ impl Compiler {
   ) {
     for patch_pos in patches {
       let patch_idx = self.resolve_jump_patch_index(patch_pos);
-      // compute relative offset in instruction units
       let rel = (target as isize) - (patch_idx as isize) - 1;
       let Ok(v) = i32::try_from(rel) else {
         self

@@ -42,9 +42,6 @@ impl Compiler {
       .as_ref()
       .is_some_and(|body| Self::has_use_strict_directive(body));
 
-    // `name` is function metadata and may be inferred from a property's
-    // IdentifierName, which can legally be a reserved word. Validate only
-    // actual function bindings from the AST.
     if let Some(binding) = &func.id
       && let Some(err) = Self::strict_binding_name_error(function_is_strict, &binding.name)
     {
@@ -169,17 +166,11 @@ impl Compiler {
     inner.chunk.allow_new_target = inner.allow_new_target;
     inner.chunk.allow_super = inner.allow_super;
     if !has_simple_parameter_list && !function_is_strict {
-      // Sloppy direct eval in a non-simple parameter list may introduce var
-      // bindings after compilation. Resolve outer names through the runtime
-      // environment chain so closures created before or after that eval see
-      // the newly introduced binding instead of a prematurely fixed upvalue.
       inner.outer_bindings.clear();
     }
 
     let mut raw_param_slots = Vec::new();
     if has_simple_parameter_list {
-      // Keep one positional slot per argument, but bind duplicate sloppy
-      // parameter names to their last occurrence.
       let mut last_parameter_index = HashMap::new();
       for (index, parameter) in func.params.items.iter().enumerate() {
         if let oast::BindingPattern::BindingIdentifier(identifier) = &parameter.pattern {
@@ -240,8 +231,6 @@ impl Compiler {
     }
     let arguments_slot = inner.add_local_with_mirror("arguments".to_string(), None, false);
 
-    // Non-simple parameter initializers run in a parameter environment where
-    // declarations from the function body are not yet visible.
     if has_simple_parameter_list {
       inner.emit_parameter_initializers_from_current_slots(&func.params)?;
     } else {
@@ -249,7 +238,6 @@ impl Compiler {
     }
     let parameter_environment_slot_names = inner.environment_slot_names();
 
-    // Instantiate body declarations only after parameter initialization.
     if let Some(body) = &func.body {
       inner.enter_function_body_scope_with_vars(&body.statements, !has_simple_parameter_list);
       inner.pre_declare_functions_oast_stmts(&body.statements);
@@ -262,7 +250,6 @@ impl Compiler {
       inner.emit_pending_instance_field_initializers()?;
     }
 
-    // Compile function body statements into inner compiler.
     if let Some(body) = &func.body {
       for stmt in &body.statements {
         if matches!(stmt, oast::Statement::FunctionDeclaration(_)) {
@@ -345,8 +332,6 @@ impl Compiler {
           && param.initializer.is_none()
       });
 
-    // Arrow names are metadata inferred from their syntactic position, not
-    // lexical bindings, so reserved IdentifierNames are valid here.
     if function_is_strict {
       let mut seen = HashSet::new();
       for p in &func.params.items {
@@ -511,22 +496,16 @@ impl Compiler {
     }
     let parameter_environment_slot_names = inner.environment_slot_names();
 
-    // Arrow body declarations are likewise outside the non-simple parameter
-    // environment.
     inner.enter_function_body_scope_with_vars(&func.body.statements, !has_simple_parameter_list);
     inner.pre_declare_functions_oast_stmts(&func.body.statements);
     inner.emit_hoisted_function_decls_oast_stmts(&func.body.statements)?;
 
     if has_simple_parameter_list {
-      // Check if this is an implicit-return arrow function (expression: true).
-      // In that case, the body contains a single ExpressionStatement that should be returned.
       if func.expression && func.body.statements.len() == 1 {
         if let oast::Statement::ExpressionStatement(expr_stmt) = &func.body.statements[0] {
-          // Compile the expression in return position.
           inner.compile_expr_oast_tail(&expr_stmt.expression)?;
           inner.emit(Op::Return, LINE);
         } else {
-          // Shouldn't happen for expression: true, but handle it safely
           for stmt in &func.body.statements {
             if !matches!(stmt, oast::Statement::FunctionDeclaration(_)) {
               inner.compile_statement_oast(stmt)?;
@@ -535,7 +514,6 @@ impl Compiler {
           inner.emit_fallthrough_return(LINE);
         }
       } else {
-        // Regular function body with explicit statements
         for stmt in &func.body.statements {
           if matches!(stmt, oast::Statement::FunctionDeclaration(_)) {
             continue;
@@ -599,8 +577,6 @@ impl Compiler {
         has_rest,
         has_prototype_property: false,
         captures_this: true,
-        // Arrow functions do not create their own `arguments`; it is
-        // lexically resolved from the enclosing function/global scope.
         arguments_slot: None,
         self_binding_slot: None,
         has_simple_parameter_list,

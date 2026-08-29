@@ -65,7 +65,6 @@ const readIdentity = () => {
       }
     }
   } catch {
-    // Storage may be unavailable in privacy-restricted browsing contexts.
   }
 
   const identity = { clientId: randomId(), name: randomName() };
@@ -75,7 +74,6 @@ const readIdentity = () => {
       `${identity.clientId}:${identity.name}`,
     );
   } catch {
-    // The in-memory identity still works for this page lifetime.
   }
   return identity;
 };

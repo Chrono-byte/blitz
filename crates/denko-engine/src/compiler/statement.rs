@@ -275,11 +275,8 @@ impl Compiler {
           self.emit_byte(descriptor.to_le_bytes()[1], LINE);
           self.emit_set_own_module_export(&export_name)?;
         }
-        // Plain `export * from "module"` is resolved by the module loader;
-        // it has no runtime side effects in this module.
       }
       OStmt::ExportNamedDeclaration(export) => {
-        // export {  } from "module"
         if let Some(decl) = &export.declaration {
           match decl {
             oast::Declaration::VariableDeclaration(v) => {
@@ -484,7 +481,6 @@ impl Compiler {
         }
       }
       OStmt::SwitchStatement(s) => {
-        // Evaluate discriminant once and store in a local slot.
         self.compile_expr_oast(&s.discriminant)?;
         let discr_name = format!("\0switch_discriminant_{}", self.locals.len());
         let discr_slot =
@@ -492,18 +488,13 @@ impl Compiler {
         self.emit(Op::StoreLocal, LINE);
         self.emit_slot(discr_slot, LINE);
 
-        // Case clauses share one lexical environment, instantiated before any
-        // case selector or consequent is evaluated.
         self.enter_block_scope();
         for case in &s.cases {
           self.pre_declare_variables_oast_stmts(&case.consequent);
         }
 
-        // `break` inside a switch should jump to switch end.
         self.break_patches.push(Vec::new());
 
-        // First phase: dispatch checks, each successful match jumps to
-        // the corresponding case body.
         let mut case_body_jumps: Vec<(usize, usize)> = Vec::new();
         let mut default_index: Option<usize> = None;
         for (case_idx, case) in s.cases.iter().enumerate() {
@@ -511,7 +502,6 @@ impl Compiler {
             self.emit(Op::LoadLocal, LINE);
             self.emit_slot(discr_slot, LINE);
             self.compile_expr_oast(test)?;
-            // Use CompareJump: cond_type 6 = StrictEq, jump if false.
             self.emit_with_payload(Op::CompareJump, 6, LINE);
             let skip_jump = self.current_ip();
             self.emit_byte(0, LINE);
@@ -529,14 +519,11 @@ impl Compiler {
           }
         }
 
-        // If no case matched, jump to default (if any), else to end.
         self.emit(Op::Jump, LINE);
         let no_match_jump = self.current_ip();
         self.emit_byte(0, LINE);
         self.emit_byte(0, LINE);
 
-        // Second phase: emit case bodies in source order. Fallthrough is
-        // represented naturally by layout.
         let mut case_starts: Vec<usize> = vec![0; s.cases.len()];
         for (case_idx, case) in s.cases.iter().enumerate() {
           case_starts[case_idx] = self.current_ip();
@@ -546,16 +533,13 @@ impl Compiler {
         }
         let switch_end = self.current_ip();
 
-        // Patch successful-case jumps to case body starts.
         for (case_idx, jump_pos) in case_body_jumps {
           self.patch_jump_to_target(jump_pos, case_starts[case_idx]);
         }
 
-        // Patch no-match jump to default start or end.
         let default_target = default_index.map_or(switch_end, |idx| case_starts[idx]);
         self.patch_jump_to_target(no_match_jump, default_target);
 
-        // Patch `break` statements emitted within this switch.
         if let Some(patches) = self.break_patches.pop() {
           for patch_pos in patches {
             self.patch_jump_to_target(patch_pos, switch_end);
@@ -593,7 +577,6 @@ impl Compiler {
         self.exit_scope();
         self.emit(Op::Jump, LINE);
         let _back_jump_pos = self.current_ip();
-        // back_offset in instruction units: loop_start - (current_ip + 1)
         let back_offset = loop_start as isize - (self.current_ip() as isize);
         self.emit_short_signed(back_offset, LINE);
         if let Some(patches) = self.continue_patches.pop() {
@@ -707,8 +690,6 @@ impl Compiler {
       }
       OStmt::ForStatement(f) => {
         use oxc_ast::ast::ForStatementInit as OForInit;
-        // The initializer's lexical declarations belong to a scope enclosing
-        // the test, update, and body, but not code after the loop.
         self.enter_block_scope();
         self.loop_depth += 1;
         self.continue_patches.push(Vec::new());
@@ -766,8 +747,6 @@ impl Compiler {
                   if matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Const) {
                     self.mark_local_immutable(slot);
                   }
-                  // Lexical bindings are instantiated before evaluating any
-                  // initializer, so self-references observe the TDZ.
                   if let Some(initializer) = &declaration.init {
                     self.compile_expr_oast(initializer)?;
                   } else {
@@ -940,8 +919,6 @@ impl Compiler {
         }
         self.activate_current_scope_lexical_bindings();
 
-        // Acquire either the ordinary synchronous iterator record or the
-        // async iterator record (including async-from-sync fallback).
         self.compile_expr_oast(&f.right)?;
         if f.r#await {
           self.emit(Op::GetAsyncIterator, LINE);
@@ -988,8 +965,6 @@ impl Compiler {
         self.emit_byte(0, LINE);
         self.emit_constant(Value::String("value".to_string().into()), LINE);
         self.emit(Op::GetProperty, LINE);
-        // IteratorStep and IteratorValue abrupt completions return directly;
-        // only failures after a value was produced perform IteratorClose.
         self.emit(Op::True, LINE);
         self.emit(Op::StoreLocal, LINE);
         self.emit_slot(iterator_close_active_slot, LINE);
@@ -1064,9 +1039,6 @@ impl Compiler {
         self.emit_short_signed(back_offset, LINE);
 
         self.patch_jump(exit_jump);
-        // Normal iterator exhaustion should not perform IteratorClose.
-        // Also discard the final iterator result object left on the virtual
-        // value stack.
         self.emit(Op::Discard, LINE);
         self.emit(Op::PopHandler, LINE);
         self.emit(Op::Jump, LINE);
@@ -1234,7 +1206,6 @@ impl Compiler {
         self.emit_slot(keys_slot, LINE);
         self.emit_constant(Value::String("length".to_string().into()), LINE);
         self.emit(Op::GetProperty, LINE);
-        // Use CompareJump: cond_type 2 = Lt, jump if false.
         self.emit_with_payload(Op::CompareJump, 2, LINE);
         let exit_jump = self.current_ip();
         self.emit_byte(0, LINE);
@@ -1569,7 +1540,6 @@ impl Compiler {
 
         self.emit(Op::PopHandler, LINE);
 
-        // Normal completion path: run finalizer (if present), then skip handler path.
         if let Some(fin) = finalizer {
           let finally_idx = finally_idx
             .ok_or_else(|| crate::errors::CompilerError::from("finally state missing"))?;
@@ -1659,7 +1629,6 @@ impl Compiler {
         self.emit_byte(0, LINE);
         self.emit_byte(0, LINE);
 
-        // Exception path starts here.
         self.patch_jump(handler_jump);
 
         let mut catch_handler_jump = None;
@@ -1685,9 +1654,6 @@ impl Compiler {
               {
                 return Err(error);
               }
-              // The catch parameter and catch body have distinct declarative
-              // environments. A closure created by a parameter initializer
-              // must not capture lexical declarations from the body.
               self.enter_block_scope();
               if !matches!(param.pattern, OPat::BindingIdentifier(_)) {
                 let mut binding_names = HashSet::new();
@@ -1830,7 +1796,6 @@ impl Compiler {
             }
           }
           None => {
-            // try/finally with no catch: preserve thrown value, run finally, rethrow.
             if finalizer.is_none() {
               return Err(crate::errors::CompilerError::from(
                 "try without catch/finally not supported",

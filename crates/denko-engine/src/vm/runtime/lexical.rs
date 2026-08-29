@@ -691,9 +691,6 @@ impl Vm {
     name: &str,
     value: Value,
   ) -> Result<(), RuntimeError> {
-    // Root bindings mirrored onto the global object have already been written
-    // by the StoreLocal immediately preceding SetGlobal. Avoid resolving and
-    // writing that same lexical cell a second time in the common script path.
     let is_root_binding = self.execution.call_stack.is_empty()
       && self.execution.direct_eval_outer.is_none()
       && !self
@@ -774,8 +771,4 @@ impl Vm {
     }
     Ok(())
   }
-
-  // -----------------------------------------------------------------------
-  // Stack helpers
-  // -----------------------------------------------------------------------
 }

@@ -210,8 +210,6 @@ impl<State> ProcedureBuilder<State> {
     self,
     metadata: JsonValue,
   ) -> Self {
-    // JsonValue cannot contain cycles or JavaScript-only values. Keep the
-    // fallible variant available for callers that want an explicit check.
     let mut builder = self;
     builder.metadata = Some(metadata);
     builder

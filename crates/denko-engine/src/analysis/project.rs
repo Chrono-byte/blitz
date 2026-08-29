@@ -82,8 +82,6 @@ impl AnalysisProject {
     let path = normalize_path(path);
     self.update_document(source.clone(), &path);
     if self.discover_declarations(&source, &path) {
-      // A newly discovered declaration can affect any already analyzed
-      // document importing the same module specifier.
       self.analyses.clear();
     }
     if let Some(cached) = self.analyses.get(&path)

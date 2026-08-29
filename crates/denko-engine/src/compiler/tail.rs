@@ -206,8 +206,6 @@ impl super::Compiler {
     self.emit_byte(arg_count, LINE);
     for (index, is_spread) in spread_flags.into_iter().enumerate() {
       if index == 0 && (receiver_slot.is_some() || is_super_construct) {
-        // The first mask slot can carry an internal call-kind marker alongside
-        // the actual spread flag. A third true entry marks `super(...)`.
         if let Some(receiver) = receiver_slot {
           self.emit(Op::LoadLocal, LINE);
           self.emit_slot(receiver, LINE);
@@ -253,8 +251,6 @@ impl super::Compiler {
     c: &oast::CallExpression<'_>,
   ) -> Result<(), crate::errors::CompilerError> {
     use oxc_ast::ast::Expression as OExpr;
-    // Tail calls only need the optimized path for direct/non-spread calls.
-    // Spread calls still lower through the existing non-tail path.
     if self.compile_spread_call_tail(c)? {
       return Ok(());
     }
@@ -439,7 +435,6 @@ impl super::Compiler {
     }
 
     if c.optional {
-      // Optional calls short-circuit to `undefined` if the callee is nullish.
       self.compile_expr_oast(&c.callee)?;
       self.emit(Op::Copy, LINE);
       self.emit(Op::JumpIfNullish, LINE);

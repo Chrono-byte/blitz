@@ -9,7 +9,6 @@ pub(in crate::ecmascript::builtins::array) fn install_after_iterator(
 ) {
   use PropertyKey as PKey;
 
-  // Array.prototype.filter
   array_proto_map.borrow_mut().properties.insert(
     PKey::String("filter".to_string().into()),
     PropertyDescriptor::builtin_data(builtin_object(
@@ -58,7 +57,6 @@ pub(in crate::ecmascript::builtins::array) fn install_after_iterator(
       function_proto_map,
     )),
   );
-  // Array.prototype.find
   array_proto_map.borrow_mut().properties.insert(
     PKey::String("find".to_string().into()),
     PropertyDescriptor::builtin_data(builtin_object(
@@ -251,7 +249,6 @@ pub(in crate::ecmascript::builtins::array) fn install_after_iterator(
       function_proto_map,
     )),
   );
-  // Array.prototype.reduce
   array_proto_map.borrow_mut().properties.insert(
     PKey::String("reduce".to_string().into()),
     PropertyDescriptor::builtin_data(builtin_object(
@@ -309,7 +306,6 @@ pub(in crate::ecmascript::builtins::array) fn install_after_iterator(
       function_proto_map,
     )),
   );
-  // Array.prototype.flat
   array_proto_map.borrow_mut().properties.insert(
     PKey::String("flat".to_string().into()),
     PropertyDescriptor::builtin_data(builtin_object(

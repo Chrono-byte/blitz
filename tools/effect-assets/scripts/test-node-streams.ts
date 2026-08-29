@@ -7,10 +7,6 @@ const REPOSITORY = resolve(ROOT, "../..");
 const blitzBinary = join(REPOSITORY, "target/debug/blitz");
 const sourceRoot = join(ROOT, "src/facades");
 
-// The stream facades are intentionally not registered in the shared manifest
-// by this asset-only slice. Copying them into a temporary Blitz module graph
-// keeps this smoke test on the Blitz VM while rewriting only the pending
-// subpath-to-root edge for node:stream/promises.
 const fixture = `
 import stream, { Readable, Writable, Duplex, Transform, PassThrough, promises, pipeline, finished } from "./node-stream.js";
 import promiseStream, { pipeline as promisePipeline, finished as promiseFinished } from "./node-stream-promises.js";

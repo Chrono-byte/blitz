@@ -1599,7 +1599,6 @@ fn extract_header_entries(
     }
     return Err(RuntimeError::from("headers must be an object"));
   };
-  // Collect first so the object borrow is released before string conversion mutates the VM.
   #[allow(clippy::needless_collect)]
   let entries = properties
     .borrow()

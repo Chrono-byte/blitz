@@ -67,7 +67,6 @@ pub(in crate::ecmascript::builtins::array) fn install_before_iterator(
         let mut out: Vec<Option<Value>> = Vec::with_capacity(len);
         for i in 0..len {
           let key = PKey::String(i.to_string().into());
-          // Check whether the property exists, including inherited properties.
           let has_prop = vm.has_property_host(&receiver, &key)?;
           if has_prop {
             let item = vm.get_property_host(&receiver, &key)?;
@@ -78,7 +77,6 @@ pub(in crate::ecmascript::builtins::array) fn install_before_iterator(
             )?;
             out.push(Some(mapped));
           } else {
-            // Preserve hole
             out.push(None);
           }
         }

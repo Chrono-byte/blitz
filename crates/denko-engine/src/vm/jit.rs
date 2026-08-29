@@ -114,10 +114,6 @@ impl<'a> BaselineCompiler<'a> {
         let Some(value) = registers[rd] else {
           return self.resume_materialized(&registers, pc);
         };
-        // Baseline only tracks numeric constants (`Option<f64>`). Numbers are
-        // never Null/Undefined, so `JumpIfNullish` on a known number is
-        // always not taken. Unknown values deopt via `resume_materialized`
-        // above, where the interpreter handles the correct nullish semantics.
         let truthy = value != 0.0 && !value.is_nan();
         let take = match Op::from_byte(op) {
           Some(Op::JumpIfFalse) => !truthy,
@@ -196,8 +192,6 @@ impl<'a> BaselineCompiler<'a> {
           _ => unreachable!(),
         };
         if let Some(value) = registers[rd] {
-          // See comment in `compile_const_prefix`: numeric constants are never
-          // nullish.
           let truthy = value != 0.0 && !value.is_nan();
           let take = match condition {
             0 => !truthy,
@@ -1048,8 +1042,6 @@ impl JitRuntime {
     };
     let mut next_pc = frame.vm_pc;
     if !code.native_blocks.contains_key(&next_pc) {
-      // A missing interior block is a deoptimization point. Restarting at the
-      // function entry would re-run already executed instructions.
       return Ok(BaselineOutcome::Interpret {
         resume_pc: frame.vm_pc,
       });

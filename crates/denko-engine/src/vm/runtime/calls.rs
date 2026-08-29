@@ -154,9 +154,6 @@ impl Vm {
     function: &BuiltinFn,
     args: &[Value],
   ) -> Result<Value, RuntimeError> {
-    // Native integrations can still hold object backing stores for legacy
-    // construction APIs. Treat every native callback as a cache coherency
-    // boundary until all external object mutation is opaque and VM-owned.
     self.caches.property_get_epoch = self.caches.property_get_epoch.wrapping_add(1);
     let result = (function.as_ref())(self, args);
     self.caches.property_get_epoch = self.caches.property_get_epoch.wrapping_add(1);
@@ -237,8 +234,6 @@ impl Vm {
           callee.type_name()
         );
         crate::trace::value_string("[trace]   callee", callee);
-        // Dump a small window of bytecode around the current ip to help
-        // correlate the failing instruction with constants and nearby ops.
         let cur_ip = self.execution.active.ip.saturating_sub(1);
         let start = cur_ip.saturating_sub(16);
         let end = (cur_ip + 16).min(self.execution.active.chunk.code.len());
@@ -248,7 +243,6 @@ impl Vm {
           let b = (instr & 0xFF) as u8;
           eprintln!("[trace]     {:04} 0x{:02x}", i, b);
         }
-        // Print a short constant pool summary
         eprintln!(
           "[trace]   constants (len={}):",
           self.execution.active.chunk.constants.len()
@@ -472,11 +466,6 @@ impl Vm {
           ))));
           Value::Object(instance_obj)
         };
-        // Builtin constructors receive:
-        // args[0] = new instance (via call_with_this)
-        // args[1..] = user-provided arguments
-        // Keep [[NewTarget]] in VM state so builtins can inspect it
-        // without perturbing user-visible argument positions.
         let prev_new_target = self.construction.new_target.clone();
         let active_new_target = prev_new_target
           .clone()
@@ -580,8 +569,6 @@ impl Vm {
       return Err(self.throw_reference_error("Super constructor may only be called once"));
     }
 
-    // GetSuperConstructor observes the constructor object's current
-    // [[Prototype]], including later Object.setPrototypeOf mutations.
     let super_constructor = self.get_prototype(&callee);
     if matches!(super_constructor, Value::Null | Value::Undefined) {
       return Err(self.throw_type_error("Class extends value does not have a valid constructor"));
@@ -714,9 +701,6 @@ impl Vm {
           )
         }
         Value::Builtin(f) => {
-          // For builtins invoked with an explicit `this`, pass the receiver
-          // as the first argument so native functions that expect the
-          // receiver can access it (used by accessor getters/setters).
           let mut call_args: Vec<Value> = Vec::with_capacity(args.len() + 1);
           call_args.push(this_arg_owned.clone());
           call_args.extend_from_slice(args);
@@ -839,7 +823,6 @@ impl Vm {
               .run_risc_loop(false)
               .and_then(|value| self.execute_return(value));
             if result.is_ok() || self.exceptions.pending.is_none() {
-              // Restore the suspended caller state after the callee returns.
               self.execution.active = caller_context;
               self
                 .execution
@@ -1097,8 +1080,6 @@ impl Vm {
       ExecutionContext {
         chunk: Arc::clone(&proto.chunk),
         ip: 0,
-        // configure_call_frame replaces this vector immediately. Avoid
-        // allocating the default capacity before that replacement.
         locals: Vec::new(),
         this_value: this_value.clone(),
         closure_env: None,
@@ -1117,8 +1098,6 @@ impl Vm {
       risc_state: None,
       callee: callee.clone(),
       previous_realm,
-      // Arrow functions capture the surrounding [[NewTarget]], while an
-      // ordinary nested call starts with no [[NewTarget]].
       new_target,
       upvalues: proto.upvalues.clone(),
     });

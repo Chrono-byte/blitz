@@ -133,20 +133,17 @@ impl Vm {
     }
 
     fixed.push(Value::Array(arr_rc, props));
-    if crate::trace::enabled() {
-      // Log allocation site for rest-array used as arguments so we can
-      // correlate a later callee pointing at the same props pointer.
-      if let Value::Array(_arr, props_rc) = fixed
+    if crate::trace::enabled()
+      && let Value::Array(_arr, props_rc) = fixed
         .last()
         .cloned()
         .expect("fixed must not be empty after push")
-      {
-        eprintln!(
-          "[trace] prepare_call_args: created rest-Array props_ptr={:p} proto='{}'",
-          Rc::as_ptr(&props_rc),
-          proto.name
-        );
-      }
+    {
+      eprintln!(
+        "[trace] prepare_call_args: created rest-Array props_ptr={:p} proto='{}'",
+        Rc::as_ptr(&props_rc),
+        proto.name
+      );
     }
     Ok(fixed)
   }

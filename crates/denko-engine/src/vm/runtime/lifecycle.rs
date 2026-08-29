@@ -33,10 +33,6 @@ impl Vm {
     }
   }
 
-  // -----------------------------------------------------------------------
-  // Construction & public helpers
-  // -----------------------------------------------------------------------
-
   /// Create a new virtual machine.
   pub fn new(globals: Rc<RefCell<ObjectData>>) -> Self {
     let module_loader = shared_module_loader_for(&globals);
@@ -349,7 +345,6 @@ impl Vm {
         if count == 0 {
           None
         } else {
-          // Safe: index is from 0..OP_COUNT which is guaranteed <= u8::MAX
           let index = u8::try_from(index).expect("index from opcode_counts exceeds u8::MAX");
           Op::from_byte(index).map(|op| (op, count))
         }
@@ -358,7 +353,6 @@ impl Vm {
     ranked.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     for (op, count) in ranked.into_iter().take(16) {
-      // Precision loss acceptable for percentage display calculation
       let pct = ((count as i64) as f64 / (total as i64) as f64) * 100.0;
       eprintln!("[vm-profile] {:>16} {:>12} {:>6.2}%", op.name(), count, pct);
     }
@@ -641,10 +635,6 @@ impl Vm {
 
   /// Run the prototype mark/sweep collector and return mark statistics.
   pub fn collect_garbage_prototype(&mut self) -> gc::GcStats {
-    // The current prototype GC cannot inspect captures held inside queued
-    // host-side microtask/import-job closures. Collecting while those queues
-    // are non-empty can reclaim still-live JS values reachable only through
-    // those opaque Rust closures, leading to stalled async work.
     if !self.jobs.microtasks.is_empty() || !self.jobs.dynamic_imports.is_empty() {
       if Self::gc_trace_enabled() {
         eprintln!(
@@ -1103,9 +1093,6 @@ impl Vm {
     if pressure < threshold {
       return;
     }
-    // Opportunistic prototype-GC is only safe at quiescent points where
-    // live JS values are fully represented in the VM root sets. Nested JS
-    // calls and pending host jobs still keep additional opaque temporaries.
     if !self.execution.call_stack.is_empty()
       || !self.jobs.microtasks.is_empty()
       || !self.jobs.dynamic_imports.is_empty()

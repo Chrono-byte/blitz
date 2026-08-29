@@ -160,10 +160,6 @@ pub(super) fn create_data_property_or_throw(
     return Err(vm.throw_type_error("Array.from failed to define element"));
   }
 
-  // Dense arrays use their element storage as the canonical representation.
-  // `define_property_value` performs all extensibility and descriptor checks;
-  // normalize its successful numeric definition so later array algorithms do
-  // not observe a stale shadow property alongside the dense element.
   if let (Value::Array(elements, properties), Value::String(key), Some(index)) =
     (target, key, dense_index)
   {

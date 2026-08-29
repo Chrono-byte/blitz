@@ -135,8 +135,6 @@ impl VmGcRegistration {
 
 impl Drop for VmGcRegistration {
   fn drop(&mut self) {
-    // VMs can themselves be retained by another thread-local and dropped
-    // during TLS teardown after LIVE_VMS has already been destroyed.
     let _ = LIVE_VMS.try_with(|count| {
       let current = count.get();
       debug_assert!(current > 0);
@@ -765,7 +763,6 @@ fn weak_key_is_marked(
     WeakKey::Promise(value) => value
       .upgrade()
       .is_some_and(|value| marked_promises.contains(&(Rc::as_ptr(&value) as usize))),
-    // Bare native functions are not allocations managed by this collector.
     WeakKey::Builtin(value) => value.strong_count() > 0,
     WeakKey::Symbol(value) => value.strong_count() > 0,
   }

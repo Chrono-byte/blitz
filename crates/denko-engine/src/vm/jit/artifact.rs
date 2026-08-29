@@ -5,9 +5,6 @@
 use super::ir::{ExitOutcome, ResumePoint, TypedValue, VerifiedTypedFunction};
 use super::native::RuntimeHelperId;
 
-// Bump this together with `worker::CAPABILITY_REVISION` whenever the
-// codegen or ABI changes (e.g., guard branch now uses rel32). Artifacts
-// are validated via `validate()` which checks this ABI.
 pub(crate) const NATIVE_ARTIFACT_ABI: AbiRevision = AbiRevision(1);
 const MAX_ARTIFACT_BYTES: usize = 64 * 1024;
 
@@ -208,9 +205,6 @@ impl ShortBranchCode {
     &mut self,
     opcode: u8,
   ) -> Result<(), ArtifactError> {
-    // Map short `jb` (0x72) / `jae` (0x73) to long `jb rel32` (0F 82) /
-    // `jae rel32` (0F 83). The 4-byte displacement is patched in
-    // `bind_guard_failure`.
     let long_opcode = match opcode {
       0x72 => 0x82, // jb rel32
       0x73 => 0x83, // jae rel32
@@ -406,21 +400,15 @@ mod tests {
   #[cfg(all(unix, target_arch = "x86_64"))]
   #[test]
   fn guard_branch_supports_large_displacement() {
-    // Force a displacement >127 to ensure the rel32 form is used. The previous
-    // rel8 implementation would return TooLarge.
     let mut code = ShortBranchCode::default();
     code
       .guard_branch(0x72)
       .expect("known guard opcode"); // jb
-    // Pad with 200 bytes (more than 127) before the guard target.
     code.emit(&[0x90; 200]); // nop
     code
       .bind_guard_failure()
       .expect("large guard should succeed with rel32");
-    // Verify the 4-byte displacement was patched near the end.
     assert!(code.bytes.len() > 200);
-    // The artifact should still be installable as a numeric binary.
-    // Reuse the normal typed function to ensure overall emission still works.
     let typed_artifact = artifact();
     assert!(typed_artifact.validate().is_ok());
   }

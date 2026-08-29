@@ -68,9 +68,6 @@ impl ModuleLoader {
       })
       .collect::<HashMap<_, _>>();
 
-    // Namespace objects enumerate names contributed by `export *`. Resolve
-    // those names to the original live cells before namespace construction;
-    // iterate to a fixed point so chains of star exports are included.
     for _ in 0..=module_paths.len() {
       let mut changed = false;
       for path in module_paths {
@@ -203,8 +200,6 @@ impl ModuleLoader {
       })
       .collect::<HashSet<_>>();
 
-    // Allocate every canonical cell for each active graph before wiring or
-    // marking even one of its records as instantiated.
     for graph_id in active_graphs {
       let registration = self
         .prelinked_graphs
@@ -388,13 +383,9 @@ impl ModuleLoader {
   /// Returns a [`crate::errors::BundlerError`] if a module fails to instantiate.
   #[allow(clippy::too_many_lines)]
   pub fn instantiate_all(&mut self) -> Result<(), BundlerError> {
-    // For each parsed source module, examine its AST for exported names and
-    // allocate slots. Prelinked records already carry their export metadata.
     for rec_rc in self.map.values() {
       let mut rec = rec_rc.borrow_mut();
       if matches!(rec.state, ModuleState::Parsed) {
-        // Use ESTree JSON representation to find export declarations only for
-        // source-backed records. Prelinked records never own parser state.
         let estree = match &rec.payload {
           ModuleRecordPayload::Source { session, .. } => {
             self.pipeline_counters.source_linking_pass();
@@ -595,20 +586,11 @@ impl ModuleLoader {
 
     self.instantiate_prelinked_records()?;
 
-    // Second pass: wire source imports to exporter slots so importers hold live
-    // bindings to the same cells as source or prelinked exporters. We iterate
-    // over a deterministic snapshot because resolution may discover records.
     let mut module_paths: Vec<PathBuf> = self.map.keys().cloned().collect();
     module_paths.sort();
     self.resolve_all_indirect_exports(&module_paths)?;
-    // Reserve all registered fixed indices, including prelinked modules which
-    // have not been constructed, before assigning any ordinary source index.
     self.assign_module_indices(&module_paths)?;
 
-    // Resolve `export * as name from "module"` to the dependency's module
-    // table index. The compiler emits a `GetModuleExport` for the dependency's
-    // synthetic `*` namespace export, then stores that object in the named
-    // export's live binding cell.
     for path in &module_paths {
       let Some(rec_rc) = self.map.get(path).cloned() else {
         continue;
@@ -653,8 +635,6 @@ impl ModuleLoader {
         Some(r) => Rc::clone(r),
         None => continue,
       };
-      // Walk ESTree JSON import declarations to wire live-binding slots.
-      // Borrow the module record only long enough to extract the AST.
       let estree = {
         let rec = rec_rc.borrow();
         match &rec.payload {
@@ -784,8 +764,6 @@ impl ModuleLoader {
                     let mut rec = rec_rc.borrow_mut();
                     rec.imports.insert(local.clone(), boxed);
                   }
-                  // Record a synthetic import source with the module index and
-                  // special "*" name; namespace object wiring happens later.
                   if let Some(src_idx) = dep_module_index {
                     rec_rc
                       .borrow_mut()

@@ -23,8 +23,6 @@ use crate::errors::TypeCheckerError;
 use oxc_ast::ast as oast;
 use oxc_span::GetSpan;
 
-// Keep the engine's shared type metadata in this module so compiler and bundle
-// code can use the same conservative representation as the checker.
 use std::collections::{HashMap, HashSet};
 
 /// Lightweight, conservative representation of types used by the checker.
@@ -349,7 +347,6 @@ pub fn check_and_inlay_hints_with_declarations(
     function_parameter_metadata: HashMap::new(),
   };
 
-  // Runtime globals with stable, useful surface types.
   ctx
     .scope_mut()
     .insert("undefined".to_string(), Type::Undefined);
@@ -506,8 +503,6 @@ fn private_type_name(
   specifier: &str,
   name: &str,
 ) -> String {
-  // The NUL prefix cannot be produced by an ECMAScript identifier, so a
-  // private helper cannot collide with a user-visible type name.
   format!("\0virtual-module:{specifier}:{name}")
 }
 
@@ -1086,8 +1081,6 @@ fn assignable(
       true
     }
     (Type::Function(a, a_return), Type::Function(b, b_return)) => {
-      // Unannotated source callbacks are intentionally represented as Any;
-      // their bodies are not inferred by this lightweight checker.
       if matches!(b_return.as_ref(), Type::Any) {
         return true;
       }

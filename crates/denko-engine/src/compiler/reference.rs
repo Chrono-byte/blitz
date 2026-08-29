@@ -227,8 +227,6 @@ impl Compiler {
       return Ok(None);
     };
 
-    // CompareJump cond_type values:
-    // 0=Eq, 1=Neq, 2=Lt, 3=Lte, 4=Gt, 5=Gte, 6=StrictEq, 7=StrictNeq
     let cond_type = match binary.operator {
       oast::BinaryOperator::Equality => 0_i32,
       oast::BinaryOperator::Inequality => 1_i32,
@@ -243,13 +241,8 @@ impl Compiler {
 
     self.compile_expr_oast(&binary.left)?;
     self.compile_expr_oast(&binary.right)?;
-    // Payload layout for CompareJump:
-    // - payload byte 0: cond_type (3 bits, rest unused)
-    // - payload bytes 1..2: relative jump offset placeholder (patched later)
     self.emit_with_payload(Op::CompareJump, cond_type as u32, LINE);
 
-    // Return the instruction index containing the compare+jump payload so
-    // callers can patch the branch offset while preserving cond_type.
     let patch_addr = self.current_ip().saturating_sub(1);
 
     Ok(Some(patch_addr))

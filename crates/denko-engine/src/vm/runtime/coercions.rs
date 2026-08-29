@@ -69,7 +69,6 @@ pub(super) fn to_uint32_with_vm(
   const TWO32: f64 = 4294967296.0;
   let int_part = n.trunc();
   let vmod = int_part.rem_euclid(TWO32);
-  // vmod is in the range [0, 2^32), so this cast is safe
   let result = vmod as u32;
   Ok(result)
 }
@@ -209,12 +208,9 @@ impl PartialOrd for Value {
     other: &Value,
   ) -> Option<std::cmp::Ordering> {
     match (self, other) {
-      // Both numbers: numeric comparison
       (Value::Number(a), Value::Number(b)) => a.partial_cmp(b),
-      // Both strings: string comparison
       (Value::String(a), Value::String(b)) => a.partial_cmp(b),
       (Value::BigInt(a), Value::BigInt(b)) => a.partial_cmp(b),
-      // Number and String: convert string to number
       (Value::Number(a), Value::String(b)) => {
         let b_num = parse_js_number_string(b);
         if b_num.is_nan() {
@@ -223,7 +219,6 @@ impl PartialOrd for Value {
           a.partial_cmp(&b_num)
         }
       }
-      // String and Number: convert string to number
       (Value::String(a), Value::Number(b)) => {
         let a_num = parse_js_number_string(a);
         if a_num.is_nan() {
@@ -240,7 +235,6 @@ impl PartialOrd for Value {
       (Value::String(a), Value::BigInt(b)) => {
         parse_js_bigint_string(a).and_then(|aa| aa.partial_cmp(b))
       }
-      // Boolean: convert to number (1.0 or 0.0)
       (Value::Bool(a), other) => {
         let a_num = if *a { 1.0 } else { 0.0 };
         Value::Number(a_num).partial_cmp(other)
@@ -294,10 +288,8 @@ impl Vm {
         self.construct_value(&ctor, &[Value::BigInt(n)])
       }
       Value::Symbol(id, desc) => {
-        // Wrap Symbol in an object.
         let mut data = ObjectData::new();
         data.set_internal_slot("[[SymbolData]]", Value::Symbol(id, desc));
-        // Try to find Symbol.prototype
         if let Some(proto) = self
           .realm_state
           .realm
@@ -310,10 +302,7 @@ impl Vm {
         Ok(Value::Object(gc::track_object(Rc::new(RefCell::new(data)))))
       }
       Value::Uninitialized => Err(self.throw_type_error("Uninitialized value")),
-      Value::Builtin(_) => {
-        // Builtins are callable values and are returned unchanged here.
-        Ok(v)
-      }
+      Value::Builtin(_) => Ok(v),
     }
   }
 
@@ -346,12 +335,8 @@ impl Vm {
             v.type_name(),
             hint
           );
-          // Print the full value being coerced to help debug which
-          // object instance is visited during ToPrimitive calls.
           crate::trace::value_string("[trace] to_primitive value", v);
         }
-        // GetMethod(value, @@toPrimitive) must perform an observable property
-        // access, including accessors and Proxy traps.
         let to_prim_key = PropertyKey::Symbol(SymbolId::well_known_to_primitive());
         let method = self.get_property_with_receiver(v, &to_prim_key, v)?;
         if !matches!(method, Value::Undefined | Value::Null) {
@@ -575,7 +560,6 @@ impl Vm {
     &mut self,
     v: &Value,
   ) -> Result<PropertyKey, RuntimeError> {
-    // Fast path: String values are already property keys, skip ToPrimitive entirely
     if let Value::String(s) = v {
       return Ok(PropertyKey::String(s.clone()));
     }
@@ -632,12 +616,10 @@ impl Vm {
     x: &Value,
     y: &Value,
   ) -> Result<bool, RuntimeError> {
-    // Same-value for identical discriminants
     if std::mem::discriminant(x) == std::mem::discriminant(y) {
       return Ok(values_equal(x, y));
     }
 
-    // null == undefined
     if matches!(x, Value::Null) && matches!(y, Value::Undefined) {
       return Ok(true);
     }
@@ -645,7 +627,6 @@ impl Vm {
       return Ok(true);
     }
 
-    // Number == String
     if matches!(x, Value::Number(_)) && matches!(y, Value::String(_)) {
       let yn = self.to_number_value(y)?;
       if let Value::Number(xn) = x {
@@ -659,7 +640,6 @@ impl Vm {
       }
     }
 
-    // BigInt and String
     if matches!(x, Value::BigInt(_)) && matches!(y, Value::String(_)) {
       if let (Value::BigInt(xn), Value::String(ys)) = (x, y)
         && let Some(yn) = parse_js_bigint_string(ys)
@@ -672,7 +652,6 @@ impl Vm {
       return self.abstract_equality(y, x);
     }
 
-    // BigInt and Number
     if let (Value::BigInt(xn), Value::Number(yn)) = (x, y) {
       if !yn.is_finite() {
         return Ok(false);
@@ -686,7 +665,6 @@ impl Vm {
       return self.abstract_equality(y, x);
     }
 
-    // Boolean -> Number coercion
     if matches!(x, Value::Bool(_)) {
       let xn = if let Value::Bool(b) = x {
         if *b { 1.0 } else { 0.0 }
@@ -704,7 +682,6 @@ impl Vm {
       return self.abstract_equality(x, &Value::Number(yn));
     }
 
-    // Object compared with primitive: ToPrimitive on object
     if matches!(
       x,
       Value::Object(_)

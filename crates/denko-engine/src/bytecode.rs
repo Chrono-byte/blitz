@@ -634,8 +634,6 @@ impl Chunk {
     self.functions.len() - 1
   }
 
-  // --- Helpers for reading/writing 16-bit operands (little-endian) ---
-
   /// Read the 24-bit signed payload (bits 8..31) from instruction at `idx`.
   /// Returns None if out of bounds.
   pub fn read_i24_payload_at(
@@ -643,9 +641,7 @@ impl Chunk {
     idx: usize,
   ) -> Option<i32> {
     let w = *self.code.get(idx)?;
-    // interpret upper 24 bits as signed i32 with sign extension
     let payload = (w >> 8_i32) & 0x00FF_FFFF;
-    // sign-extend 24-bit to 32-bit signed
     let signed = if (payload & 0x0080_0000) != 0 {
       (payload | 0xFF00_0000) as i32
     } else {
@@ -664,12 +660,10 @@ impl Chunk {
     if idx >= self.code.len() {
       return false;
     }
-    // ensure fits in signed 24-bit
     if !(-(1_i32 << 23_i32)..(1_i32 << 23_i32)).contains(&val) {
       return false;
     }
     let instr = self.code[idx];
-    // clear upper 24 bits then or in new payload
     let payload_u32 = (val.cast_unsigned() & 0x00FF_FFFF) << 8_u32;
     let new = (instr & 0x0000_00FF) | payload_u32;
     self.code[idx] = new;
@@ -706,10 +700,6 @@ impl Chunk {
     usize::try_from(target).ok()
   }
 }
-
-// ============================================================================
-// RISC Bytecode: Register Operand Encoding/Decoding Helpers
-// ============================================================================
 
 /// Encodes a destination register into bits 8-11 of an instruction
 #[inline]
@@ -850,8 +840,6 @@ pub fn decode_compare_jump(instr: u32) -> (u8, u8, u8, i16) {
   (condition, left, right, offset)
 }
 
-// ============================================================================
-
 /// Returns the opcode from `instr`.
 #[inline]
 pub fn opcode_from_instr(instr: u32) -> u8 {
@@ -864,7 +852,6 @@ pub fn payload_byte(
   instr: u32,
   idx: usize,
 ) -> u8 {
-  // idx: 0 -> first payload byte (bits 8..15), 1 -> bits 16..23, 2 -> bits 24..31
   if idx > 2 {
     0
   } else {
@@ -957,10 +944,6 @@ impl Default for Chunk {
   }
 }
 
-// ----------------------------------------------------------------------------
-// Opcode definitions
-// ----------------------------------------------------------------------------
-
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 /// Bytecode operation codes for the RISC v2 format.
@@ -979,7 +962,6 @@ impl Default for Chunk {
 /// bytecode format. Do not reorder or insert variants in the middle without
 /// defining a new bytecode version and corresponding compatibility handling.
 pub enum Op {
-  // === Constants & Immediate Values (5) ===
   /// Load constant from pool → rd. Aux: constant index (u16)
   Const = 0,
   /// Load null → rd
@@ -991,7 +973,6 @@ pub enum Op {
   /// Load undefined → rd
   Undefined,
 
-  // === Register/Local Operations (3) ===
   /// Load local slot → rd. Aux: slot index (u16)
   LoadLocal,
   /// Store rd → local slot. Aux: slot index (u16)
@@ -999,7 +980,6 @@ pub enum Op {
   /// Move rs → rd (copy register)
   Move,
 
-  // === Arithmetic 2-register format: rd = rd op rs (7) ===
   /// rd = rd + rs (add or string concat)
   Add,
   /// rd = rd - rs
@@ -1015,7 +995,6 @@ pub enum Op {
   /// rd = -rs (negation)
   Neg,
 
-  // === Bitwise 2-register format: rd = rd op rs (5) ===
   /// rd = rd & rs (bitwise AND)
   BitAnd,
   /// rd = rd | rs (bitwise OR)
@@ -1029,7 +1008,6 @@ pub enum Op {
   /// rd = rd >>> rs (unsigned right shift)
   Ushr,
 
-  // === Comparison & Conditional Jumps (5) ===
   /// CompareJump: cond_type(3) | rs1(4) | rs2(4) | signed offset(13)
   /// Compares rs1 and rs2 according to cond_type, jumps if false.
   /// cond_type: 0=Eq, 1=Neq, 2=Lt, 3=Lte, 4=Gt, 5=Gte, 6=StrictEq, 7=StrictNeq
@@ -1043,7 +1021,6 @@ pub enum Op {
   /// Jump offset_i20 if rd is null or undefined
   JumpIfNullish,
 
-  // === Logical (4) ===
   /// Combine operand truthiness: rd = truthy(rd) && truthy(rs).
   And,
   /// Combine operand truthiness: rd = truthy(rd) || truthy(rs).
@@ -1053,7 +1030,6 @@ pub enum Op {
   /// rd = typeof rs
   Typeof,
 
-  // === Property Access (4) ===
   /// rd = rd[rs]. The property-get cache is keyed by instruction position.
   GetProperty,
   /// rd[rs] = aux register. The value register is stored in the first aux byte.
@@ -1063,7 +1039,6 @@ pub enum Op {
   /// rd = (key in obj)
   HasProperty,
 
-  // === Global Variable Access (3) ===
   /// rd = GetGlobal(name_const_idx). Aux: name constant index (u16)
   GetGlobal,
   /// rd = typeof name_const_idx. Aux: name constant index (u16)
@@ -1071,13 +1046,11 @@ pub enum Op {
   /// SetGlobal(name_const_idx, rd). Aux: name constant index (u16)
   SetGlobal,
 
-  // === Upvalue Access (2) ===
   /// rd = GetUpvalue(upval_idx). Aux: upvalue index (u16)
   GetUpvalue,
   /// SetUpvalue(upval_idx, rd). Aux: upvalue index (u16)
   SetUpvalue,
 
-  // === Function Calls (4) ===
   /// Call the callee in r0 with arguments in r2-r7 and then the spill window.
   /// The result is written to r0. Aux: argument count (u16).
   Call,
@@ -1088,7 +1061,6 @@ pub enum Op {
   /// CallBuiltin: call the builtin in r0 with receiver r1 and Call's arguments.
   CallBuiltin,
 
-  // === Closures & this/target (4) ===
   /// rd = MakeClosure(proto_idx). Aux: prototype index (u16)
   MakeClosure,
   /// rd = GetThis
@@ -1098,7 +1070,6 @@ pub enum Op {
   /// rd = super[rs], using the receiver/base value in rd.
   GetSuperProperty,
 
-  // === Array & Object Construction (3) ===
   /// BuildArray: collect values from the spill window into rd. Aux: element count (u16)
   BuildArray,
   /// BuildObject: collect key/value pairs from the spill window into rd. Aux: pair count (u16)
@@ -1106,7 +1077,6 @@ pub enum Op {
   /// ArrayFromSpread: build array with spread
   ArrayFromSpread,
 
-  // === Exception Handling (3) ===
   /// Throw rd
   Throw = 54,
   /// PushHandler: push exception handler. Payload: offset_i24 (bits 8-31)
@@ -1114,7 +1084,6 @@ pub enum Op {
   /// PopHandler: pop exception handler
   PopHandler,
 
-  // === Iteration (4) ===
   /// IteratorNext: rd holds the iterator and receives the iterator result.
   IteratorNext,
   /// IteratorClose: close the iterator held in rd.
@@ -1124,7 +1093,6 @@ pub enum Op {
   /// YieldStar: delegate yield for yield*
   YieldStar,
 
-  // === Special (6) ===
   /// Return rd
   Return,
   /// PushWithEnv: push with() environment
@@ -1138,7 +1106,6 @@ pub enum Op {
   /// GeneratorInitDone: marker for end of generator prologue
   GeneratorInitDone,
 
-  // === Module System (2) ===
   /// GetModuleExport: rd = modules[descriptor.module].exports[descriptor.name].
   /// Aux: descriptor constant index (u16).
   GetModuleExport,
@@ -1146,7 +1113,6 @@ pub enum Op {
   /// Aux: descriptor constant index (u16).
   SetModuleExport,
 
-  // === Semantic Operations (4) ===
   /// CloneLocalCell: clone a local cell for closure capture. Aux: slot index (u16)
   CloneLocalCell,
   /// SetSuperProperty: super[rs] = aux register, using the receiver/base in rd.
@@ -1156,7 +1122,6 @@ pub enum Op {
   /// GetBuiltin: rd = builtin[name]. Aux: name constant index (u16)
   GetBuiltin,
 
-  // === Miscellaneous (2) ===
   /// InstanceOf: rd = rs1 instanceof rs2
   InstanceOf,
   /// Spread: call the callee in rd with values in rs expanded by the aux mask register.

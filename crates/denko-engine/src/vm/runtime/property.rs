@@ -41,16 +41,10 @@ impl Vm {
     obj: &Value,
     key: &PropertyKey,
   ) -> Result<Value, RuntimeError> {
-    // Namespace export descriptors are live snapshots. Caching one would
-    // retain a stale binding value after the exporting module updates it.
     if is_module_namespace_object(obj) {
       return self.get_property_value(obj, key);
     }
     let receiver = match obj {
-      // Dense array elements and `length` are mutated by native array
-      // methods as well as ordinary property writes. Until those mutations
-      // all flow through the tracked property path, caching array reads can
-      // retain a stale length or element value.
       Value::Object(data) => {
         let data = data.borrow();
         Some((data.identity as usize, data.mutation_generation))
@@ -379,9 +373,6 @@ impl Vm {
         };
       }
       let mut parent = self.get_prototype(obj);
-      // Host-created Array values predate realm initialization and may not
-      // carry an explicit [[Prototype]]. They still use the current realm's
-      // intrinsic Array prototype for ordinary property lookup.
       if matches!(parent, Value::Null) && matches!(obj, Value::Array(..)) {
         parent = self.realm_state.realm.array_prototype();
       }
@@ -655,8 +646,6 @@ impl Vm {
         .as_ref()
         .is_some_and(|exports| exports.contains_key(name))
     {
-      // [[HasProperty]] tests the namespace's export-name set. It must not
-      // read the live binding, which may still be uninitialized.
       return Ok(true);
     }
     if self.get_own_property_value(obj, key)?.is_some() {
@@ -733,14 +722,10 @@ impl Vm {
             Ok(false)
           }
           Some(_) => {
-            // Property exists and is configurable, delete it
             d.properties.shift_remove(key);
             Ok(true)
           }
-          None => {
-            // Property doesn't exist, return true
-            Ok(true)
-          }
+          None => Ok(true),
         }
       }
       Value::Array(arr, props) => {
@@ -778,8 +763,6 @@ impl Vm {
             arr.borrow_mut()[i] = None;
             return Ok(true);
           } else if i < array_len {
-            // Index is within the array length but not yet in dense store.
-            // Resize the array to create a hole.
             arr.borrow_mut().resize(i + 1, None);
             return Ok(true);
           }
@@ -793,14 +776,10 @@ impl Vm {
             Ok(false)
           }
           Some(_) => {
-            // Property exists and is configurable, delete it
             p.properties.shift_remove(key);
             Ok(true)
           }
-          None => {
-            // Property doesn't exist, return true
-            Ok(true)
-          }
+          None => Ok(true),
         }
       }
       Value::Closure { props, .. } | Value::BuiltinObject(_, props) => {
@@ -813,14 +792,10 @@ impl Vm {
             Ok(false)
           }
           Some(_) => {
-            // Property exists and is configurable, delete it
             p.properties.shift_remove(key);
             Ok(true)
           }
-          None => {
-            // Property doesn't exist, return true
-            Ok(true)
-          }
+          None => Ok(true),
         }
       }
       _ => Ok(false),
@@ -894,8 +869,6 @@ impl Vm {
   ) -> Result<Value, RuntimeError> {
     let prop = self.to_property_key(key)?;
     let result = value.clone();
-    // Host-side specification algorithms use Set(..., Throw = true). Do not
-    // inherit the strictness of the user script that happened to call them.
     let saved_strict = self.execution.active.strict;
     self.execution.active.strict = true;
     let set_result = self.set_property_with_receiver(obj, &prop, value, obj);

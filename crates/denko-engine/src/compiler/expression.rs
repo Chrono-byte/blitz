@@ -126,11 +126,9 @@ impl super::Compiler {
         self.emit_constant(Value::Number(n.value), LINE)
       }
       OExpr::BigIntLiteral(n) => {
-        // Use n.raw if available, otherwise use source text directly
         let parsed = if let Some(raw) = &n.raw {
           let s = raw.as_str();
           let digits_str = s.strip_suffix('n').unwrap_or(s).replace('_', "");
-          // Use the base field to determine radix, handle both lowercase and uppercase prefixes
           match n.base {
             oast::BigintBase::Binary => {
               let after = digits_str
@@ -156,8 +154,6 @@ impl super::Compiler {
             oast::BigintBase::Decimal => num_bigint::BigInt::parse_bytes(digits_str.as_bytes(), 10),
           }
         } else {
-          // Recover the digits from the original source when Oxc did not
-          // retain a normalized bigint spelling; the span uses byte offsets.
           let source = self.source_text.as_ref();
           let start = n.span.start as usize;
           let end = n.span.end as usize;
@@ -169,7 +165,6 @@ impl super::Compiler {
                 &source[range]
               })
               .replace('_', "");
-            // Use base field to determine radix, handle both lowercase and uppercase prefixes
             match n.base {
               oast::BigintBase::Binary => {
                 let after = digits
@@ -218,9 +213,6 @@ impl super::Compiler {
           .unwrap_or_default();
         self.emit_constant(Value::String(first.into()), LINE);
         for (i, expr) in t.expressions.iter().enumerate() {
-          // Apply ECMAScript ToString to each substitution before it is
-          // concatenated. In particular, ToString uses the string hint for
-          // objects and rejects Symbols.
           self.emit_get_builtin_name("toString");
           self.compile_expr_oast(expr)?;
           self.emit(Op::Call, LINE);
@@ -281,7 +273,6 @@ impl super::Compiler {
       }
       OExpr::NullLiteral(_) => self.emit(Op::Null, LINE),
       OExpr::ThisExpression(_) => {
-        // Emit GetThis to push the current this binding for the running frame.
         self.emit(Op::GetThis, LINE);
       }
       OExpr::ArrowFunctionExpression(a) => {
@@ -300,9 +291,6 @@ impl super::Compiler {
         self.emit_function_index(idx, LINE);
       }
       OExpr::ObjectExpression(obj) => {
-        // Start with an empty object and define each property as it is visited.
-        // In particular, do not collect static, computed, accessor, and spread
-        // properties into separate buckets: keys and values can have effects.
         self.emit(Op::BuildObject, LINE);
         self.emit_byte(0, LINE);
         let home_object_slot = self.alloc_temp_local("object_literal_home");
@@ -520,7 +508,6 @@ impl super::Compiler {
               self.emit(Op::Discard, LINE);
             }
             oast::ObjectPropertyKind::SpreadProperty(spread) => {
-              // Evaluate the spread expression before doing any copying.
               let source_slot = self.alloc_temp_local("object_spread");
               self.compile_expr_oast(&spread.argument)?;
               self.emit(Op::StoreLocal, LINE);
@@ -1180,8 +1167,6 @@ impl super::Compiler {
             oast::UnaryOperator::LogicalNot => self.emit(Op::Not, LINE),
             oast::UnaryOperator::UnaryNegation => self.emit(Op::Neg, LINE),
             oast::UnaryOperator::UnaryPlus => {
-              // ToNumber rejects BigInt. Subtracting +0 applies the same
-              // numeric coercion while preserving the sign of -0.
               self.emit_constant(Value::Number(0.0), LINE);
               self.emit(Op::Sub, LINE);
             }
@@ -1354,10 +1339,7 @@ impl super::Compiler {
           oast::BinaryOperator::Multiplication => self.emit(Op::Mul, LINE),
           oast::BinaryOperator::Division => self.emit(Op::Div, LINE),
           oast::BinaryOperator::Remainder => self.emit(Op::Mod, LINE),
-          oast::BinaryOperator::Exponential => {
-            // Lower exponentiation to a dedicated opcode
-            self.emit(Op::Pow, LINE)
-          }
+          oast::BinaryOperator::Exponential => self.emit(Op::Pow, LINE),
           oast::BinaryOperator::BitwiseAnd => self.emit(Op::BitAnd, LINE),
           oast::BinaryOperator::BitwiseOR => self.emit(Op::BitOr, LINE),
           oast::BinaryOperator::BitwiseXOR => self.emit(Op::BitXor, LINE),

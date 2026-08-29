@@ -11,8 +11,6 @@ use num_traits::ToPrimitive;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-// Delegate pure algorithmic helpers to the semantics module. This keeps the
-// runtime-specific code here small and avoids duplicating logic.
 /// Gets the atomics value kind for the given TypedArray kind name.
 fn atomics_value_kind(kind_name: &str) -> Option<AtomicsValueKind> {
   semantics_atomics::atomics_value_kind(kind_name)

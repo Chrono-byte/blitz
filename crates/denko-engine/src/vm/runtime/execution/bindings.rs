@@ -52,10 +52,6 @@ impl Vm {
       } else {
         global_env.create_mutable_binding(name, cell.clone(), initialized);
       }
-      // Root var/function bindings are represented by cells during execution,
-      // while host-facing reads use the global object's properties. Keep the
-      // host view synchronized after the root run. Lexical declarations do not
-      // become global object properties.
       if !lexical.get(index).copied().unwrap_or(false) && initialized {
         let property_key = PropertyKey::String(property_name.into());
         match global_object.properties.get_mut(&property_key) {

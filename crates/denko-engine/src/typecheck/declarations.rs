@@ -13,9 +13,6 @@ impl TypeContext {
       crate::parser::Parser::source_type_for_path(std::path::Path::new("virtual.ts"), true);
     let mut parsed = Vec::with_capacity(declarations.len());
     for declaration in declarations {
-      // Preserve ambient declaration semantics first. Installed packages may
-      // expose TypeScript implementation source directly, so retry as an
-      // ordinary TS module only when ambient parsing rejects a body.
       let session =
         crate::parser::Parser::parse_source_with_type(&declaration.source, declaration_type)
           .or_else(|_| {
@@ -40,9 +37,6 @@ impl TypeContext {
       return Err(TypeCheckerError::from("Duplicate declaration module"));
     }
 
-    // Collect every top-level declaration in a module-local table first. Type
-    // annotations are allowed to refer to private helpers, but the public
-    // ModuleType is filtered back to the module's actual exports below.
     for declaration in &parsed {
       let mut local = ModuleType::default();
       let mut exported_values = HashSet::new();
@@ -125,14 +119,6 @@ impl TypeContext {
         .insert(declaration.specifier.clone(), module);
     }
 
-    // Exported module types remain scoped to their module. Injecting them into
-    // the global named-type table makes unrelated exports shadow generic
-    // parameters with the same spelling (for example `Exit.Success` and the
-    // `<Success>` parameter of `Effect.succeed`). Imports and namespace
-    // resolution below expose public types in the requesting source instead.
-
-    // Resolve imports and re-exports to a fixed point. The bounded number of
-    // passes is sufficient for the finite declaration graph and deterministic.
     for _ in 0..=parsed.len() {
       for declaration in &parsed {
         let mut module = self
@@ -149,7 +135,6 @@ impl TypeContext {
       }
     }
 
-    // Validate re-exported members after all dependency links have converged.
     for declaration in &parsed {
       let mut module = self
         .modules

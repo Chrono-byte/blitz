@@ -1155,7 +1155,7 @@ pub enum RuntimeType {
   /// Object type
   Object,
   /// Function type
-  Function(usize), // arity
+  Function(usize),
 }
 
 impl Value {

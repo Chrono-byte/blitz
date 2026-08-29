@@ -18,7 +18,6 @@ fn walk_chunk_ops(chunk: &Chunk) -> Vec<(usize, Op)> {
   while ip < chunk.code.len() {
     if let Some(op) = Op::from_byte((chunk.code[ip] & 0xFF) as u8) {
       ops.push((ip, op));
-      // fixed-width model: one u32 per instruction
       ip += 1;
     } else {
       ip += 1;
@@ -88,8 +87,6 @@ fn compile_simple_for_loop() {
   let program = session.program();
   let chunk = compile(program, session.source()).expect("compile ok");
 
-  // Ensure we emitted a conditional branch for the test and at least one
-  // unconditional Jump (back-jump / jump-over).
   let mut saw_conditional_branch = false;
   let mut saw_jump = false;
   for (_, op) in walk_chunk_ops(&chunk) {
@@ -115,9 +112,6 @@ fn compile_for_with_continue() {
   let program = session.program();
   let chunk = compile(program, session.source()).expect("compile ok");
 
-  // Expect multiple control-flow ops: one for the test exit, one for the
-  // back-jump, and at least one emitted for 'continue' which should be
-  // patched to jump to update.
   let mut conditional_branch = 0usize;
   let mut jump = 0usize;
   for (_, op) in walk_chunk_ops(&chunk) {

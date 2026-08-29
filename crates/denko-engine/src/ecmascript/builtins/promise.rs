@@ -108,8 +108,6 @@ fn close_and_reject(
   iterator: &Value,
   reason: Value,
 ) -> Result<Value, RuntimeError> {
-  // IteratorClose observes `return`, but an existing throw completion wins
-  // over any abrupt completion produced while closing.
   drop(vm.capture_completion(|vm| {
     let Some(return_method) = get_method(
       vm,
@@ -898,8 +896,6 @@ pub(crate) fn create_promise_intrinsics(
         };
 
       let values: Rc<RefCell<Vec<Option<Value>>>> = Rc::new(RefCell::new(Vec::new()));
-      // The sentinel prevents a synchronously-called resolve element from
-      // resolving the result before iterator exhaustion is observed.
       let remaining = Rc::new(RefCell::new(1usize));
 
       loop {
@@ -920,8 +916,6 @@ pub(crate) fn create_promise_intrinsics(
             return Ok(capability.promise);
           }
           Err((error, thrown)) => {
-            // IteratorStepValue marks the iterator record done before
-            // forwarding errors from next/done/value, so it is not closed.
             let reason = abrupt_reason(&error, thrown);
             return reject_capability(vm, &capability, reason);
           }

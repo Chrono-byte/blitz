@@ -491,10 +491,6 @@ impl Parser {
     if self.flags.unicode() {
       return Err(self.error(ErrorKind::InvalidEscape, "invalid control escape"));
     }
-    // In legacy mode an invalid `\c` falls back to a literal backslash, and
-    // the `c` remains a separate atom. This distinction is observable when
-    // the following token is a quantifier (`\c*` means `\\` followed by
-    // zero or more `c` characters, not zero or more `\c` pairs).
     self.cursor = self.cursor.saturating_sub(1);
     Ok(Node::Literal(u32::from(ascii(b'\\'))))
   }

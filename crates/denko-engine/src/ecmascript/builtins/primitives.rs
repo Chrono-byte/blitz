@@ -561,8 +561,6 @@ pub(crate) fn install_bigint_and_number_builtins(
     0.0,
     Rc::new(|vm, args| {
       let value = this_number_value(vm, args, "toLocaleString")?;
-      // Intl is not yet installed by the raw engine, so the locale-independent
-      // fallback is the only observable formatting available here.
       Ok(Value::String(js_number_to_string(value).into()))
     }),
   );

@@ -90,8 +90,6 @@ fn prelinked_direct_import_is_parser_free_and_uses_canonical_slots() {
   let mut vm = Vm::new(globals);
   let entry_path = entry.borrow().path.clone();
   let loader = Rc::new(RefCell::new(loader));
-  // Typechecking is deliberately enabled: the shared parallel-compilation
-  // path must omit prelinked records and bypass parser-backed typechecking.
   evaluate_entry_shared(&loader, &entry_path, &mut vm, true)
     .expect("prelinked graph evaluates from bytecode only");
   assert_eq!(vm.get_global("prelinkedResult"), Some(Value::Number(42.0)));

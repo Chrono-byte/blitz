@@ -156,10 +156,6 @@ impl Vm {
       if same_value(obj, &candidate) {
         return Ok(false);
       }
-      // OrdinarySetPrototypeOf only walks ordinary objects when checking for a
-      // cycle. An exotic object is responsible for enforcing its own
-      // [[SetPrototypeOf]] invariants and must not have [[GetPrototypeOf]]
-      // invoked as a side effect of changing another object's prototype.
       if matches!(candidate, Value::Proxy(_)) {
         break;
       }

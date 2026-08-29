@@ -62,7 +62,6 @@ fn numeric_property_key(value: f64) -> String {
 /// # Errors
 ///
 /// Returns an error string if compilation fails.
-// Public API: compile an oxc AST Program directly.
 pub fn compile(
   program: &oast::Program<'_>,
   source: &str,

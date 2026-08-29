@@ -472,7 +472,6 @@ fn encode_function(
   writer.bool(function.is_class_constructor);
   writer.bool(function.is_async);
   writer.bool(function.is_generator);
-  // Retain the legacy field as an empty vector for wire-version compatibility.
   writer.vector_len(0, MAX_VECTOR_ITEMS, "inline cache count")?;
   Ok(())
 }
@@ -535,8 +534,6 @@ fn decode_function(
   let is_generator = reader.bool()?;
   let ic_count = reader.vector_len(MAX_VECTOR_ITEMS, "inline cache count")?;
   for _ in 0..ic_count {
-    // Obsolete cache hints have no language semantics. Consume them only to
-    // retain compatibility with existing prelinked graphs.
     let _ = reader.u64()?;
     let _ = reader.u64()?;
     let _ = reader.u32()?;

@@ -63,16 +63,15 @@ use crate::{RuntimeError, bytecode};
 use num_traits::{FromPrimitive, ToPrimitive};
 
 mod atomics;
-mod numbers; // kept as a thin compatibility re-export; moved implementation into ecmascript::semantics
+mod numbers;
 mod promises;
 mod shadowrealm;
-mod uri; // kept as thin compatibility re-export; implementation moved
+mod uri;
 
-pub(crate) use atomics::*;
-// Re-export semantics implementations from ecmascript::semantics to preserve existing imports.
 pub(crate) use crate::ecmascript::semantics::numbers::*;
 pub(crate) use crate::ecmascript::semantics::properties::*;
 pub(crate) use crate::ecmascript::semantics::uri::*;
+pub(crate) use atomics::*;
 pub use promises::install_minimal_kernel_constructors;
 pub(crate) use promises::*;
 pub(crate) use shadowrealm::*;
@@ -99,7 +98,6 @@ const MAX_SAFE_INTEGER_F: f64 = 9007199254740991.0_f64;
 
 /// Clears the slot types in a chunk and its nested function chunks.
 pub fn clear_slot_types_in_chunk(chunk: bytecode::Chunk) -> bytecode::Chunk {
-  // Recursive helper that rebuilds chunks and their nested function chunks.
   fn rebuild(
     rc_chunk: &Arc<bytecode::Chunk>,
     visited: &mut HashMap<*const bytecode::Chunk, Arc<bytecode::Chunk>>,
@@ -109,23 +107,17 @@ pub fn clear_slot_types_in_chunk(chunk: bytecode::Chunk) -> bytecode::Chunk {
       return Arc::clone(existing);
     }
 
-    // Clone the complete chunk so bytecode metadata is preserved as the format
-    // evolves, then replace only the annotations and nested function chunks.
     let mut new_chunk = (**rc_chunk).clone();
     new_chunk.root_slot_types = rc_chunk
       .root_slot_types
       .iter()
       .map(|_| None)
       .collect();
-    // Slot/global type annotations removed in JS-first mode; nothing to do.
 
-    // Process functions
     let mut new_funcs = Vec::new();
     for f in &rc_chunk.functions {
-      // Rebuild nested chunk for this function
       let nested = rebuild(&f.chunk, visited);
       let mut nf = f.clone();
-      // Replace all slot type annotations and return type with None
       nf.slot_types = nf.slot_types.iter().map(|_| None).collect();
       nf.return_type = None;
       nf.chunk = nested;
@@ -371,8 +363,6 @@ fn clone_value_across_realms(
 ) -> Result<Value, String> {
   use std::collections::HashMap;
 
-  // visited maps source Rc pointer addresses to already-created clone Values
-  // so we can preserve cycles and shared references.
   fn helper(
     vm: &mut Vm,
     v: &Value,
@@ -402,7 +392,6 @@ fn clone_value_across_realms(
         let property_snapshot = props_rc.borrow().properties.clone();
         let transferred_elements = transferring.then(|| arr_rc.borrow_mut().take_elements());
 
-        // Reserve a placeholder array in visited to handle cycles.
         let len = transferred_elements
           .as_ref()
           .map_or_else(|| arr_rc.borrow().len(), Vec::len);
@@ -412,7 +401,6 @@ fn clone_value_across_realms(
         if let Some(proto) = vm.realm().intrinsics.array_prototype.clone() {
           new_props.borrow_mut().set_prototype_value(proto);
         }
-        // insert length property placeholder
         new_props.borrow_mut().properties.insert(
           PropertyKey::String("length".to_string().into()),
           array_length_descriptor(len),
@@ -421,7 +409,6 @@ fn clone_value_across_realms(
         visited.insert(addr, new_val);
 
         if !transferring {
-          // Fill dense slots while preserving cycles and shared references.
           for (i, slot) in arr_rc.borrow().iter().enumerate() {
             if let Some(sv) = slot {
               let cloned = helper(vm, sv, visited, transfer_set)?;
@@ -435,7 +422,6 @@ fn clone_value_across_realms(
           );
         }
 
-        // Clone property bag (data descriptors only)
         for (k, desc) in &property_snapshot {
           match desc {
             PropertyDescriptor::Data { value, .. } => {
@@ -459,11 +445,8 @@ fn clone_value_across_realms(
           return Ok(existing.clone());
         }
 
-        // Detect special internal shapes used by runtime: ArrayBuffer,
-        // TypedArray, Map, Set, Date, RegExp by inspecting internal slots
         let borrow = obj_rc.borrow();
 
-        // ArrayBuffer: identified by its VM-only internal slots.
         let array_buffer_data = if is_array_buffer(&Value::Object(Rc::clone(obj_rc))) {
           Some(
             array_buffer_backing(&Value::Object(Rc::clone(obj_rc)))
@@ -488,7 +471,6 @@ fn clone_value_across_realms(
           );
           drop(borrow);
 
-          // Create a placeholder object with the runtime's Array prototype.
           let mut out = ObjectData::new();
           if let Some(proto) = vm.realm().get_intrinsic_prototype("Array") {
             out.set_prototype_value(proto);
@@ -527,8 +509,6 @@ fn clone_value_across_realms(
           return Ok(Value::Object(target_obj));
         }
 
-        // Byte TypedArray: use the VM-only slots so a spoofed property bag is
-        // never treated as a view during cloning.
         if let Some(details) = byte_view_details(&Value::Object(Rc::clone(obj_rc))) {
           let mut out = ObjectData::new();
           if let Some(proto) = vm.realm().get_intrinsic_prototype("Array") {
@@ -587,7 +567,6 @@ fn clone_value_across_realms(
           return Ok(Value::Object(target_obj));
         }
 
-        // Wider TypedArrays retain their existing representation for now.
         if let Some(PropertyDescriptor::Data { value: ta_data, .. }) = borrow.properties.get(
           &PropertyKey::String("[[TypedArrayData]]".to_string().into()),
         ) && !matches!(
@@ -604,8 +583,6 @@ fn clone_value_across_realms(
         ) {
           let mut out = ObjectData::new();
           if let Some(proto) = vm.realm().get_intrinsic_prototype("Array") {
-            // This clone path uses Array.prototype rather than restoring the
-            // typed-array-specific prototype.
             out.set_prototype_value(proto);
           }
           let target_obj = gc::track_object(Rc::new(RefCell::new(out)));
@@ -617,7 +594,6 @@ fn clone_value_across_realms(
             PropertyKey::String("[[TypedArrayData]]".to_string().into()),
             PropertyDescriptor::ordinary_data(cloned_ta),
           );
-          // copy common numeric properties (length, byteLength)
           for key_name in &["length", "byteLength"] {
             if let Some(PropertyDescriptor::Data { value, .. }) = borrow
               .properties
@@ -639,7 +615,6 @@ fn clone_value_across_realms(
               );
             }
           }
-          // copy numeric indexed properties if present
           for (k, desc) in &borrow.properties {
             if let PropertyKey::String(s) = k
               && canonical_index_key(s).is_some()
@@ -658,7 +633,6 @@ fn clone_value_across_realms(
           return Ok(Value::Object(target_obj));
         }
 
-        // Map: preserve its VM-internal data slot without exposing it as a property.
         if let Some(entries) = borrow
           .internal_slots
           .get(crate::ecmascript::builtins::collections::MAP_DATA_SLOT)
@@ -679,7 +653,6 @@ fn clone_value_across_realms(
           return Ok(Value::Object(target_obj));
         }
 
-        // Set: preserve its VM-internal data slot without exposing it as a property.
         if let Some(set_vals) = borrow
           .internal_slots
           .get(crate::ecmascript::builtins::collections::SET_DATA_SLOT)
@@ -700,7 +673,6 @@ fn clone_value_across_realms(
           return Ok(Value::Object(target_obj));
         }
 
-        // Date: look for [[PrimitiveValue]] internal slot
         if let Some(PropertyDescriptor::Data { value: prim, .. }) = borrow.properties.get(
           &PropertyKey::String("[[PrimitiveValue]]".to_string().into()),
         ) {
@@ -720,7 +692,6 @@ fn clone_value_across_realms(
           return Ok(Value::Object(target_obj));
         }
 
-        // RegExp: look for 'source' and 'flags' properties
         if borrow
           .properties
           .contains_key(&PropertyKey::String("source".to_string().into()))
@@ -736,7 +707,6 @@ fn clone_value_across_realms(
           let target_val = Value::Object(Rc::clone(&target_obj));
           visited.insert(addr, target_val);
 
-          // copy source, flags, lastIndex if present
           for key in ["source", "flags", "lastIndex"] {
             if let Some(PropertyDescriptor::Data { value, .. }) = borrow
               .properties
@@ -752,7 +722,6 @@ fn clone_value_across_realms(
           return Ok(Value::Object(target_obj));
         }
 
-        // Generic object fallback: create placeholder and copy data properties
         let mut out = ObjectData::new();
         if let Some(proto) = vm.realm().intrinsics.object_prototype.clone() {
           out.set_prototype_value(proto);
@@ -785,22 +754,6 @@ fn clone_value_across_realms(
   let mut visited: HashMap<usize, Value> = HashMap::new();
   helper(vm, value, &mut visited, transfer_set)
 }
-
-// - Intrinsics bootstrapping: `install_minimal_kernel_constructors` installs a
-//   limited set of constructors and prototype objects sufficient for the
-//   runtime prelude. These intrinsics are intentionally minimal and may omit
-//   some property attribute details or exotic object behaviors required by the
-//   spec.
-//
-// Promise constructor matching
-//
-// - `promise_constructor_matches` currently checks the `constructor` property
-//   of a promise object for equality with the provided constructor. This is a
-//   pragmatic check that may be fragile for embellished prototype chains or
-//   host-constructed promise-like objects. Spec-compliant engines use
-//   internal brand checks and the Promise constructor's intrinsic behaviour.
-//   Consider replacing property-based checks with a stricter internal brand
-//   or explicit slot marking on promise state.
 
 #[cfg(test)]
 mod structured_clone_tests {

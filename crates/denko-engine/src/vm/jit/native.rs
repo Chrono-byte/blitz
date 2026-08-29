@@ -284,7 +284,6 @@ impl NativeCode {
   #[cfg(all(unix, target_arch = "x86_64"))]
   #[cfg(test)]
   pub(crate) fn patchable_jump() -> Result<(Self, PatchSite), String> {
-    // movabs rax, target; jmp rax
     let mut bytes = vec![0x48, 0xB8];
     let site = PatchSite {
       offset: bytes.len() as u32,
@@ -340,9 +339,6 @@ impl NativeCode {
 
   #[cfg(all(unix, target_arch = "x86_64"))]
   pub(crate) fn return_number(value: f64) -> Result<Self, String> {
-    // SysV entry has rsp % 16 == 8. Subtracting eight aligns the helper call.
-    // movabs rax, value; movq xmm0, rax; movabs rax, helper; call rax;
-    // mov eax, 0; ret
     let mut bytes = vec![0x48, 0x83, 0xEC, 0x08, 0x48, 0xB8];
     bytes.extend_from_slice(&value.to_bits().to_le_bytes());
     bytes.extend_from_slice(&[0x66, 0x48, 0x0F, 0x6E, 0xC0, 0x48, 0xB8]);
@@ -407,9 +403,6 @@ impl NativeCode {
       0x31, 0xC0, // xor eax, eax             iterations
     ];
 
-    // A VM-owned Arc keeps the aligned AtomicU64 alive for this synchronous
-    // call. On x86-64, the aligned load below supplies the acquire-side
-    // hardware ordering paired with the producer's Release increment.
     let entry_poll = bytes.len();
     bytes.extend_from_slice(&[0x4C, 0x8B, 0x16]); // mov r10, [rsi]
     bytes.extend_from_slice(&[0x4D, 0x39, 0xCA]); // cmp r10, r9
@@ -629,7 +622,6 @@ impl NativeCode {
   #[cfg(all(unix, target_arch = "x86_64"))]
   #[cfg(test)]
   pub(crate) fn return_u64(value: u64) -> Result<Self, String> {
-    // mov rax, imm64; ret
     let mut bytes = [0u8; 11];
     bytes[0] = 0x48;
     bytes[1] = 0xB8;
@@ -663,8 +655,6 @@ impl NativeCode {
     vm_pc: u32,
     exit_helper: RuntimeHelperId,
   ) -> Result<Self, String> {
-    // Preserve the frame pointer in callee-saved r12. `push r12` also aligns
-    // the SysV stack before every helper call.
     let mut bytes = vec![0x41, 0x54, 0x49, 0x89, 0xFC];
     let mut relocations = Vec::with_capacity(values.len() + 1);
     for (register, value) in values {
