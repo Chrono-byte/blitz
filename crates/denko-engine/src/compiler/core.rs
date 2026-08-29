@@ -372,14 +372,21 @@ impl Compiler {
 
   /// Compute a 1-based source line for a span. Falls back to 1 when out of bounds.
   #[allow(dead_code)]
-  pub(crate) fn line_for_span(&self, span: oxc_span::Span) -> u32 {
+  pub(crate) fn line_for_span(
+    &self,
+    span: oxc_span::Span,
+  ) -> u32 {
     let source = self.source_text.as_str();
     let offset = span.start as usize;
     if offset > source.len() {
       return 1;
     }
     // Count newlines before offset; oxc spans are byte offsets.
-    source[..offset].bytes().filter(|&b| b == b'\n').count() as u32 + 1
+    source[..offset]
+      .bytes()
+      .filter(|&b| b == b'\n')
+      .count() as u32
+      + 1
   }
 
   /// Emits a single instruction word with an 8-bit opcode and zero payload.
@@ -431,9 +438,9 @@ impl Compiler {
     // Pack a single operand byte into the pending instruction's 24-bit payload
     // using little-endian order: first emitted byte occupies bits 8..15, next 16..23, etc.
     if self.risc.is_empty() {
-      self.emission_error.get_or_insert_with(|| {
-        CompilerError::from("compiler emitted operand without instruction")
-      });
+      self
+        .emission_error
+        .get_or_insert_with(|| CompilerError::from("compiler emitted operand without instruction"));
       return;
     }
     if self.pending_operand_bytes >= 3 {
@@ -1039,9 +1046,9 @@ impl Compiler {
   /// Exits the current scope, popping it from the scope stack.
   pub(crate) fn exit_scope(&mut self) {
     let Some(scope) = self.scopes.pop() else {
-      self.emission_error.get_or_insert_with(|| {
-        CompilerError::from("compiler scope error: missing active scope")
-      });
+      self
+        .emission_error
+        .get_or_insert_with(|| CompilerError::from("compiler scope error: missing active scope"));
       return;
     };
     for _ in 0..scope.runtime_env_count {
@@ -1541,9 +1548,9 @@ impl Compiler {
     let target = self.current_ip() as isize;
     let rel = target - (patch_idx as isize) - 1;
     let Ok(val) = i32::try_from(rel) else {
-      self.emission_error.get_or_insert_with(|| {
-        CompilerError::from("jump offset overflow")
-      });
+      self
+        .emission_error
+        .get_or_insert_with(|| CompilerError::from("jump offset overflow"));
       return;
     };
     self.apply_jump_patch(patch_idx, val);
@@ -1567,9 +1574,9 @@ impl Compiler {
     let patch_idx = self.resolve_jump_patch_index(offset);
     let rel = (target as isize) - (patch_idx as isize) - 1;
     let Ok(rel_i32) = i32::try_from(rel) else {
-      self.emission_error.get_or_insert_with(|| {
-        CompilerError::from("jump offset exceeds i32 range")
-      });
+      self
+        .emission_error
+        .get_or_insert_with(|| CompilerError::from("jump offset exceeds i32 range"));
       return;
     };
     self.apply_jump_patch(patch_idx, rel_i32);
@@ -1584,9 +1591,9 @@ impl Compiler {
     // Store signed jump offsets as sign-extended i24 payload so runtime
     // jump decoding (`read_i24_payload_at`) preserves negative back-jumps.
     let Ok(v) = i32::try_from(val) else {
-      self.emission_error.get_or_insert_with(|| {
-        CompilerError::from("jump offset exceeds i32 range")
-      });
+      self
+        .emission_error
+        .get_or_insert_with(|| CompilerError::from("jump offset exceeds i32 range"));
       return;
     };
     let idx = self.current_ip().saturating_sub(1);
@@ -1605,9 +1612,9 @@ impl Compiler {
       // compute relative offset in instruction units
       let rel = (target as isize) - (patch_idx as isize) - 1;
       let Ok(v) = i32::try_from(rel) else {
-        self.emission_error.get_or_insert_with(|| {
-          CompilerError::from("jump offset overflow")
-        });
+        self
+          .emission_error
+          .get_or_insert_with(|| CompilerError::from("jump offset overflow"));
         return;
       };
       self.apply_jump_patch(patch_idx, v);
