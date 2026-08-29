@@ -7,12 +7,12 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 fn replace_debug_source(
-  chunk: &mut Chunk,
+  code: &mut Chunk,
   debug_source: &Arc<String>,
 ) {
-  chunk.source_text = Arc::clone(debug_source);
-  for function in &mut chunk.functions {
-    replace_debug_source(Arc::make_mut(&mut function.chunk), debug_source);
+  code.source_text = Arc::clone(debug_source);
+  for function in &mut code.functions {
+    replace_debug_source(Arc::make_mut(&mut function.code), debug_source);
   }
 }
 
@@ -41,11 +41,11 @@ fn compile_prelinked_chunk(
       .collect(),
     namespace_exports: HashMap::new(),
   };
-  let mut chunk =
+  let mut code =
     crate::compiler::compile_oxc_with_ctx(session.program(), Some(&context), session.source())
       .expect("synthetic prelinked source compiles during test setup");
   replace_debug_source(
-    &mut chunk,
+    &mut code,
     &Arc::new(
       crate::js!(
         parse_error(module),
@@ -54,7 +54,7 @@ fn compile_prelinked_chunk(
       .to_string(),
     ),
   );
-  chunk
+  code
 }
 
 fn compile_prelinked_namespace_reexport_chunk(
@@ -71,11 +71,11 @@ fn compile_prelinked_namespace_reexport_chunk(
     exports: HashSet::from([exported.to_string()]),
     namespace_exports: HashMap::from([(exported.to_string(), target_index)]),
   };
-  let mut chunk =
+  let mut code =
     crate::compiler::compile_oxc_with_ctx(session.program(), Some(&context), session.source())
       .expect("synthetic namespace re-export source compiles during test setup");
   replace_debug_source(
-    &mut chunk,
+    &mut code,
     &Arc::new(
       crate::js!(
         parse_error(module),
@@ -84,7 +84,7 @@ fn compile_prelinked_namespace_reexport_chunk(
       .to_string(),
     ),
   );
-  chunk
+  code
 }
 
 fn synthetic_graph(

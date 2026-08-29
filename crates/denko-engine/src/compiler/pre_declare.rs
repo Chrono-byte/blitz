@@ -12,7 +12,7 @@
 //! that function declarations and variable bindings are visible throughout their
 //! scope, matching JavaScript's hoisting semantics.
 
-use super::emit::FrontendOp as Op;
+use super::emit::LoweringOpcode;
 use crate::Compiler;
 use oxc_ast::ast as oast;
 
@@ -208,8 +208,8 @@ impl Compiler {
     func: &oast::Function<'_>,
   ) -> Result<usize, crate::errors::CompilerError> {
     let (proto, _env_len) = self.compile_function(name, None, func, None, false)?;
-    let idx = self.chunk.add_function(proto);
-    self.emit(Op::MakeClosure, LINE);
+    let idx = self.code.add_function(proto);
+    self.emit(LoweringOpcode::MakeClosure, LINE);
     self.emit_function_index(idx, LINE);
     let slot = if let Some(s) = self.resolve_local(name) {
       s
@@ -217,9 +217,9 @@ impl Compiler {
       self.add_local_with_mirror(name.to_string(), None, self.mirrors_root_bindings())
     };
     if self.local_mirrors_global(slot) {
-      self.emit(Op::Copy, LINE);
+      self.emit(LoweringOpcode::Copy, LINE);
     }
-    self.emit(Op::StoreLocal, LINE);
+    self.emit(LoweringOpcode::StoreLocal, LINE);
     self.emit_slot(slot, LINE);
     if self.local_mirrors_global(slot) {
       self.emit_set_global_name(name);
@@ -243,7 +243,7 @@ impl Compiler {
             let fname = ident.name.to_string();
             let slot = self.emit_function_closure(&fname, f)?;
             if self.current_module.is_some() {
-              self.emit(Op::LoadLocal, LINE);
+              self.emit(LoweringOpcode::LoadLocal, LINE);
               self.emit_slot(slot, LINE);
               self.emit_set_own_module_export(&fname)?;
             }
@@ -256,7 +256,7 @@ impl Compiler {
             let fname = ident.name.to_string();
             let slot = self.emit_function_closure(&fname, f)?;
             if self.current_module.is_some() {
-              self.emit(Op::LoadLocal, LINE);
+              self.emit(LoweringOpcode::LoadLocal, LINE);
               self.emit_slot(slot, LINE);
               self.emit_set_own_module_export(&fname)?;
             }
@@ -268,15 +268,15 @@ impl Compiler {
               let fname = ident.name.to_string();
               let slot = self.emit_function_closure(&fname, f)?;
               if self.current_module.is_some() {
-                self.emit(Op::LoadLocal, LINE);
+                self.emit(LoweringOpcode::LoadLocal, LINE);
                 self.emit_slot(slot, LINE);
                 self.emit_set_own_module_export("default")?;
               }
             } else {
               let fname = "default".to_string();
               let (proto, _env_len) = self.compile_function(&fname, None, f, None, false)?;
-              let idx = self.chunk.add_function(proto);
-              self.emit(Op::MakeClosure, LINE);
+              let idx = self.code.add_function(proto);
+              self.emit(LoweringOpcode::MakeClosure, LINE);
               self.emit_function_index(idx, LINE);
               if self.current_module.is_some() {
                 self.emit_set_own_module_export("default")?;

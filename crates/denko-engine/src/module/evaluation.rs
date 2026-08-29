@@ -295,10 +295,10 @@ impl ModuleLoader {
             continue;
           }
           rec.state = ModuleState::Evaluating;
-          let chunk = match &rec.payload {
+          let code = match &rec.payload {
             ModuleRecordPayload::Prelinked { .. } => rec.bytecode.clone().ok_or_else(|| {
               crate::errors::RuntimeError::from(
-                "Prelinked module record is missing its validated bytecode chunk",
+                "Prelinked module record is missing its validated chunk",
               )
             })?,
             ModuleRecordPayload::Source {
@@ -327,8 +327,8 @@ impl ModuleLoader {
                 exports: rec.exports.keys().cloned().collect(),
                 namespace_exports: rec.namespace_exports.clone(),
               };
-              let chunk = if let Some(chunk) = rec.bytecode.clone() {
-                chunk
+              let code = if let Some(code) = rec.bytecode.clone() {
+                code
               } else {
                 self.pipeline_counters.source_compilation();
                 crate::compiler::compile_oxc_with_ctx(program, Some(&context), session.source())
@@ -336,11 +336,11 @@ impl ModuleLoader {
                     crate::errors::RuntimeError::from(format!("Compile failed: {error}"))
                   })?
               };
-              crate::runtime_utils::clear_slot_types_in_chunk(chunk)
+              crate::runtime_utils::clear_slot_types_in_code(code)
             }
           };
           vm.set_current_module_specifier(Some(rec.specifier.clone()));
-          let result = vm.run(chunk);
+          let result = vm.run(code);
           vm.set_current_module_specifier(None);
           result?;
           rec.state = ModuleState::Evaluated;
@@ -380,10 +380,10 @@ impl ModuleLoader {
           continue;
         }
         rec.state = ModuleState::Evaluating;
-        let chunk = match &rec.payload {
+        let code = match &rec.payload {
           ModuleRecordPayload::Prelinked { .. } => rec.bytecode.clone().ok_or_else(|| {
             crate::errors::RuntimeError::from(
-              "Prelinked module record is missing its validated bytecode chunk",
+              "Prelinked module record is missing its validated chunk",
             )
           })?,
           ModuleRecordPayload::Source {
@@ -403,19 +403,19 @@ impl ModuleLoader {
                 crate::errors::RuntimeError::from(format!("Typecheck failed: {error}"))
               })?;
             }
-            let chunk = if let Some(chunk) = rec.bytecode.clone() {
-              chunk
+            let code = if let Some(code) = rec.bytecode.clone() {
+              code
             } else {
               self.pipeline_counters.source_compilation();
               crate::compiler::compile_oxc_with_ctx(program, None, session.source()).map_err(
                 |error| crate::errors::RuntimeError::from(format!("Compile failed: {error}")),
               )?
             };
-            crate::runtime_utils::clear_slot_types_in_chunk(chunk)
+            crate::runtime_utils::clear_slot_types_in_code(code)
           }
         };
         vm.set_current_module_specifier(Some(rec.specifier.clone()));
-        let result = vm.run(chunk);
+        let result = vm.run(code);
         vm.set_current_module_specifier(None);
         result?;
         rec.state = ModuleState::Evaluated;

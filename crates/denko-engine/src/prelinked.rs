@@ -6,7 +6,7 @@
 //! [`crate::module::ModuleLoader`] only after a validated graph is constructed
 //! in a realm.
 
-use crate::bytecode::{BytecodeVersion, Chunk, Constant, Op, decode_risc_aux16};
+use crate::bytecode::{BytecodeVersion, Chunk, Constant, Opcode, decode_aux16};
 use std::collections::{HashMap, HashSet};
 use std::mem::size_of;
 use std::sync::Arc;
@@ -38,7 +38,7 @@ const MAX_CHUNK_DEPTH: usize = 256;
 pub struct PrelinkedModuleGraph {
   /// Version of the graph metadata contract.
   pub format_version: u16,
-  /// Bytecode version expected for every root and nested chunk.
+  /// Bytecode version expected for every root and nested code.
   pub engine_bytecode_version: BytecodeVersion,
   /// Host-defined package or bundle identity.
   pub package_name: String,
@@ -56,7 +56,7 @@ pub struct PrelinkedModuleGraph {
 }
 
 impl PrelinkedModuleGraph {
-  /// Validate all graph, binding, chunk, and bytecode-descriptor invariants.
+  /// Validate all graph, binding, code, and bytecode-descriptor invariants.
   ///
   /// Validation is host-neutral: package versions and source hashes are
   /// retained but must be checked against host policy by the embedder.
@@ -287,7 +287,7 @@ impl PrelinkedModuleGraph {
     let mut budget = ChunkBudget::default();
     for module in &self.modules {
       validate_chunk_tree(
-        &module.chunk,
+        &module.code,
         module.module_index,
         &module.specifier,
         self.engine_bytecode_version,
@@ -298,16 +298,16 @@ impl PrelinkedModuleGraph {
         &mut budget,
       )?;
       module
-        .chunk
+        .code
         .verify()
         .map_err(|reason| PrelinkedGraphError::InvalidChunk {
           specifier: module.specifier.clone(),
           reason,
         })?;
     }
-    enforce_limit("chunk count", budget.chunks, MAX_CHUNKS)?;
+    enforce_limit("code count", budget.codes, MAX_CHUNKS)?;
     enforce_limit(
-      "total chunk source bytes",
+      "total code source bytes",
       budget.source_bytes,
       MAX_TOTAL_SOURCE_BYTES,
     )?;
@@ -349,7 +349,7 @@ pub struct PrelinkedModule {
   /// Local imported names mapped to canonical live-binding IDs.
   pub imports: Vec<PrelinkedImport>,
   /// Verified bytecode executed without parsing or compiling source text.
-  pub chunk: Chunk,
+  pub code: Chunk,
 }
 
 /// One exported name's canonical live-binding identity.
@@ -392,10 +392,10 @@ pub enum PrelinkedGraphError {
   /// Portable graph metadata is internally inconsistent.
   #[error("invalid prelinked module graph: {0}")]
   InvalidData(String),
-  /// A module chunk failed structural bytecode verification.
-  #[error("invalid prelinked bytecode chunk for {specifier:?}: {reason}")]
+  /// A module code failed structural bytecode verification.
+  #[error("invalid prelinked chunk for {specifier:?}: {reason}")]
   InvalidChunk {
-    /// Module owning the chunk.
+    /// Module owning the code.
     specifier: String,
     /// Structural verification failure.
     reason: String,
@@ -412,7 +412,7 @@ pub enum PrelinkedGraphError {
 
 #[derive(Default)]
 struct ChunkBudget {
-  chunks: usize,
+  codes: usize,
   source_bytes: usize,
   bytecode_bytes: usize,
   sources: HashSet<*const String>,
@@ -420,7 +420,7 @@ struct ChunkBudget {
 
 #[allow(clippy::too_many_arguments)]
 fn validate_chunk_tree(
-  chunk: &Chunk,
+  code: &Chunk,
   owner_index: ModuleIndex,
   specifier: &str,
   expected_version: BytecodeVersion,
@@ -432,42 +432,42 @@ fn validate_chunk_tree(
 ) -> Result<(), PrelinkedGraphError> {
   if depth > MAX_CHUNK_DEPTH {
     return Err(invalid(format!(
-      "chunk nesting for {specifier:?} exceeds {MAX_CHUNK_DEPTH} levels"
+      "code nesting for {specifier:?} exceeds {MAX_CHUNK_DEPTH} levels"
     )));
   }
-  if chunk.version != expected_version {
+  if code.version != expected_version {
     return Err(PrelinkedGraphError::InvalidChunk {
       specifier: specifier.to_string(),
       reason: format!(
-        "chunk bytecode version {:?} does not match graph version {:?}",
-        chunk.version, expected_version
+        "code bytecode version {:?} does not match graph version {:?}",
+        code.version, expected_version
       ),
     });
   }
 
-  budget.chunks = checked_add(budget.chunks, 1, "chunk count")?;
+  budget.codes = checked_add(budget.codes, 1, "code count")?;
   let new_source = budget
     .sources
-    .insert(Arc::as_ptr(&chunk.source_text));
+    .insert(Arc::as_ptr(&code.source_text));
   if new_source {
     budget.source_bytes = checked_add(
       budget.source_bytes,
-      chunk.source_text.len(),
-      "chunk source byte count",
+      code.source_text.len(),
+      "code source byte count",
     )?;
     enforce_limit(
-      "total chunk source bytes",
+      "total code source bytes",
       budget.source_bytes,
       MAX_TOTAL_SOURCE_BYTES,
     )?;
   }
-  enforce_limit("chunk count", budget.chunks, MAX_CHUNKS)?;
-  let instruction_bytes = chunk
-    .code
+  enforce_limit("code count", budget.codes, MAX_CHUNKS)?;
+  let instruction_bytes = code
+    .words
     .len()
     .checked_mul(size_of::<u32>())
     .ok_or_else(|| invalid("bytecode size overflow"))?;
-  let line_bytes = chunk
+  let line_bytes = code
     .lines
     .len()
     .checked_mul(size_of::<u32>())
@@ -477,11 +477,11 @@ fn validate_chunk_tree(
   if new_source {
     budget.bytecode_bytes = checked_add(
       budget.bytecode_bytes,
-      chunk.source_text.len(),
+      code.source_text.len(),
       "bytecode size",
     )?;
   }
-  for constant in &chunk.constants {
+  for constant in &code.constants {
     let constant_bytes = match constant {
       Constant::String(value) => value.len(),
       Constant::BigInt(value) => value.to_signed_bytes_le().len(),
@@ -507,17 +507,17 @@ fn validate_chunk_tree(
     MAX_TOTAL_BYTECODE_BYTES,
   )?;
 
-  for (instruction_index, word) in chunk.code.iter().copied().enumerate() {
-    let instruction = chunk
+  for (instruction_index, word) in code.words.iter().copied().enumerate() {
+    let instruction = code
       .decode_at(instruction_index)
       .map_err(|reason| PrelinkedGraphError::InvalidChunk {
         specifier: specifier.to_string(),
         reason,
       })?;
-    let constant_index = usize::from(decode_risc_aux16(word));
-    if instruction.op == Op::GetBuiltin
+    let constant_index = usize::from(decode_aux16(word));
+    if instruction.opcode == Opcode::GetBuiltin
       && matches!(
-        chunk.constants.get(constant_index),
+        code.constants.get(constant_index),
         Some(Constant::String(name)) if name == "dynamicImport"
       )
     {
@@ -525,10 +525,13 @@ fn validate_chunk_tree(
         "module {specifier:?} contains unsupported dynamic import bytecode at instruction {instruction_index}"
       )));
     }
-    if !matches!(instruction.op, Op::GetModuleExport | Op::SetModuleExport) {
+    if !matches!(
+      instruction.opcode,
+      Opcode::GetModuleExport | Opcode::SetModuleExport
+    ) {
       continue;
     }
-    let descriptor = match chunk.constants.get(constant_index) {
+    let descriptor = match code.constants.get(constant_index) {
       Some(Constant::String(descriptor)) => descriptor,
       Some(_) => {
         return Err(invalid_descriptor(
@@ -558,7 +561,7 @@ fn validate_chunk_tree(
         format!("instruction {instruction_index} targets absent module index {target_index}"),
       ));
     };
-    if instruction.op == Op::GetModuleExport
+    if instruction.opcode == Opcode::GetModuleExport
       && target_index != owner_index
       && !dependencies_by_module
         .get(&owner_index)
@@ -571,7 +574,7 @@ fn validate_chunk_tree(
         ),
       ));
     }
-    if instruction.op == Op::SetModuleExport && target_index != owner_index {
+    if instruction.opcode == Opcode::SetModuleExport && target_index != owner_index {
       return Err(invalid_descriptor(
         specifier,
         format!(
@@ -579,7 +582,7 @@ fn validate_chunk_tree(
         ),
       ));
     }
-    if instruction.op == Op::SetModuleExport && target_name == "*" {
+    if instruction.opcode == Opcode::SetModuleExport && target_name == "*" {
       return Err(invalid_descriptor(
         specifier,
         format!("instruction {instruction_index} writes the synthetic namespace export"),
@@ -599,7 +602,7 @@ fn validate_chunk_tree(
         )
       })?)
     };
-    if instruction.op == Op::GetModuleExport
+    if instruction.opcode == Opcode::GetModuleExport
       && let Some(target_binding) = target_binding
       && !imports_by_module
         .get(&owner_index)
@@ -614,9 +617,9 @@ fn validate_chunk_tree(
     }
   }
 
-  for function in &chunk.functions {
+  for function in &code.functions {
     validate_chunk_tree(
-      &function.chunk,
+      &function.code,
       owner_index,
       specifier,
       expected_version,
@@ -719,14 +722,14 @@ fn invalid_descriptor(
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::bytecode::{Op, encode_risc_aux16};
+  use crate::bytecode::{Opcode, encode_aux16_instruction};
   use std::sync::Arc;
 
   fn return_chunk(debug_source: &str) -> Chunk {
-    let mut chunk = Chunk::new(Arc::new(debug_source.to_string()));
-    chunk.write_instr(Op::Undefined as u32, 1);
-    chunk.write_instr(Op::Return as u32, 1);
-    chunk
+    let mut code = Chunk::new(Arc::new(debug_source.to_string()));
+    code.write_instr(Opcode::Undefined as u32, 1);
+    code.write_instr(Opcode::Return as u32, 1);
+    code
   }
 
   fn graph() -> PrelinkedModuleGraph {
@@ -747,7 +750,7 @@ mod tests {
             binding_id: 0,
           }],
           imports: vec![],
-          chunk: return_chunk("debug value source"),
+          code: return_chunk("debug value source"),
         },
         PrelinkedModule {
           specifier: "synthetic:entry".to_string(),
@@ -762,7 +765,7 @@ mod tests {
             local_name: "value".to_string(),
             binding_id: 0,
           }],
-          chunk: return_chunk("debug entry source"),
+          code: return_chunk("debug entry source"),
         },
       ],
       binding_count: 1,
@@ -846,20 +849,20 @@ mod tests {
   }
 
   #[test]
-  fn rejects_invalid_chunks_and_descriptor_targets() {
+  fn rejects_invalid_code_and_descriptor_targets() {
     let mut invalid_chunk = graph();
-    invalid_chunk.modules[0].chunk.lines.pop();
+    invalid_chunk.modules[0].code.lines.pop();
     assert!(matches!(
       invalid_chunk.validate(),
       Err(PrelinkedGraphError::InvalidChunk { .. })
     ));
 
     let mut invalid_descriptor = graph();
-    let chunk = &mut invalid_descriptor.modules[1].chunk;
-    chunk
+    let code = &mut invalid_descriptor.modules[1].code;
+    code
       .constants
       .push(Constant::String("0\0missing".to_string().into()));
-    chunk.code[0] = encode_risc_aux16(Op::GetModuleExport, 0, 0);
+    code.words[0] = encode_aux16_instruction(Opcode::GetModuleExport, 0, 0);
     assert!(matches!(
       invalid_descriptor.validate(),
       Err(PrelinkedGraphError::InvalidDescriptor { reason, .. })
@@ -868,11 +871,11 @@ mod tests {
 
     let mut missing_edge = graph();
     missing_edge.modules[1].dependencies.clear();
-    let chunk = &mut missing_edge.modules[1].chunk;
-    chunk
+    let code = &mut missing_edge.modules[1].code;
+    code
       .constants
       .push(Constant::String("0\0value".to_string().into()));
-    chunk.code[0] = encode_risc_aux16(Op::GetModuleExport, 0, 0);
+    code.words[0] = encode_aux16_instruction(Opcode::GetModuleExport, 0, 0);
     assert!(
       missing_edge
         .validate()
@@ -890,11 +893,11 @@ mod tests {
         binding_id: 1,
       });
     binding_drift.modules[1].imports[0].binding_id = 1;
-    let chunk = &mut binding_drift.modules[1].chunk;
-    chunk
+    let code = &mut binding_drift.modules[1].code;
+    code
       .constants
       .push(Constant::String("0\0value".to_string().into()));
-    chunk.code[0] = encode_risc_aux16(Op::GetModuleExport, 0, 0);
+    code.words[0] = encode_aux16_instruction(Opcode::GetModuleExport, 0, 0);
     assert!(matches!(
       binding_drift.validate(),
       Err(PrelinkedGraphError::InvalidDescriptor { reason, .. })
@@ -902,11 +905,11 @@ mod tests {
     ));
 
     let mut foreign_write = graph();
-    let chunk = &mut foreign_write.modules[1].chunk;
-    chunk
+    let code = &mut foreign_write.modules[1].code;
+    code
       .constants
       .push(Constant::String("0\0value".to_string().into()));
-    chunk.code[0] = encode_risc_aux16(Op::SetModuleExport, 0, 0);
+    code.words[0] = encode_aux16_instruction(Opcode::SetModuleExport, 0, 0);
     assert!(matches!(
       foreign_write.validate(),
       Err(PrelinkedGraphError::InvalidDescriptor { reason, .. })
@@ -914,11 +917,11 @@ mod tests {
     ));
 
     let mut dynamic_import = graph();
-    let chunk = &mut dynamic_import.modules[1].chunk;
-    chunk
+    let code = &mut dynamic_import.modules[1].code;
+    code
       .constants
       .push(Constant::String("dynamicImport".to_string().into()));
-    chunk.code[0] = encode_risc_aux16(Op::GetBuiltin, 0, 0);
+    code.words[0] = encode_aux16_instruction(Opcode::GetBuiltin, 0, 0);
     assert!(
       dynamic_import
         .validate()
@@ -929,7 +932,7 @@ mod tests {
   }
 
   #[test]
-  fn rejects_unsupported_graph_version_before_chunks() {
+  fn rejects_unsupported_graph_version_before_code() {
     let mut value = graph();
     value.format_version += 1;
     assert!(matches!(

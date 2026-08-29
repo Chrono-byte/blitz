@@ -43,7 +43,7 @@ pub(crate) fn install_hidden_builtins(
       src.to_string()
     };
     let (allow_new_target, allow_super, allow_super_call) = vm.current_eval_context_flags();
-    let (chunk, declaration_only) = crate::typecheck::with_strict_override(None, || {
+    let (code, declaration_only) = crate::typecheck::with_strict_override(None, || {
       compiler::with_compile_context_override(Some((allow_new_target, allow_super)), || {
         let session = Parser::parse_eval_source(&eval_src, allow_new_target)
           .map_err(|e| syntax_error(vm, format!("eval parse: {}", e)))?;
@@ -62,26 +62,26 @@ pub(crate) fn install_hidden_builtins(
               | oxc_ast::ast::Statement::EmptyStatement(_)
           )
         }) && (!inherited_strict || session.program().directives.len() == 1);
-        let chunk = compiler::compile_repl_session(&session)
+        let code = compiler::compile_repl_session(&session)
           .map_err(|e| syntax_error(vm, format!("eval compile: {}", e)))?;
-        Ok::<_, crate::errors::RuntimeError>((chunk, declaration_only))
+        Ok::<_, crate::errors::RuntimeError>((code, declaration_only))
       })
     })?;
-    if !chunk.root_strict
-      && let Some(name) = vm.direct_eval_lexical_conflict_name(&chunk)
+    if !code.root_strict
+      && let Some(name) = vm.direct_eval_lexical_conflict_name(&code)
     {
       return Err(syntax_error(
         vm,
         format!("redeclaration of lexical binding `{}`", name),
       ));
     }
-    if !chunk.root_strict
+    if !code.root_strict
       && vm.direct_eval_uses_global_var_environment()
-      && let Some(name) = vm.global_function_declaration_conflict_name(&chunk)
+      && let Some(name) = vm.global_function_declaration_conflict_name(&code)
     {
       return Err(vm.throw_type_error(&format!("cannot declare global function `{}`", name,)));
     }
-    match vm.run_nested(chunk, true) {
+    match vm.run_nested(code, true) {
       Ok(value) => Ok(if declaration_only {
         Value::Undefined
       } else {

@@ -1,29 +1,29 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Optimization passes for the RiscBuilder.
+//! Optimization passes for the Lowering.
 
-use super::emit::FrontendOp as Op;
-use super::risc::{InstructionInputs, PendingInstruction, RiscBuilder, ValueId};
+use super::bytecode::{Lowering, VirtualInputs, VirtualInstruction, VirtualValue};
+use super::emit::LoweringOpcode;
 use crate::bytecode::{Chunk, Constant};
 use std::collections::{HashMap, HashSet};
 
 pub(crate) fn optimize(
-  builder: &mut RiscBuilder,
-  chunk: &mut Chunk,
+  builder: &mut Lowering,
+  code: &mut Chunk,
 ) -> usize {
   let mut total = 0;
-  total += constant_fold(builder, chunk);
-  total += dead_code_elimination(builder, chunk);
+  total += constant_fold(builder, code);
+  total += dead_code_elimination(builder, code);
   total
 }
 
 fn constant_fold(
-  builder: &mut RiscBuilder,
-  chunk: &mut Chunk,
+  builder: &mut Lowering,
+  code: &mut Chunk,
 ) -> usize {
   if builder
     .instructions
     .iter()
-    .any(|instruction| instruction.op.is_jump())
+    .any(|instruction| instruction.opcode.is_jump())
   {
     return 0;
   }
@@ -31,7 +31,7 @@ fn constant_fold(
   let mut folded = 0;
 
   for idx in 0..builder.instructions.len() {
-    let op = builder.instructions[idx].op;
+    let op = builder.instructions[idx].opcode;
     let inputs = builder.instructions[idx]
       .inputs
       .as_slice()
@@ -39,7 +39,7 @@ fn constant_fold(
     let output = builder.instructions[idx].output;
 
     let folded_value = match op {
-      Op::Sub | Op::Mul | Op::Div => {
+      LoweringOpcode::Sub | LoweringOpcode::Mul | LoweringOpcode::Div => {
         if inputs.len() != 2 {
           None
         } else {
@@ -47,16 +47,16 @@ fn constant_fold(
           let right = value_to_const.get(&inputs[1].0).and_then(|v| *v);
           match (left, right) {
             (Some(l), Some(r)) => match op {
-              Op::Sub => Some(l - r),
-              Op::Mul => Some(l * r),
-              Op::Div => Some(l / r),
+              LoweringOpcode::Sub => Some(l - r),
+              LoweringOpcode::Mul => Some(l * r),
+              LoweringOpcode::Div => Some(l / r),
               _ => None,
             },
             _ => None,
           }
         }
       }
-      Op::Neg => {
+      LoweringOpcode::Neg => {
         if inputs.len() != 1 {
           None
         } else {
@@ -71,30 +71,30 @@ fn constant_fold(
 
     if let Some(result) = folded_value {
       let constant = Constant::Number(result);
-      let const_idx = chunk.add_constant(constant);
+      let const_idx = code.add_constant(constant);
       let Some(payload) = u32::try_from(const_idx)
         .ok()
         .filter(|index| *index <= u32::from(u16::MAX))
       else {
-        chunk.constants.pop();
+        code.constants.pop();
         if let Some(out) = output {
           value_to_const.insert(out.0, None);
         }
         continue;
       };
       let inst = &mut builder.instructions[idx];
-      inst.op = Op::Const;
+      inst.opcode = LoweringOpcode::Const;
       inst.payload = payload;
-      inst.inputs = InstructionInputs::None;
+      inst.inputs = VirtualInputs::None;
       if let Some(out) = output {
         value_to_const.insert(out.0, Some(result));
       }
       folded += 1;
     } else {
       if let Some(out) = output {
-        let const_val = if op == Op::Const {
+        let const_val = if op == LoweringOpcode::Const {
           let idx_const = (builder.instructions[idx].payload & 0xffff) as usize;
-          if let Some(Constant::Number(n)) = chunk.constants.get(idx_const) {
+          if let Some(Constant::Number(n)) = code.constants.get(idx_const) {
             Some(*n)
           } else {
             None
@@ -110,52 +110,60 @@ fn constant_fold(
 }
 
 #[allow(dead_code)]
-fn common_subexpression_elimination(builder: &mut RiscBuilder) -> usize {
-  fn is_pure(op: Op) -> bool {
+fn common_subexpression_elimination(builder: &mut Lowering) -> usize {
+  fn is_pure(opcode: LoweringOpcode) -> bool {
     matches!(
-      op,
-      Op::Add
-        | Op::Sub
-        | Op::Mul
-        | Op::Div
-        | Op::Mod
-        | Op::Pow
-        | Op::BitAnd
-        | Op::BitOr
-        | Op::BitXor
-        | Op::Shl
-        | Op::Shr
-        | Op::Ushr
-        | Op::Neg
-        | Op::BitNot
-        | Op::Const
+      opcode,
+      LoweringOpcode::Add
+        | LoweringOpcode::Sub
+        | LoweringOpcode::Mul
+        | LoweringOpcode::Div
+        | LoweringOpcode::Mod
+        | LoweringOpcode::Pow
+        | LoweringOpcode::BitAnd
+        | LoweringOpcode::BitOr
+        | LoweringOpcode::BitXor
+        | LoweringOpcode::Shl
+        | LoweringOpcode::Shr
+        | LoweringOpcode::Ushr
+        | LoweringOpcode::Neg
+        | LoweringOpcode::BitNot
+        | LoweringOpcode::Const
     )
   }
 
-  let is_commutative =
-    |op: Op| matches!(op, Op::Add | Op::Mul | Op::BitAnd | Op::BitOr | Op::BitXor);
+  let is_commutative = |opcode: LoweringOpcode| {
+    matches!(
+      opcode,
+      LoweringOpcode::Add
+        | LoweringOpcode::Mul
+        | LoweringOpcode::BitAnd
+        | LoweringOpcode::BitOr
+        | LoweringOpcode::BitXor
+    )
+  };
 
   let mut map: HashMap<(u32, Vec<usize>), usize> = HashMap::new();
   let mut remap: HashMap<usize, usize> = HashMap::new();
   let mut to_remove = HashSet::new();
   let mut eliminated = 0;
 
-  let op_key = |op: Op| -> u32 {
-    match op {
-      Op::Bytecode(b) => b as u32,
-      Op::Discard => 0xFF00,
-      Op::Copy => 0xFF01,
-      Op::Exchange => 0xFF02,
+  let op_key = |opcode: LoweringOpcode| -> u32 {
+    match opcode {
+      LoweringOpcode::Bytecode(b) => b as u32,
+      LoweringOpcode::Discard => 0xFF00,
+      LoweringOpcode::Copy => 0xFF01,
+      LoweringOpcode::Exchange => 0xFF02,
     }
   };
 
   for idx in 0..builder.instructions.len() {
     let inst = &builder.instructions[idx];
-    if !is_pure(inst.op) {
+    if !is_pure(inst.opcode) {
       continue;
     }
-    let key: (u32, Vec<usize>) = if inst.op == Op::Const {
-      (op_key(Op::Const), vec![inst.payload as usize])
+    let key: (u32, Vec<usize>) = if inst.opcode == LoweringOpcode::Const {
+      (op_key(LoweringOpcode::Const), vec![inst.payload as usize])
     } else {
       let mut inputs: Vec<usize> = inst
         .inputs
@@ -169,10 +177,10 @@ fn common_subexpression_elimination(builder: &mut RiscBuilder) -> usize {
           id
         })
         .collect();
-      if is_commutative(inst.op) {
+      if is_commutative(inst.opcode) {
         inputs.sort_unstable();
       }
-      (op_key(inst.op), inputs)
+      (op_key(inst.opcode), inputs)
     };
 
     if let Some(&existing_output) = map.get(&key) {
@@ -211,11 +219,11 @@ fn common_subexpression_elimination(builder: &mut RiscBuilder) -> usize {
     }
     let mut inst = std::mem::replace(
       &mut builder.instructions[old_idx],
-      PendingInstruction {
-        op: Op::Const,
+      VirtualInstruction {
+        opcode: LoweringOpcode::Const,
         payload: 0,
         branch_offset: None,
-        inputs: InstructionInputs::None,
+        inputs: VirtualInputs::None,
         output: None,
       },
     );
@@ -226,9 +234,9 @@ fn common_subexpression_elimination(builder: &mut RiscBuilder) -> usize {
       while let Some(&mapped) = remap.get(&id) {
         id = mapped;
       }
-      new_inputs.push(ValueId(id));
+      new_inputs.push(VirtualValue(id));
     }
-    inst.inputs = InstructionInputs::from_slice(&new_inputs);
+    inst.inputs = VirtualInputs::from_slice(&new_inputs);
     if let Some(offset) = inst.branch_offset {
       let old_target = (old_idx as i64 + 1 + offset as i64) as usize;
       if old_target < len
@@ -243,8 +251,8 @@ fn common_subexpression_elimination(builder: &mut RiscBuilder) -> usize {
   }
 
   let mut new_branch_values = HashMap::new();
-  for (old_ip, values) in std::mem::take(&mut builder.branch_values) {
-    if let Some(new_ip) = old_to_new[old_ip] {
+  for (old_pc, values) in std::mem::take(&mut builder.branch_values) {
+    if let Some(new_pc) = old_to_new[old_pc] {
       let remapped_values = values
         .into_iter()
         .map(|v| {
@@ -252,10 +260,10 @@ fn common_subexpression_elimination(builder: &mut RiscBuilder) -> usize {
           while let Some(&mapped) = remap.get(&id) {
             id = mapped;
           }
-          ValueId(id)
+          VirtualValue(id)
         })
         .collect();
-      new_branch_values.insert(new_ip, remapped_values);
+      new_branch_values.insert(new_pc, remapped_values);
     }
   }
   builder.branch_values = new_branch_values;
@@ -266,8 +274,8 @@ fn common_subexpression_elimination(builder: &mut RiscBuilder) -> usize {
 }
 
 fn dead_code_elimination(
-  builder: &mut RiscBuilder,
-  chunk: &mut Chunk,
+  builder: &mut Lowering,
+  code: &mut Chunk,
 ) -> usize {
   let len = builder.instructions.len();
   if len == 0 {
@@ -276,30 +284,30 @@ fn dead_code_elimination(
   let mut reachable = vec![false; len];
   let mut worklist = vec![0];
   reachable[0] = true;
-  for handler in &chunk.finally_handlers {
-    if handler.push_ip < len {
-      reachable[handler.push_ip] = true;
-      worklist.push(handler.push_ip);
+  for handler in &code.finally_handlers {
+    if handler.push_pc < len {
+      reachable[handler.push_pc] = true;
+      worklist.push(handler.push_pc);
     }
-    if handler.finalizer_ip < len {
-      reachable[handler.finalizer_ip] = true;
-      worklist.push(handler.finalizer_ip);
+    if handler.finalizer_pc < len {
+      reachable[handler.finalizer_pc] = true;
+      worklist.push(handler.finalizer_pc);
     }
   }
   let mut visited = HashSet::new();
-  while let Some(ip) = worklist.pop() {
-    if !visited.insert(ip) {
+  while let Some(pc) = worklist.pop() {
+    if !visited.insert(pc) {
       continue;
     }
-    if ip >= len {
+    if pc >= len {
       continue;
     }
-    let inst = &builder.instructions[ip];
+    let inst = &builder.instructions[pc];
     let branch = inst.branch_offset;
-    match inst.op {
-      Op::Jump => {
+    match inst.opcode {
+      LoweringOpcode::Jump => {
         if let Some(offset) = branch
-          && let Ok(target) = usize::try_from(ip as i64 + 1 + offset as i64)
+          && let Ok(target) = usize::try_from(pc as i64 + 1 + offset as i64)
           && target < len
           && !reachable[target]
         {
@@ -307,25 +315,29 @@ fn dead_code_elimination(
           worklist.push(target);
         }
       }
-      Op::JumpIfFalse | Op::JumpIfTrue | Op::JumpIfNullish | Op::CompareJump | Op::PushHandler => {
+      LoweringOpcode::JumpIfFalse
+      | LoweringOpcode::JumpIfTrue
+      | LoweringOpcode::JumpIfNullish
+      | LoweringOpcode::CompareJump
+      | LoweringOpcode::PushHandler => {
         if let Some(offset) = branch
-          && let Ok(target) = usize::try_from(ip as i64 + 1 + offset as i64)
+          && let Ok(target) = usize::try_from(pc as i64 + 1 + offset as i64)
           && target < len
           && !reachable[target]
         {
           reachable[target] = true;
           worklist.push(target);
         }
-        if ip + 1 < len && !reachable[ip + 1] {
-          reachable[ip + 1] = true;
-          worklist.push(ip + 1);
+        if pc + 1 < len && !reachable[pc + 1] {
+          reachable[pc + 1] = true;
+          worklist.push(pc + 1);
         }
       }
-      Op::Return | Op::Throw => {}
+      LoweringOpcode::Return | LoweringOpcode::Throw => {}
       _ => {
-        if ip + 1 < len && !reachable[ip + 1] {
-          reachable[ip + 1] = true;
-          worklist.push(ip + 1);
+        if pc + 1 < len && !reachable[pc + 1] {
+          reachable[pc + 1] = true;
+          worklist.push(pc + 1);
         }
       }
     }
@@ -357,11 +369,11 @@ fn dead_code_elimination(
   for &old_idx in &new_to_old {
     let mut inst = std::mem::replace(
       &mut builder.instructions[old_idx],
-      PendingInstruction {
-        op: Op::Const,
+      VirtualInstruction {
+        opcode: LoweringOpcode::Const,
         payload: 0,
         branch_offset: None,
-        inputs: InstructionInputs::None,
+        inputs: VirtualInputs::None,
         output: None,
       },
     );
@@ -370,8 +382,8 @@ fn dead_code_elimination(
       if old_target < len
         && let Some(new_target) = old_to_new[old_target]
       {
-        let new_ip = new_instructions.len();
-        let new_offset = new_target as i64 - (new_ip as i64 + 1);
+        let new_pc = new_instructions.len();
+        let new_offset = new_target as i64 - (new_pc as i64 + 1);
         inst.branch_offset = Some(new_offset as i32);
       }
     }
@@ -380,28 +392,28 @@ fn dead_code_elimination(
   }
 
   let mut new_branch_values = HashMap::new();
-  for (old_ip, values) in std::mem::take(&mut builder.branch_values) {
-    if let Some(new_ip) = old_to_new[old_ip] {
-      new_branch_values.insert(new_ip, values);
+  for (old_pc, values) in std::mem::take(&mut builder.branch_values) {
+    if let Some(new_pc) = old_to_new[old_pc] {
+      new_branch_values.insert(new_pc, values);
     }
   }
   builder.branch_values = new_branch_values;
 
-  let mut new_handlers = Vec::with_capacity(chunk.finally_handlers.len());
-  for handler in std::mem::take(&mut chunk.finally_handlers) {
+  let mut new_handlers = Vec::with_capacity(code.finally_handlers.len());
+  for handler in std::mem::take(&mut code.finally_handlers) {
     if let (Some(new_push), Some(new_finalizer)) = (
-      old_to_new[handler.push_ip],
-      old_to_new[handler.finalizer_ip],
+      old_to_new[handler.push_pc],
+      old_to_new[handler.finalizer_pc],
     ) {
       new_handlers.push(crate::bytecode::FinallyHandler {
-        push_ip: new_push,
-        finalizer_ip: new_finalizer,
+        push_pc: new_push,
+        finalizer_pc: new_finalizer,
         return_slot: handler.return_slot,
         did_return_slot: handler.did_return_slot,
       });
     }
   }
-  chunk.finally_handlers = new_handlers;
+  code.finally_handlers = new_handlers;
 
   builder.instructions = new_instructions;
   builder.lines = new_lines;

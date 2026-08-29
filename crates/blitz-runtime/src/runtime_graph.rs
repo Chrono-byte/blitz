@@ -1487,14 +1487,14 @@ impl<'a> RuntimeBundleReader<'a> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use denko::bytecode::{BytecodeVersion, Chunk, Op, encode_risc_aux16};
+  use denko::bytecode::{BytecodeVersion, Chunk, Opcode, encode_aux16_instruction};
   use denko::prelinked::{PRELINKED_MODULE_GRAPH_VERSION, PrelinkedExport, PrelinkedModule};
   use std::sync::Arc;
 
   fn codec_graph() -> PrelinkedModuleGraph {
     let mut chunk = Chunk::new(Arc::new("debug source".to_string()));
-    chunk.write_instr(encode_risc_aux16(Op::Undefined, 0, 1), 0);
-    chunk.write_instr(encode_risc_aux16(Op::Return, 0, 1), 0);
+    chunk.write_instr(encode_aux16_instruction(Opcode::Undefined, 0, 1), 0);
+    chunk.write_instr(encode_aux16_instruction(Opcode::Return, 0, 1), 0);
     PrelinkedModuleGraph {
       format_version: PRELINKED_MODULE_GRAPH_VERSION,
       engine_bytecode_version: BytecodeVersion::RiscV2,
@@ -1511,7 +1511,7 @@ mod tests {
           binding_id: 0,
         }],
         imports: Vec::new(),
-        chunk,
+        code: chunk,
       }],
       binding_count: 1,
       public_roots: vec![0],
@@ -1611,10 +1611,7 @@ mod tests {
     assert_eq!(decoded.manifest, bundle.manifest);
     assert_eq!(decoded.graph.modules[0].source_sha256, [3; 32]);
     assert_eq!(
-      decoded.graph.modules[0]
-        .chunk
-        .source_text
-        .as_str(),
+      decoded.graph.modules[0].code.source_text.as_str(),
       "debug source"
     );
     assert_eq!(decoded.encode().expect("re-encode bundle"), first);

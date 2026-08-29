@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MPL-2.0
-//! RISC bytecode interpreter.
+//! bytecode interpreter.
 //!
 //! This module implements the VM core: a fetch-decode-execute loop that
-//! evaluates compiled RISC bytecode using registers and spill storage. It
+//! evaluates compiled bytecode using registers and spill storage. It
 //! contains the Vm struct, frame/handler implementations, and tuning constants
 //! used by the runtime.
 //!
 //! Key responsibilities:
-//! - Manage RISC registers, spill storage, and locals
+//! - Manage registers, spill storage, and locals
 //! - Maintain call frames, exception handlers, and generator state
 //! - Provide property access support with generation-guarded inline
 //!   caching to accelerate repeated lookups
@@ -24,11 +24,11 @@
 //!
 //! let globals = Rc::new(RefCell::new(ObjectData::new()));
 //! let mut vm = Vm::new(globals);
-//! // vm.run(chunk)?;
+//! // vm.run(code)?;
 //! ```
 
 use crate::binding::BindingCell;
-use crate::bytecode::{Chunk, FunctionProto, OP_COUNT};
+use crate::bytecode::{Chunk, Function, InstructionIndex, OP_COUNT};
 use crate::environment::EnvironmentRecord;
 use crate::gc;
 use crate::module::ModuleLoader;
@@ -51,11 +51,11 @@ mod partial_descriptor;
 mod stack;
 mod yield_star;
 
-pub(crate) use frame::Frame;
+pub(crate) use frame::CallFrame;
 pub(crate) use generator_runner::{GeneratorRunner, GeneratorStatus};
 pub(crate) use handler::{
-  AwaitSettlement, FinallyHandlerRecord, HandlerRecord, PendingOperationStep, PendingRiscOperation,
-  RiscExecutionState, RiscRunOutcome,
+  AwaitSettlement, FinallyHandlerRecord, HandlerRecord, PendingOperation, PendingOperationStep,
+  RegisterState, RunOutcome,
 };
 pub(crate) use memory::VmMemory;
 pub use memory::{HostRoot, VmMemorySnapshot, WeakHostRoot};
@@ -134,7 +134,7 @@ pub(super) fn get_global_bg_runtime() -> Arc<Runtime> {
   }))
 }
 
-/// Virtual machine for executing RISC bytecode.
+/// Virtual machine for executing bytecode.
 pub struct Vm {
   pub(super) realm_state: RealmState,
   pub(super) execution: ExecutionState,
@@ -174,8 +174,9 @@ pub(crate) struct ArgumentsState {
 
 #[derive(Clone)]
 pub(crate) struct ExecutionContext {
-  pub(crate) chunk: Arc<Chunk>,
-  pub(crate) ip: usize,
+  pub(crate) code: Arc<Chunk>,
+  pub(crate) pc: InstructionIndex,
+  pub(crate) active_function: Option<Value>,
   pub(crate) locals: Vec<BindingCell>,
   pub(crate) this_value: Value,
   pub(crate) closure_env: Option<crate::closure_environment::ClosureEnvironment>,
@@ -212,7 +213,7 @@ pub(crate) struct ExceptionState {
   pub(super) handlers: HandlerStack,
   pub(super) pending: Option<Value>,
   pub(super) pending_frame_count: Option<usize>,
-  pub(super) unwound_risc_state: Option<RiscExecutionState>,
+  pub(super) unwound_register_state: Option<RegisterState>,
   pub(crate) last_uncaught: Option<Value>,
 }
 
@@ -262,7 +263,7 @@ pub(super) struct QuickenedPlan {
 
 #[derive(Clone)]
 pub(super) struct DirectCallSite {
-  pub(super) expected_proto: Rc<FunctionProto>,
+  pub(super) expected_proto: Rc<Function>,
   pub(super) target: crate::vm::jit::DirectCallTarget,
 }
 
@@ -270,7 +271,7 @@ pub(super) struct CacheState {
   pub(super) property_get: HashMap<(usize, usize), PropertyGetIcEntry>,
   /// O(1) invalidation boundary for mutation-opaque native callbacks.
   pub(super) property_get_epoch: u64,
-  /// VM-local quickened plans keyed by portable chunk identity.
+  /// VM-local quickened plans keyed by portable code identity.
   pub(super) quickened: HashMap<usize, QuickenedPlan>,
   pub(super) active_quickened_chunk: usize,
   pub(super) active_quickened_sites: Arc<[SiteAction]>,
@@ -286,18 +287,18 @@ pub(super) struct ProfilingState {
   pub(super) enabled: bool,
   pub(super) opcode_counts: [u64; OP_COUNT],
   pub(super) run_started_at: Option<Instant>,
-  /// Feedback keyed by stable portable chunk identity, never native code.
+  /// Feedback keyed by stable portable code identity, never native code.
   pub(super) functions: HashMap<crate::vm::jit::FunctionId, crate::vm::jit::FunctionProfile>,
   /// Temporary identity bridge until executable code owns a stable ID. The
   /// retained Arc intentionally prevents pointer reuse during this phase.
-  pub(super) chunk_ids: HashMap<usize, crate::vm::jit::FunctionId>,
+  pub(super) code_ids: HashMap<usize, crate::vm::jit::FunctionId>,
   pub(super) chunk_refs: HashMap<usize, Arc<Chunk>>,
   pub(super) next_function_id: u64,
-  pub(super) active_function_chunk: usize,
+  pub(super) active_function_identity: usize,
   pub(super) active_function_id: Option<crate::vm::jit::FunctionId>,
-  /// Avoid feedback-map traffic after a chunk has requested compilation.
-  pub(super) last_hot_chunk: usize,
-  pub(super) hot_chunks: std::collections::HashSet<usize>,
+  /// Avoid feedback-map traffic after a code has requested compilation.
+  pub(super) last_hot_function: usize,
+  pub(super) hot_functions: std::collections::HashSet<usize>,
   pub(super) jit: crate::vm::jit::JitRuntime,
   pub(super) jit_stats: crate::vm::jit::JitStats,
 }

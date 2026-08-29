@@ -10,7 +10,7 @@ use std::rc::Rc;
 
 fn run(source: &str) {
   let session = Parser::parse_source(source).expect("ECMAScript correctness fixture must parse");
-  let chunk = compiler::compile_session(&session).expect("fixture must compile");
+  let code = compiler::compile_session(&session).expect("fixture must compile");
   let globals = Rc::new(RefCell::new(ObjectData::new()));
   globals.borrow_mut().properties.insert(
     PropertyKey::String("globalThis".to_string().into()),
@@ -18,7 +18,7 @@ fn run(source: &str) {
   );
   runtime_utils::install_minimal_kernel_constructors(&globals);
   let mut vm = Vm::new(globals);
-  vm.run(chunk)
+  vm.run(code)
     .expect("ECMAScript correctness fixture failed");
 }
 

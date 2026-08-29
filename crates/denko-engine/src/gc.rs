@@ -1064,7 +1064,7 @@ fn clear_promise(state: &Rc<RefCell<PromiseState>>) {
 mod tests {
   use super::*;
 
-  use crate::bytecode::{Chunk, FunctionProto};
+  use crate::bytecode::{Chunk, Function};
 
   use crate::binding::BindingCell;
 
@@ -1086,12 +1086,12 @@ mod tests {
   }
 
   fn make_dummy_closure(env: crate::closure_environment::ClosureEnvironment) -> Value {
-    let proto = Rc::new(FunctionProto {
+    let proto = Rc::new(Function {
       name: "gc_test".to_string(),
       span: Span::new(0, 0),
       arity: 0,
       length: 0,
-      chunk: Arc::new(Chunk::new(Arc::new(String::new()))),
+      code: Arc::new(Chunk::new(Arc::new(String::new()))),
       slot_types: Vec::new(),
       slot_names: Vec::new(),
       lexical_tdz: Vec::new(),

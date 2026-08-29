@@ -452,7 +452,7 @@ impl ModuleLoader {
       module.specifier.clone(),
       dependencies.clone(),
       module_index,
-      module.chunk,
+      module.code,
       declaration_source,
       content_hash,
       host_initialized,

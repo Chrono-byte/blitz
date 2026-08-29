@@ -12,7 +12,7 @@ use std::ptr::NonNull;
 pub(crate) struct JitFrame {
   pub(crate) vm: *mut crate::vm::state::Vm,
   pub(crate) function_id: u64,
-  pub(crate) vm_pc: usize,
+  pub(crate) resume_pc: usize,
   pub(crate) registers: *mut Value,
   pub(crate) register_count: usize,
   pub(crate) result: *mut Value,
@@ -28,7 +28,7 @@ pub(crate) struct JitFrame {
 const _: () = {
   assert!(std::mem::offset_of!(JitFrame, vm) == 0);
   assert!(std::mem::offset_of!(JitFrame, function_id) == 8);
-  assert!(std::mem::offset_of!(JitFrame, vm_pc) == 16);
+  assert!(std::mem::offset_of!(JitFrame, resume_pc) == 16);
   assert!(std::mem::offset_of!(JitFrame, registers) == 24);
   assert!(std::mem::offset_of!(JitFrame, result) == 40);
   assert!(std::mem::offset_of!(JitFrame, arguments) == 48);
@@ -36,7 +36,7 @@ const _: () = {
   assert!(std::mem::size_of::<JitFrame>() == 80);
 };
 
-/// Frame for leaf calls that cannot resume in the interpreter.
+/// CallFrame for leaf calls that cannot resume in the interpreter.
 #[repr(C)]
 pub(crate) struct DirectCallFrame {
   pub(crate) result: *mut Value,
@@ -190,10 +190,10 @@ pub(crate) unsafe extern "C" fn denko_jit_materialize_number_register(
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn denko_jit_set_resume_pc(
   frame: *mut JitFrame,
-  vm_pc: u32,
+  resume_pc: u32,
 ) -> JitExitCode {
   // SAFETY: generated code passes a valid frame for the duration of the call.
-  unsafe { (*frame).vm_pc = vm_pc as usize };
+  unsafe { (*frame).resume_pc = resume_pc as usize };
   JIT_EXIT_INTERPRETER
 }
 
@@ -235,7 +235,7 @@ pub(crate) unsafe extern "C" fn denko_jit_select_conditional_block(
       2 => matches!(value, Value::Null | Value::Undefined),
       _ => return JIT_EXIT_EXCEPTION,
     };
-    (*frame).vm_pc = if take { taken_pc } else { fallthrough_pc } as usize;
+    (*frame).resume_pc = if take { taken_pc } else { fallthrough_pc } as usize;
   }
   JIT_EXIT_NEXT_BLOCK
 }
@@ -257,9 +257,9 @@ pub(crate) unsafe extern "C" fn denko_jit_set_result_from_register(
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn denko_jit_set_next_block(
   frame: *mut JitFrame,
-  vm_pc: u32,
+  resume_pc: u32,
 ) -> JitExitCode {
-  unsafe { (*frame).vm_pc = vm_pc as usize };
+  unsafe { (*frame).resume_pc = resume_pc as usize };
   JIT_EXIT_NEXT_BLOCK
 }
 
@@ -636,23 +636,23 @@ impl NativeCode {
   #[cfg(all(unix, target_arch = "x86_64"))]
   pub(crate) fn resume_numbers(
     values: &[(u32, f64)],
-    vm_pc: u32,
+    resume_pc: u32,
   ) -> Result<Self, String> {
-    Self::materialize_numbers(values, vm_pc, RuntimeHelperId::SetResumePc)
+    Self::materialize_numbers(values, resume_pc, RuntimeHelperId::SetResumePc)
   }
 
   #[cfg(all(unix, target_arch = "x86_64"))]
   pub(crate) fn next_block_numbers(
     values: &[(u32, f64)],
-    vm_pc: u32,
+    resume_pc: u32,
   ) -> Result<Self, String> {
-    Self::materialize_numbers(values, vm_pc, RuntimeHelperId::SetNextBlock)
+    Self::materialize_numbers(values, resume_pc, RuntimeHelperId::SetNextBlock)
   }
 
   #[cfg(all(unix, target_arch = "x86_64"))]
   fn materialize_numbers(
     values: &[(u32, f64)],
-    vm_pc: u32,
+    resume_pc: u32,
     exit_helper: RuntimeHelperId,
   ) -> Result<Self, String> {
     let mut bytes = vec![0x41, 0x54, 0x49, 0x89, 0xFC];
@@ -672,7 +672,7 @@ impl NativeCode {
       });
     }
     bytes.extend_from_slice(&[0x4C, 0x89, 0xE7, 0xBE]);
-    bytes.extend_from_slice(&vm_pc.to_le_bytes());
+    bytes.extend_from_slice(&resume_pc.to_le_bytes());
     bytes.extend_from_slice(&[0x48, 0xB8]);
     let offset = bytes.len() as u32;
     bytes.extend_from_slice(&[0; 8]);
@@ -748,9 +748,9 @@ impl NativeCode {
 
   #[cfg(all(unix, target_arch = "x86_64"))]
   #[cfg(test)]
-  pub(crate) fn next_block(vm_pc: u32) -> Result<Self, String> {
+  pub(crate) fn next_block(resume_pc: u32) -> Result<Self, String> {
     let mut bytes = vec![0x48, 0x83, 0xEC, 0x08, 0xBE];
-    bytes.extend_from_slice(&vm_pc.to_le_bytes());
+    bytes.extend_from_slice(&resume_pc.to_le_bytes());
     bytes.extend_from_slice(&[0x48, 0xB8]);
     let offset = bytes.len() as u32;
     bytes.extend_from_slice(&[0; 8]);
@@ -975,7 +975,7 @@ mod tests {
     let mut frame = JitFrame {
       vm: std::ptr::null_mut(),
       function_id: 0,
-      vm_pc: 0,
+      resume_pc: 0,
       registers: std::ptr::null_mut(),
       register_count: 0,
       result: &mut result,
@@ -996,7 +996,7 @@ mod tests {
     let mut frame = JitFrame {
       vm: std::ptr::null_mut(),
       function_id: 0,
-      vm_pc: 0,
+      resume_pc: 0,
       registers: std::ptr::null_mut(),
       register_count: 0,
       result: &mut result,
@@ -1016,7 +1016,7 @@ mod tests {
     let mut frame = JitFrame {
       vm: std::ptr::null_mut(),
       function_id: 0,
-      vm_pc: 0,
+      resume_pc: 0,
       registers: std::ptr::null_mut(),
       register_count: 0,
       result: &mut result,

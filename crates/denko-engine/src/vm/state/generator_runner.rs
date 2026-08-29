@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MPL-2.0
-use super::{RiscExecutionState, Vm, YieldStarResume};
+use super::{RegisterState, Vm, YieldStarResume};
 use crate::value::Value;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -13,8 +13,8 @@ pub(crate) enum GeneratorStatus {
 pub(crate) struct GeneratorRunner {
   /// The VM executing the generator.
   pub(crate) vm: Vm,
-  /// Persistent register file and spills for the suspended function.
-  pub(crate) risc_state: RiscExecutionState,
+  /// Persistent register file and spill_slots for the suspended function.
+  pub(crate) register_state: RegisterState,
   pub(crate) status: GeneratorStatus,
 }
 
@@ -26,7 +26,7 @@ impl GeneratorRunner {
     if let Some(state) = &mut self.vm.execution.active.yield_star {
       state.resume = Some(YieldStarResume::Next(value));
     } else {
-      self.risc_state.resume_with(value);
+      self.register_state.resume_with(value);
     }
   }
 
@@ -56,7 +56,7 @@ impl GeneratorRunner {
   pub(crate) fn complete(&mut self) {
     self
       .vm
-      .discard_suspended_risc_activation(&mut self.risc_state);
+      .discard_suspended_activation(&mut self.register_state);
     self.status = GeneratorStatus::Completed;
   }
 }

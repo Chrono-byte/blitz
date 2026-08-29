@@ -2,17 +2,15 @@
 //! Deterministic wire encoding for host-neutral prelinked module graphs.
 //!
 //! This format is deliberately separate from [`crate::bytecode_bundle`]. It
-//! carries graph/linking metadata as well as the complete chunk tree. Version
+//! carries graph/linking metadata as well as the complete code tree. Version
 //! Version 3 stores source text once per module instead of repeating it in every
-//! nested chunk, version 4 stores function lengths, and version 5 widens
+//! nested code, version 4 stores function lengths, and version 5 widens
 //! captured local indices. Its decoder bounds every length before allocating
 //! and retains read compatibility with version 2 bundles.
 //! Decoded graphs are passed through [`PrelinkedModuleGraph::validate`] before
 //! they are returned.
 
-use crate::bytecode::{
-  BytecodeVersion, Chunk, Constant, FinallyHandler, FunctionProto, UpvalueSpec,
-};
+use crate::bytecode::{BytecodeVersion, Chunk, Constant, FinallyHandler, Function, UpvalueSpec};
 use crate::prelinked::{
   PrelinkedExport, PrelinkedGraphError, PrelinkedImport, PrelinkedModule, PrelinkedModuleGraph,
 };
@@ -198,8 +196,8 @@ fn encode_module(
     writer.string(&import.local_name, StringKind::Name)?;
     writer.u32(import.binding_id);
   }
-  writer.string(&module.chunk.source_text, StringKind::Source)?;
-  encode_chunk(writer, &module.chunk, &module.chunk.source_text, 0)
+  writer.string(&module.code.source_text, StringKind::Source)?;
+  encode_code(writer, &module.code, &module.code.source_text, 0)
 }
 
 fn decode_graph(reader: &mut Reader<'_>) -> Result<PrelinkedModuleGraph, PrelinkedGraphCodecError> {
@@ -270,7 +268,7 @@ fn decode_module(reader: &mut Reader<'_>) -> Result<PrelinkedModule, PrelinkedGr
   } else {
     None
   };
-  let chunk = decode_chunk(reader, 0, module_source.as_ref())?;
+  let code = decode_code(reader, 0, module_source.as_ref())?;
   Ok(PrelinkedModule {
     specifier,
     module_index,
@@ -278,76 +276,76 @@ fn decode_module(reader: &mut Reader<'_>) -> Result<PrelinkedModule, PrelinkedGr
     dependencies,
     exports,
     imports,
-    chunk,
+    code,
   })
 }
 
-fn encode_chunk(
+fn encode_code(
   writer: &mut Writer,
-  chunk: &Chunk,
+  code: &Chunk,
   module_source: &str,
   depth: usize,
 ) -> Result<(), PrelinkedGraphCodecError> {
   if depth > MAX_CHUNK_DEPTH {
-    return Err(invalid("chunk nesting exceeds the supported depth"));
+    return Err(invalid("code nesting exceeds the supported depth"));
   }
-  if chunk.source_text.as_str() != module_source {
-    return Err(invalid("all chunks in a module must share source text"));
+  if code.source_text.as_str() != module_source {
+    return Err(invalid("all codes in a module must share source text"));
   }
-  writer.u8(chunk.version as u8);
-  writer.vector_len(chunk.code.len(), MAX_VECTOR_ITEMS, "instruction count")?;
-  for word in &chunk.code {
+  writer.u8(code.version as u8);
+  writer.vector_len(code.words.len(), MAX_VECTOR_ITEMS, "instruction count")?;
+  for word in &code.words {
     writer.u32(*word);
   }
-  writer.vector_len(chunk.constants.len(), MAX_VECTOR_ITEMS, "constant count")?;
-  for constant in &chunk.constants {
+  writer.vector_len(code.constants.len(), MAX_VECTOR_ITEMS, "constant count")?;
+  for constant in &code.constants {
     encode_constant(writer, constant)?;
   }
-  writer.vector_len(chunk.functions.len(), MAX_VECTOR_ITEMS, "function count")?;
-  for function in &chunk.functions {
+  writer.vector_len(code.functions.len(), MAX_VECTOR_ITEMS, "function count")?;
+  for function in &code.functions {
     encode_function(writer, function, module_source, depth + 1)?;
   }
-  writer.vector_len(chunk.lines.len(), MAX_VECTOR_ITEMS, "line count")?;
-  for line in &chunk.lines {
+  writer.vector_len(code.lines.len(), MAX_VECTOR_ITEMS, "line count")?;
+  for line in &code.lines {
     writer.u32(*line);
   }
-  encode_optional_types(writer, &chunk.root_slot_types, 0)?;
-  encode_optional_strings(writer, &chunk.root_slot_names)?;
-  encode_bools(writer, &chunk.root_lexical_tdz)?;
-  encode_bools(writer, &chunk.root_slot_immutable)?;
-  writer.u16(chunk.risc_spill_count);
-  writer.u16(chunk.risc_value_spill_count);
-  writer.bool(chunk.root_strict);
-  writer.bool(chunk.allow_new_target);
-  writer.bool(chunk.allow_super);
+  encode_optional_types(writer, &code.root_slot_types, 0)?;
+  encode_optional_strings(writer, &code.root_slot_names)?;
+  encode_bools(writer, &code.root_lexical_tdz)?;
+  encode_bools(writer, &code.root_slot_immutable)?;
+  writer.u16(code.spill_slot_count);
+  writer.u16(code.value_spill_slot_count);
+  writer.bool(code.root_strict);
+  writer.bool(code.allow_new_target);
+  writer.bool(code.allow_super);
   writer.vector_len(
-    chunk.finally_handlers.len(),
+    code.finally_handlers.len(),
     MAX_VECTOR_ITEMS,
     "finally handler count",
   )?;
-  for handler in &chunk.finally_handlers {
-    writer.usize(handler.push_ip, "finally push instruction")?;
-    writer.usize(handler.finalizer_ip, "finalizer instruction")?;
+  for handler in &code.finally_handlers {
+    writer.usize(handler.push_pc, "finally push instruction")?;
+    writer.usize(handler.finalizer_pc, "finalizer instruction")?;
     writer.usize(handler.return_slot, "finally return slot")?;
     writer.usize(handler.did_return_slot, "finally did-return slot")?;
   }
   Ok(())
 }
 
-fn decode_chunk(
+fn decode_code(
   reader: &mut Reader<'_>,
   depth: usize,
   module_source: Option<&Arc<String>>,
 ) -> Result<Chunk, PrelinkedGraphCodecError> {
   if depth > MAX_CHUNK_DEPTH {
-    return Err(invalid("chunk nesting exceeds the supported depth"));
+    return Err(invalid("code nesting exceeds the supported depth"));
   }
-  reader.chunks = reader
-    .chunks
+  reader.codes = reader
+    .codes
     .checked_add(1)
-    .ok_or_else(|| invalid("chunk count overflow"))?;
-  if reader.chunks > MAX_CHUNKS {
-    return Err(limit("chunk count", reader.chunks, MAX_CHUNKS));
+    .ok_or_else(|| invalid("code count overflow"))?;
+  if reader.codes > MAX_CHUNKS {
+    return Err(limit("code count", reader.codes, MAX_CHUNKS));
   }
   let version = decode_bytecode_version(reader.u8()?)?;
   let code_count = reader.vector_len(MAX_VECTOR_ITEMS, "instruction count")?;
@@ -389,8 +387,8 @@ fn decode_chunk(
   let root_slot_names = decode_optional_strings(reader)?;
   let root_lexical_tdz = decode_bools(reader)?;
   let root_slot_immutable = decode_bools(reader)?;
-  let risc_spill_count = reader.u16()?;
-  let risc_value_spill_count = reader.u16()?;
+  let spill_slot_count = reader.u16()?;
+  let value_spill_slot_count = reader.u16()?;
   let root_strict = reader.bool()?;
   let allow_new_target = reader.bool()?;
   let allow_super = reader.bool()?;
@@ -398,15 +396,15 @@ fn decode_chunk(
   let mut finally_handlers = Vec::with_capacity(handler_count);
   for _ in 0..handler_count {
     finally_handlers.push(FinallyHandler {
-      push_ip: reader.portable_usize("finally push instruction")?,
-      finalizer_ip: reader.portable_usize("finalizer instruction")?,
+      push_pc: reader.portable_usize("finally push instruction")?,
+      finalizer_pc: reader.portable_usize("finalizer instruction")?,
       return_slot: reader.portable_usize("finally return slot")?,
       did_return_slot: reader.portable_usize("finally did-return slot")?,
     });
   }
   Ok(Chunk {
     version,
-    code,
+    words: code,
     constants,
     functions,
     lines,
@@ -416,8 +414,8 @@ fn decode_chunk(
     root_lexical_tdz,
     root_slot_immutable,
     root_function_declarations: Vec::new(),
-    risc_spill_count,
-    risc_value_spill_count,
+    spill_slot_count,
+    value_spill_slot_count,
     root_strict,
     allow_new_target,
     allow_super,
@@ -427,7 +425,7 @@ fn decode_chunk(
 
 fn encode_function(
   writer: &mut Writer,
-  function: &FunctionProto,
+  function: &Function,
   module_source: &str,
   depth: usize,
 ) -> Result<(), PrelinkedGraphCodecError> {
@@ -445,7 +443,7 @@ fn encode_function(
     u64::try_from(function.length)
       .map_err(|_| invalid("function length does not fit portable u64"))?,
   );
-  encode_chunk(writer, &function.chunk, module_source, depth)?;
+  encode_code(writer, &function.code, module_source, depth)?;
   encode_optional_types(writer, &function.slot_types, 0)?;
   encode_optional_strings(writer, &function.slot_names)?;
   encode_bools(writer, &function.lexical_tdz)?;
@@ -480,7 +478,7 @@ fn decode_function(
   reader: &mut Reader<'_>,
   depth: usize,
   module_source: Option<&Arc<String>>,
-) -> Result<FunctionProto, PrelinkedGraphCodecError> {
+) -> Result<Function, PrelinkedGraphCodecError> {
   let name = reader.string(StringKind::Name)?;
   let span_start = reader.u32()?;
   let span_end = reader.u32()?;
@@ -496,7 +494,7 @@ fn decode_function(
   if length > MAX_FUNCTION_ARITY {
     return Err(limit("function length", length, MAX_FUNCTION_ARITY));
   }
-  let chunk = Arc::new(decode_chunk(reader, depth, module_source)?);
+  let code = Arc::new(decode_code(reader, depth, module_source)?);
   let slot_types = decode_optional_types(reader, 0)?;
   let slot_names = decode_optional_strings(reader)?;
   let lexical_tdz = decode_bools(reader)?;
@@ -540,12 +538,12 @@ fn decode_function(
     let _ = reader.u8()?;
     let _ = reader.u8()?;
   }
-  Ok(FunctionProto {
+  Ok(Function {
     name,
     span: Span::new(span_start, span_end),
     arity,
     length,
-    chunk,
+    code,
     slot_types,
     slot_names,
     lexical_tdz,
@@ -1264,7 +1262,7 @@ struct Reader<'a> {
   bytecode_bytes: usize,
   dependency_count: usize,
   binding_count: usize,
-  chunks: usize,
+  codes: usize,
 }
 
 impl<'a> Reader<'a> {
@@ -1281,7 +1279,7 @@ impl<'a> Reader<'a> {
       bytecode_bytes: 0,
       dependency_count: 0,
       binding_count: 0,
-      chunks: 0,
+      codes: 0,
     }
   }
 
@@ -1524,15 +1522,15 @@ impl<'a> Reader<'a> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::bytecode::{Op, encode_risc_aux16};
+  use crate::bytecode::{Opcode, encode_aux16_instruction};
   use crate::prelinked::PRELINKED_MODULE_GRAPH_VERSION;
   use std::collections::HashMap;
 
   fn graph() -> PrelinkedModuleGraph {
     let source = Arc::new(crate::js!(module, "export const value = 1;").to_string());
     let mut nested = Chunk::new(Arc::clone(&source));
-    nested.write_instr(Op::PushHandler as u32, 1);
-    nested.write_instr(Op::Return as u32, 1);
+    nested.write_instr(Opcode::PushHandler as u32, 1);
+    nested.write_instr(Opcode::Return as u32, 1);
     nested.constants = vec![
       Constant::Number(f64::from_bits(0x7ff8_0000_0000_0042)),
       Constant::BigInt(BigInt::from(-123_i64)),
@@ -1545,31 +1543,31 @@ mod tests {
     nested.root_slot_names = vec![Some("nested".into())];
     nested.root_lexical_tdz = vec![true];
     nested.root_slot_immutable = vec![true];
-    nested.risc_spill_count = 4;
-    nested.risc_value_spill_count = 3;
+    nested.spill_slot_count = 4;
+    nested.value_spill_slot_count = 3;
     nested.root_strict = true;
     nested.allow_new_target = true;
     nested.allow_super = true;
     nested.finally_handlers.push(FinallyHandler {
-      push_ip: 0,
-      finalizer_ip: 1,
+      push_pc: 0,
+      finalizer_pc: 1,
       return_slot: 2,
       did_return_slot: 3,
     });
 
     let mut root = Chunk::new(source);
-    root.write_instr(encode_risc_aux16(Op::Undefined, 0, 1), 0);
-    root.write_instr(encode_risc_aux16(Op::Return, 0, 1), 0);
+    root.write_instr(encode_aux16_instruction(Opcode::Undefined, 0, 1), 0);
+    root.write_instr(encode_aux16_instruction(Opcode::Return, 0, 1), 0);
     root.root_slot_types = vec![None, None];
     root.root_slot_names = vec![Some("root".into()), None];
     root.root_lexical_tdz = vec![false, false];
     root.root_slot_immutable = vec![false, false];
-    root.functions.push(FunctionProto {
+    root.functions.push(Function {
       name: "nested".into(),
       span: Span::new(0, 24),
       arity: 2,
       length: 1,
-      chunk: Arc::new(nested),
+      code: Arc::new(nested),
       slot_types: vec![
         Some(Type::Literal(LiteralType::String("x".into()))),
         None,
@@ -1618,7 +1616,7 @@ mod tests {
             binding_id: 0,
           }],
           imports: vec![],
-          chunk: Chunk::new(Arc::new(
+          code: Chunk::new(Arc::new(
             crate::js!(module, "export const value = 1;").into(),
           )),
         },
@@ -1635,7 +1633,7 @@ mod tests {
             local_name: "value".into(),
             binding_id: 0,
           }],
-          chunk: root,
+          code: root,
         },
       ],
       binding_count: 1,
@@ -1664,27 +1662,27 @@ mod tests {
     assert_eq!(decoded.modules[1].imports[0].binding_id, 0);
     assert!(decoded.modules.iter().all(|module| {
       module
-        .chunk
+        .code
         .functions
         .iter()
-        .all(|function| Arc::ptr_eq(&module.chunk.source_text, &function.chunk.source_text))
+        .all(|function| Arc::ptr_eq(&module.code.source_text, &function.code.source_text))
     }));
     assert_eq!(
-      decoded.modules[1].chunk.source_text.as_str(),
+      decoded.modules[1].code.source_text.as_str(),
       "export const value = 1;"
     );
     assert_eq!(
-      decoded.modules[1].chunk.functions[0]
-        .chunk
-        .risc_value_spill_count,
+      decoded.modules[1].code.functions[0]
+        .code
+        .value_spill_slot_count,
       3
     );
-    assert_eq!(decoded.modules[1].chunk.constants.len(), 0);
-    assert_eq!(decoded.modules[1].chunk.functions[0].arity, 2);
-    assert_eq!(decoded.modules[1].chunk.functions[0].length, 1);
+    assert_eq!(decoded.modules[1].code.constants.len(), 0);
+    assert_eq!(decoded.modules[1].code.functions[0].arity, 2);
+    assert_eq!(decoded.modules[1].code.functions[0].length, 1);
     assert_eq!(
-      decoded.modules[1].chunk.functions[0]
-        .chunk
+      decoded.modules[1].code.functions[0]
+        .code
         .constants
         .len(),
       3
@@ -1694,7 +1692,7 @@ mod tests {
   #[test]
   fn rejects_mixed_sources_within_a_module() {
     let mut graph = graph();
-    Arc::make_mut(&mut graph.modules[1].chunk.functions[0].chunk).source_text =
+    Arc::make_mut(&mut graph.modules[1].code.functions[0].code).source_text =
       Arc::new(crate::js!("function nested() {}").into());
     assert!(
       matches!(encode(&graph), Err(PrelinkedGraphCodecError::InvalidData(message)) if message.contains("share source text"))
@@ -1750,7 +1748,7 @@ mod tests {
   #[test]
   fn rejects_function_arity_that_would_force_an_unbounded_frame() {
     let mut graph = graph();
-    graph.modules[1].chunk.functions[0].arity = MAX_FUNCTION_ARITY + 1;
+    graph.modules[1].code.functions[0].arity = MAX_FUNCTION_ARITY + 1;
     assert!(matches!(
       encode(&graph),
       Err(PrelinkedGraphCodecError::LimitExceeded {

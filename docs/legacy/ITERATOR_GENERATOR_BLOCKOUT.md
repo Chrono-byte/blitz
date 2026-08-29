@@ -16,14 +16,14 @@ Current status
 Work blocks
 -----------
 1. Generator object runtime type
-   - Add internal generator record (`state`, `suspended_ip`, `frame snapshot`,
+   - Add internal generator record (`state`, `resume_pc`, `frame snapshot`,
      `done`, `last_sent`).
    - Expose `next(value)`, `throw(error)`, `return(value)` methods.
 
 2. VM suspension/resume
-   - Teach `Op::Yield` to produce `{ value, done: false }` and suspend.
-   - Teach `Op::YieldStar` delegation protocol.
-   - Add resume entrypoint that restores frame/locals/ip and continues.
+   - Teach `Opcode::Yield` to produce `{ value, done: false }` and suspend.
+   - Teach `Opcode::YieldStar` delegation protocol.
+   - Add resume entrypoint that restores frame/locals/PC and continues.
 
 3. Function call semantics
    - Calls to generator functions should return generator objects and not run
@@ -46,7 +46,7 @@ Work blocks
 Suggested order
 ---------------
 1) Generator runtime type + `next` scaffolding.
-2) `Op::Yield` suspension path.
+2) `Opcode::Yield` suspension path.
 3) `yield*` and iterator-close semantics.
 4) Compiler/runtime updates for `for..of` and spread to rely on protocol.
 5) Test262 subset enablement for generator/iterator features.

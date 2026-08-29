@@ -7,34 +7,34 @@
 //! [`VerifiedTypedFunction`]. Native emitters never accept unchecked IR.
 
 use super::NumericBinaryOp;
-use crate::bytecode::{Chunk, Op, decode_rd, decode_risc_aux16, decode_rs};
+use crate::bytecode::{Chunk, Instruction, Opcode, decode_aux16, decode_rd, decode_rs};
 use std::hash::{Hash, Hasher};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct ValueId(u32);
+pub(crate) struct VirtualValue(u32);
 
-impl ValueId {
+impl VirtualValue {
   pub(crate) fn index(self) -> usize {
     self.0 as usize
   }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct CompilerChunk {
+pub(crate) struct FunctionSnapshot {
   code: Box<[u32]>,
   parameter_count: u16,
 }
 
-impl CompilerChunk {
-  pub(crate) fn from_chunk(
-    chunk: &Chunk,
+impl FunctionSnapshot {
+  pub(crate) fn from_code(
+    code: &Chunk,
     parameter_count: usize,
   ) -> Result<Self, IrError> {
     if parameter_count > 2 {
       return Err(IrError::TooManyParameters);
     }
     Ok(Self {
-      code: chunk.code.clone().into_boxed_slice(),
+      code: code.words.clone().into_boxed_slice(),
       parameter_count: u16::try_from(parameter_count).map_err(|_| IrError::TooManyParameters)?,
     })
   }
@@ -51,10 +51,10 @@ impl CompilerChunk {
       return None;
     };
     match opcode(*binary) {
-      Some(Op::Add) => Some(NumericBinaryOp::Add),
-      Some(Op::Sub) => Some(NumericBinaryOp::Subtract),
-      Some(Op::Mul) => Some(NumericBinaryOp::Multiply),
-      Some(Op::Div) => Some(NumericBinaryOp::Divide),
+      Some(Opcode::Add) => Some(NumericBinaryOp::Add),
+      Some(Opcode::Sub) => Some(NumericBinaryOp::Subtract),
+      Some(Opcode::Mul) => Some(NumericBinaryOp::Multiply),
+      Some(Opcode::Div) => Some(NumericBinaryOp::Divide),
       _ => None,
     }
   }
@@ -83,8 +83,8 @@ pub(crate) enum SemanticValue {
   },
   JsNumericBinary {
     operation: NumericBinaryOp,
-    left: ValueId,
-    right: ValueId,
+    left: VirtualValue,
+    right: VirtualValue,
     origin: usize,
   },
 }
@@ -92,22 +92,22 @@ pub(crate) enum SemanticValue {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SemanticFunction {
   values: Vec<SemanticValue>,
-  return_value: ValueId,
+  return_value: VirtualValue,
 }
 
 impl SemanticFunction {
-  pub(crate) fn decode(snapshot: &CompilerChunk) -> Result<Self, IrError> {
+  pub(crate) fn decode(snapshot: &FunctionSnapshot) -> Result<Self, IrError> {
     let [left_load, right_load, binary, return_word] = snapshot.code.as_ref() else {
       return Err(IrError::UnsupportedBody);
     };
-    if opcode(*left_load) != Some(Op::LoadLocal)
-      || opcode(*right_load) != Some(Op::LoadLocal)
-      || opcode(*return_word) != Some(Op::Return)
+    if opcode(*left_load) != Some(Opcode::LoadLocal)
+      || opcode(*right_load) != Some(Opcode::LoadLocal)
+      || opcode(*return_word) != Some(Opcode::Return)
     {
       return Err(IrError::UnsupportedBody);
     }
-    let left_slot = decode_risc_aux16(*left_load);
-    let right_slot = decode_risc_aux16(*right_load);
+    let left_slot = decode_aux16(*left_load);
+    let right_slot = decode_aux16(*right_load);
     if left_slot != 0
       || right_slot != 1
       || snapshot.parameter_count < 2
@@ -117,13 +117,13 @@ impl SemanticFunction {
     {
       return Err(IrError::UnsupportedBody);
     }
-    let left = ValueId(0);
-    let right = ValueId(1);
+    let left = VirtualValue(0);
+    let right = VirtualValue(1);
     let operation = match opcode(*binary) {
-      Some(Op::Add) => NumericBinaryOp::Add,
-      Some(Op::Sub) => NumericBinaryOp::Subtract,
-      Some(Op::Mul) => NumericBinaryOp::Multiply,
-      Some(Op::Div) => NumericBinaryOp::Divide,
+      Some(Opcode::Add) => NumericBinaryOp::Add,
+      Some(Opcode::Sub) => NumericBinaryOp::Subtract,
+      Some(Opcode::Mul) => NumericBinaryOp::Multiply,
+      Some(Opcode::Div) => NumericBinaryOp::Divide,
       _ => return Err(IrError::UnsupportedBody),
     };
     Ok(Self {
@@ -137,7 +137,7 @@ impl SemanticFunction {
           origin: 2,
         },
       ],
-      return_value: ValueId(2),
+      return_value: VirtualValue(2),
     })
   }
 }
@@ -150,15 +150,15 @@ pub(crate) enum TypedValue {
   },
   F64Binary {
     operation: NumericBinaryOp,
-    left: ValueId,
-    right: ValueId,
+    left: VirtualValue,
+    right: VirtualValue,
   },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TypedFunction {
   values: Vec<TypedValue>,
-  return_value: ValueId,
+  return_value: VirtualValue,
   exits: Vec<ExitState>,
 }
 
@@ -180,7 +180,10 @@ impl VerifiedTypedFunction {
     else {
       return Err(IrError::UnsupportedBody);
     };
-    if semantic.return_value != ValueId(2) || *left != ValueId(0) || *right != ValueId(1) {
+    if semantic.return_value != VirtualValue(2)
+      || *left != VirtualValue(0)
+      || *right != VirtualValue(1)
+    {
       return Err(IrError::InvalidSsa);
     }
     Self::verify(TypedFunction {
@@ -195,11 +198,11 @@ impl VerifiedTypedFunction {
         },
         TypedValue::F64Binary {
           operation: *operation,
-          left: ValueId(0),
-          right: ValueId(1),
+          left: VirtualValue(0),
+          right: VirtualValue(1),
         },
       ],
-      return_value: ValueId(2),
+      return_value: VirtualValue(2),
       exits: vec![ExitState {
         outcome: ExitOutcome::Interpret,
         resume: ResumePoint::FunctionEntry,
@@ -238,7 +241,7 @@ impl VerifiedTypedFunction {
     Ok(Self(function))
   }
 
-  pub(crate) fn return_value(&self) -> ValueId {
+  pub(crate) fn return_value(&self) -> VirtualValue {
     self.0.return_value
   }
 
@@ -271,8 +274,10 @@ pub(crate) enum IrError {
   InvalidSsa,
 }
 
-fn opcode(word: u32) -> Option<Op> {
-  Op::from_byte((word & 0xff) as u8)
+fn opcode(word: u32) -> Option<Opcode> {
+  Instruction::decode(word)
+    .ok()
+    .map(|instruction| instruction.opcode)
 }
 
 #[cfg(test)]
@@ -280,12 +285,12 @@ mod tests {
   use super::*;
   use crate::{compiler, parser::Parser};
 
-  fn add_snapshot() -> CompilerChunk {
+  fn add_snapshot() -> FunctionSnapshot {
     let session = Parser::parse_source("function add(left, right) { return left + right; }")
       .expect("source parses");
-    let chunk = compiler::compile_session(&session).expect("source compiles");
-    let proto = &chunk.functions[0];
-    CompilerChunk::from_chunk(&proto.chunk, proto.arity).expect("snapshot")
+    let code = compiler::compile_session(&session).expect("source compiles");
+    let proto = &code.functions[0];
+    FunctionSnapshot::from_code(&proto.code, proto.arity).expect("snapshot")
   }
 
   #[test]
@@ -298,21 +303,21 @@ mod tests {
         SemanticValue::Parameter { index: 1 },
         SemanticValue::JsNumericBinary {
           operation: NumericBinaryOp::Add,
-          left: ValueId(0),
-          right: ValueId(1),
+          left: VirtualValue(0),
+          right: VirtualValue(1),
           origin: 2,
         },
       ]
     );
     let typed = VerifiedTypedFunction::specialize_numeric_binary(&semantic).expect("typed SSA");
-    assert_eq!(typed.return_value(), ValueId(2));
+    assert_eq!(typed.return_value(), VirtualValue(2));
     assert_eq!(typed.exits().len(), 1);
   }
 
   #[test]
   fn rejects_unsupported_binary_and_malformed_typed_ssa() {
     let mut snapshot = add_snapshot();
-    snapshot.code[2] = (snapshot.code[2] & !0xff) | Op::Mod as u32;
+    snapshot.code[2] = (snapshot.code[2] & !0xff) | Opcode::Mod as u32;
     assert_eq!(
       SemanticFunction::decode(&snapshot),
       Err(IrError::UnsupportedBody)
@@ -320,10 +325,10 @@ mod tests {
     let malformed = TypedFunction {
       values: vec![TypedValue::F64Binary {
         operation: NumericBinaryOp::Add,
-        left: ValueId(0),
-        right: ValueId(0),
+        left: VirtualValue(0),
+        right: VirtualValue(0),
       }],
-      return_value: ValueId(0),
+      return_value: VirtualValue(0),
       exits: vec![ExitState {
         outcome: ExitOutcome::Interpret,
         resume: ResumePoint::FunctionEntry,
@@ -349,10 +354,10 @@ mod tests {
   fn rejects_numeric_binaries_with_more_than_two_parameters() {
     let session = Parser::parse_source("function add(left, right, extra) { return left + right; }")
       .expect("source parses");
-    let chunk = compiler::compile_session(&session).expect("source compiles");
-    let proto = &chunk.functions[0];
+    let code = compiler::compile_session(&session).expect("source compiles");
+    let proto = &code.functions[0];
     assert_eq!(
-      CompilerChunk::from_chunk(&proto.chunk, proto.arity),
+      FunctionSnapshot::from_code(&proto.code, proto.arity),
       Err(IrError::TooManyParameters)
     );
   }
@@ -360,6 +365,6 @@ mod tests {
   #[test]
   fn compiler_snapshot_is_send_and_static() {
     fn assert_send_static<T: Send + 'static>() {}
-    assert_send_static::<CompilerChunk>();
+    assert_send_static::<FunctionSnapshot>();
   }
 }

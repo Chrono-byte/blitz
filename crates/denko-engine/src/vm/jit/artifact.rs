@@ -268,14 +268,14 @@ pub(crate) fn emit_numeric_binary(
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::vm::jit::ir::{CompilerChunk, SemanticFunction};
+  use crate::vm::jit::ir::{FunctionSnapshot, SemanticFunction};
   use crate::{compiler, parser::Parser};
 
   fn artifact_for(source: &str) -> NativeArtifact {
     let session = Parser::parse_source(source).expect("source parses");
-    let chunk = compiler::compile_session(&session).expect("source compiles");
-    let proto = &chunk.functions[0];
-    let snapshot = CompilerChunk::from_chunk(&proto.chunk, proto.arity).expect("snapshot");
+    let code = compiler::compile_session(&session).expect("source compiles");
+    let proto = &code.functions[0];
+    let snapshot = FunctionSnapshot::from_code(&proto.code, proto.arity).expect("snapshot");
     let semantic = SemanticFunction::decode(&snapshot).expect("semantic SSA");
     let typed = VerifiedTypedFunction::specialize_numeric_binary(&semantic).expect("typed SSA");
     emit_numeric_binary(&typed).expect("artifact")

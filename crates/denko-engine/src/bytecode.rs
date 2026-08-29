@@ -2,9 +2,9 @@
 //! Bytecode representation and VM instruction set.
 //!
 //! This module defines the bytecode format used by the VM, including:
-//! - [`Op`] enum: All VM opcodes with safe conversions to/from `u8`
-//! - [`Chunk`] struct: Container for bytecode, constants, and function prototypes
-//! - [`FunctionProto`] struct: Metadata for compiled functions
+//! - [`Opcode`] enum: All VM opcodes with safe conversions to/from `u8`
+//! - [`Chunk`] struct: Instruction words, constants, and nested functions
+//! - [`Function`] struct: A compiled ECMAScript function and its metadata
 //!
 //! # Instruction Format
 //!
@@ -17,16 +17,16 @@
 //!
 //! Special cases:
 //! - Jump instructions: bits 8-31 contain i24 signed offset
-//! - RISC CompareJump: cond(3) | rs1(4) | rs2(4) | signed offset(13)
+//! - bytecode CompareJump: cond(3) | rs1(4) | rs2(4) | signed offset(13)
 //!
 //! # Example
 //!
 //! ```
-//! use denko::bytecode::{Chunk, Op};
+//! use denko::bytecode::{Chunk, Opcode};
 //! use std::sync::Arc;
 //!
-//! let mut chunk = Chunk::new(Arc::new(String::new()));
-//! chunk.write_instr(Op::Const as u32, 1); // constant index 0
+//! let mut code = Chunk::new(Arc::new(String::new()));
+//! code.write_instr(Opcode::Const as u32, 1); // constant index 0
 //! ```
 
 use crate::typecheck::Type;
@@ -36,6 +36,9 @@ use num_bigint::BigInt;
 use oxc_span::Span;
 use std::convert::TryFrom;
 use std::sync::Arc;
+
+pub type InstructionWord = u32;
+pub type InstructionIndex = usize;
 
 /// Description of a captured binding for a closure.
 #[derive(Clone, Debug)]
@@ -55,29 +58,137 @@ pub struct UpvalueSpec {
   pub sloppy_immutable_silent: bool,
 }
 
-/// Version marker carried by every bytecode chunk.
+/// Version marker carried by every chunk.
 ///
 /// Blitz has a single executable bytecode contract. The explicit marker is
-/// retained so serialized chunks can be rejected cleanly if the contract is
+/// retained so serialized code can be rejected cleanly if the contract is
 /// changed in the future.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum BytecodeVersion {
-  /// Fixed-width encoding interpreted with the 16-register RISC v2 semantics.
+  /// Fixed-width encoding interpreted with the 16-register bytecode v2 semantics.
   #[default]
   RiscV2 = 2,
 }
 
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Register {
+  R0,
+  R1,
+  R2,
+  R3,
+  R4,
+  R5,
+  R6,
+  R7,
+  R8,
+  R9,
+  R10,
+  R11,
+  R12,
+  R13,
+  R14,
+  R15,
+}
+
+impl Register {
+  pub const COUNT: usize = 16;
+
+  pub const fn index(self) -> usize {
+    self as usize
+  }
+
+  pub const fn encoding(self) -> u8 {
+    self as u8
+  }
+}
+
+impl TryFrom<u8> for Register {
+  type Error = u8;
+
+  fn try_from(value: u8) -> Result<Self, Self::Error> {
+    match value {
+      0 => Ok(Self::R0),
+      1 => Ok(Self::R1),
+      2 => Ok(Self::R2),
+      3 => Ok(Self::R3),
+      4 => Ok(Self::R4),
+      5 => Ok(Self::R5),
+      6 => Ok(Self::R6),
+      7 => Ok(Self::R7),
+      8 => Ok(Self::R8),
+      9 => Ok(Self::R9),
+      10 => Ok(Self::R10),
+      11 => Ok(Self::R11),
+      12 => Ok(Self::R12),
+      13 => Ok(Self::R13),
+      14 => Ok(Self::R14),
+      15 => Ok(Self::R15),
+      _ => Err(value),
+    }
+  }
+}
+
+pub mod abi {
+  use super::Register;
+
+  pub const RETURN: Register = Register::R0;
+  pub const V2_CALL_OPERAND: Register = Register::R0;
+  pub const RECEIVER: Register = Register::R1;
+  pub const FIRST_ARGUMENT: Register = Register::R2;
+  pub const LAST_ARGUMENT: Register = Register::R7;
+  pub const EXCEPTION: Register = Register::R7;
+  pub const FIRST_TEMPORARY: Register = Register::R8;
+  pub const LAST_TEMPORARY: Register = Register::R15;
+  pub const REGISTER_ARGUMENT_COUNT: usize = 6;
+
+  pub fn argument_register(index: usize) -> Option<Register> {
+    let encoding = FIRST_ARGUMENT
+      .encoding()
+      .checked_add(u8::try_from(index).ok()?)?;
+    (encoding <= LAST_ARGUMENT.encoding()).then(|| {
+      Register::try_from(encoding).expect("ABI argument register must be in the register file")
+    })
+  }
+
+  pub const fn is_argument_register(register: Register) -> bool {
+    register.encoding() >= FIRST_ARGUMENT.encoding()
+      && register.encoding() <= LAST_ARGUMENT.encoding()
+  }
+
+  pub const fn is_temporary_register(register: Register) -> bool {
+    register.encoding() >= FIRST_TEMPORARY.encoding()
+      && register.encoding() <= LAST_TEMPORARY.encoding()
+  }
+}
+
 /// A decoded fixed-width instruction.
 #[derive(Clone, Copy, Debug)]
-pub struct DecodedInstruction {
+pub struct Instruction {
   /// Decoded opcode.
-  pub op: Op,
+  pub opcode: Opcode,
   /// Unsigned 24-bit payload.
   pub payload: u32,
 }
 
-impl DecodedInstruction {
+impl Instruction {
+  pub fn decode(word: InstructionWord) -> Result<Self, String> {
+    let opcode = opcode_from_word(word);
+    let op = Opcode::from_byte(opcode).ok_or_else(|| format!("invalid opcode 0x{opcode:02x}"))?;
+    Ok(Self {
+      opcode: op,
+      payload: word >> 8,
+    })
+  }
+
+  pub(crate) unsafe fn decode_unchecked(word: InstructionWord) -> Self {
+    Self {
+      opcode: unsafe { Opcode::from_byte_unchecked(opcode_from_word(word)) },
+      payload: word >> 8,
+    }
+  }
+
   /// Return one of the three packed payload bytes.
   pub fn operand_u8(
     self,
@@ -103,16 +214,16 @@ impl DecodedInstruction {
 
   /// Relative branch offset, accounting for opcode-specific payload layouts.
   pub fn branch_offset(self) -> Option<i32> {
-    match self.op {
-      Op::CompareJump => {
-        let word = self.op as u32 | ((self.payload & 0x00FF_FFFF) << 8);
+    match self.opcode {
+      Opcode::CompareJump => {
+        let word = self.opcode as u32 | ((self.payload & 0x00FF_FFFF) << 8);
         Some(decode_compare_jump(word).3 as i32)
       }
-      Op::JumpIfFalse | Op::JumpIfTrue | Op::JumpIfNullish => {
-        let word = self.op as u32 | ((self.payload & 0x00FF_FFFF) << 8);
-        Some(decode_risc_cond_offset(word))
+      Opcode::JumpIfFalse | Opcode::JumpIfTrue | Opcode::JumpIfNullish => {
+        let word = self.opcode as u32 | ((self.payload & 0x00FF_FFFF) << 8);
+        Some(decode_conditional_branch_offset(word))
       }
-      Op::Jump | Op::PushHandler => Some(self.operand_i24()),
+      Opcode::Jump | Opcode::PushHandler => Some(self.operand_i24()),
       _ => None,
     }
   }
@@ -120,7 +231,7 @@ impl DecodedInstruction {
 
 /// An immutable literal stored in compiled bytecode.
 ///
-/// Runtime-owned objects are deliberately excluded so compiled chunks can be
+/// Runtime-owned objects are deliberately excluded so compiled code can be
 /// transferred from compiler workers to the single VM thread.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Constant {
@@ -181,21 +292,21 @@ impl TryFrom<Value> for Constant {
   }
 }
 
-/// A chunk of bytecode containing opcodes, constants, and metadata
+/// Executable instruction words and their shared metadata.
 #[derive(Clone, Debug)]
 pub struct Chunk {
   /// Version of the encoded instruction words.
   pub version: BytecodeVersion,
   /// Instructions stored as fixed-width 32-bit words. Each u32 contains
   /// opcode in the low 8 bits and a 24-bit payload in the upper bits.
-  pub code: Vec<u32>,
+  pub words: Vec<InstructionWord>,
   /// Constant pool values
   pub constants: Vec<Constant>,
-  /// Function prototypes
-  pub functions: Vec<FunctionProto>,
+  /// Nested compiled functions.
+  pub functions: Vec<Function>,
   /// Line number information for debugging
   pub lines: Vec<u32>,
-  /// Original source text for this chunk
+  /// Original source text for this code
   pub source_text: Arc<String>,
   /// Root script slot type annotations.
   pub root_slot_types: Vec<Option<Type>>,
@@ -207,15 +318,15 @@ pub struct Chunk {
   pub root_slot_immutable: Vec<bool>,
   /// Function declarations instantiated in the root variable environment.
   pub root_function_declarations: Vec<String>,
-  /// Number of non-lexical frame spill slots required by RISC v2 lowering.
-  pub risc_spill_count: u16,
-  /// Prefix of `risc_spill_count` occupied by stable lowered value homes.
-  pub risc_value_spill_count: u16,
+  /// Number of non-lexical frame spill slots required by bytecode v2 lowering.
+  pub spill_slot_count: u16,
+  /// Prefix of `spill_slot_count` occupied by stable lowered value homes.
+  pub value_spill_slot_count: u16,
   /// Whether the compiled root source is strict.
   pub root_strict: bool,
-  /// Whether `new.target` is valid in this chunk's execution context.
+  /// Whether `new.target` is valid in this code object's execution context.
   pub allow_new_target: bool,
-  /// Whether `super` property access/calls are valid in this chunk.
+  /// Whether `super` property access/calls are valid in this code object.
   pub allow_super: bool,
   /// Finalizer entry points used to inject generator `return` completions.
   pub finally_handlers: Vec<FinallyHandler>,
@@ -227,13 +338,13 @@ pub struct Chunk {
 pub struct VerifiedChunk(Arc<Chunk>);
 
 impl VerifiedChunk {
-  /// Verify and retain a bytecode chunk for repeated execution.
-  pub fn new(chunk: Chunk) -> Result<Self, String> {
-    chunk.verify()?;
-    Ok(Self(Arc::new(chunk)))
+  /// Verify and retain chunk for repeated execution.
+  pub fn new(code: Chunk) -> Result<Self, String> {
+    code.verify()?;
+    Ok(Self(Arc::new(code)))
   }
 
-  pub(crate) fn chunk(&self) -> Arc<Chunk> {
+  pub(crate) fn code(&self) -> Arc<Chunk> {
     Arc::clone(&self.0)
   }
 }
@@ -242,9 +353,9 @@ impl VerifiedChunk {
 /// Control-flow metadata for a protected region with a `finally` clause.
 pub struct FinallyHandler {
   /// Instruction that installs the protected region's exception handler.
-  pub push_ip: usize,
+  pub push_pc: usize,
   /// First instruction in the normal finalizer body.
-  pub finalizer_ip: usize,
+  pub finalizer_pc: usize,
   /// Local slot that carries an injected generator return value.
   pub return_slot: usize,
   /// Local slot indicating that the finalizer must complete with a return.
@@ -253,7 +364,7 @@ pub struct FinallyHandler {
 
 #[derive(Clone, Debug)]
 /// Function prototype containing metadata for compiled functions
-pub struct FunctionProto {
+pub struct Function {
   /// Function name
   pub name: String,
   /// Source span in the original script
@@ -263,7 +374,7 @@ pub struct FunctionProto {
   /// ECMAScript `length` value: parameters before the first default, excluding rest.
   pub length: usize,
   /// Compiled bytecode for this function
-  pub chunk: Arc<Chunk>,
+  pub code: Arc<Chunk>,
   /// Optional static slot types retained for tooling and serialization; the
   /// runtime does not enforce TypeScript annotations.
   pub slot_types: Vec<Option<Type>>,
@@ -314,11 +425,11 @@ pub struct FunctionProto {
 }
 
 impl Chunk {
-  /// Creates a new empty chunk
+  /// Creates an empty chunk.
   pub fn new(source_text: Arc<String>) -> Self {
     Self {
       version: BytecodeVersion::RiscV2,
-      code: Vec::new(),
+      words: Vec::new(),
       constants: Vec::new(),
       functions: Vec::new(),
       lines: Vec::new(),
@@ -328,8 +439,8 @@ impl Chunk {
       root_lexical_tdz: Vec::new(),
       root_slot_immutable: Vec::new(),
       root_function_declarations: Vec::new(),
-      risc_spill_count: 0,
-      risc_value_spill_count: 0,
+      spill_slot_count: 0,
+      value_spill_slot_count: 0,
       root_strict: false,
       allow_new_target: false,
       allow_super: false,
@@ -337,48 +448,42 @@ impl Chunk {
     }
   }
 
-  /// Decode one RISC v2 instruction word.
+  /// Decode one bytecode v2 instruction word.
   pub fn decode_at(
     &self,
-    ip: usize,
-  ) -> Result<DecodedInstruction, String> {
+    pc: InstructionIndex,
+  ) -> Result<Instruction, String> {
     let word = self
-      .code
-      .get(ip)
+      .words
+      .get(pc)
       .copied()
-      .ok_or_else(|| format!("instruction index {} is out of bounds", ip))?;
-    let opcode = (word & 0xFF) as u8;
-    let op = Op::from_byte(opcode)
-      .ok_or_else(|| format!("invalid opcode {} at instruction {}", opcode, ip))?;
-    Ok(DecodedInstruction {
-      op,
-      payload: word >> 8,
-    })
+      .ok_or_else(|| format!("instruction index {} is out of bounds", pc))?;
+    Instruction::decode(word).map_err(|error| format!("{error} at instruction {pc}"))
   }
 
   /// Format one instruction for tracing and diagnostics.
   pub fn disassemble_at(
     &self,
-    ip: usize,
+    pc: usize,
   ) -> Result<String, String> {
-    let instruction = self.decode_at(ip)?;
-    let word = self.code[ip];
-    let detail = match instruction.op {
-      Op::CompareJump => {
+    let instruction = self.decode_at(pc)?;
+    let word = self.words[pc];
+    let detail = match instruction.opcode {
+      Opcode::CompareJump => {
         let (condition, left, right, offset) = decode_compare_jump(word);
         format!(
           "compare={} r{} r{} offset={}",
           condition, left, right, offset
         )
       }
-      Op::JumpIfFalse | Op::JumpIfTrue | Op::JumpIfNullish => {
+      Opcode::JumpIfFalse | Opcode::JumpIfTrue | Opcode::JumpIfNullish => {
         format!(
           "r{} offset={}",
           decode_rd(word),
-          decode_risc_cond_offset(word)
+          decode_conditional_branch_offset(word)
         )
       }
-      Op::Jump | Op::PushHandler => {
+      Opcode::Jump | Opcode::PushHandler => {
         format!("offset={}", instruction.operand_i24())
       }
       _ => format!(
@@ -390,13 +495,18 @@ impl Chunk {
       ),
     };
     if detail.is_empty() {
-      Ok(format!("{:#06} {}", ip, instruction.op.name()))
+      Ok(format!("{:#06} {}", pc, instruction.opcode.name()))
     } else {
-      Ok(format!("{:#06} {} {}", ip, instruction.op.name(), detail))
+      Ok(format!(
+        "{:#06} {} {}",
+        pc,
+        instruction.opcode.name(),
+        detail
+      ))
     }
   }
 
-  /// Validate structural invariants before a chunk is executed.
+  /// Validate structural invariants before a code is executed.
   pub fn verify(&self) -> Result<(), String> {
     let root_slot_count = self.root_slot_types.len();
     for (name, length) in [
@@ -418,84 +528,89 @@ impl Chunk {
     local_count: usize,
     upvalue_count: usize,
   ) -> Result<(), String> {
-    if self.lines.len() != self.code.len() {
+    if self.lines.len() != self.words.len() {
       return Err(format!(
         "line table length {} does not match instruction count {}",
         self.lines.len(),
-        self.code.len()
+        self.words.len()
       ));
     }
-    if self.risc_value_spill_count > self.risc_spill_count {
+    if self.value_spill_slot_count > self.spill_slot_count {
       return Err(format!(
-        "RISC value spill count {} exceeds total spill count {}",
-        self.risc_value_spill_count, self.risc_spill_count
+        "value spill count {} exceeds total spill count {}",
+        self.value_spill_slot_count, self.spill_slot_count
       ));
     }
 
-    for ip in 0..self.code.len() {
-      let instruction = self.decode_at(ip)?;
-      let word = self.code[ip];
+    for pc in 0..self.words.len() {
+      let instruction = self.decode_at(pc)?;
+      let word = self.words[pc];
       if let Some(offset) = instruction.branch_offset() {
-        let target = ip as i64 + 1 + offset as i64;
-        if !(0..self.code.len() as i64).contains(&target) {
+        let target = pc as i64 + 1 + offset as i64;
+        if !(0..self.words.len() as i64).contains(&target) {
           return Err(format!(
             "jump at instruction {} targets out-of-bounds instruction {}",
-            ip, target
+            pc, target
           ));
         }
       }
 
-      let operand = decode_risc_aux16(word) as usize;
-      match instruction.op {
-        Op::Const => self.verify_constant_index(ip, operand, false)?,
-        Op::GetGlobal | Op::TypeofGlobal | Op::SetGlobal | Op::GetBuiltin => {
-          self.verify_constant_index(ip, operand, true)?
+      let operand = decode_aux16(word) as usize;
+      match instruction.opcode {
+        Opcode::Const => self.verify_constant_index(pc, operand, false)?,
+        Opcode::GetGlobal | Opcode::TypeofGlobal | Opcode::SetGlobal | Opcode::GetBuiltin => {
+          self.verify_constant_index(pc, operand, true)?
         }
-        Op::GetModuleExport | Op::SetModuleExport => {
-          self.verify_module_descriptor(ip, operand)?;
+        Opcode::GetModuleExport | Opcode::SetModuleExport => {
+          self.verify_module_descriptor(pc, operand)?;
         }
-        Op::MakeClosure if operand >= self.functions.len() => {
+        Opcode::MakeClosure if operand >= self.functions.len() => {
           return Err(format!(
-            "function index {operand} at instruction {ip} is out of bounds"
+            "function index {operand} at instruction {pc} is out of bounds"
           ));
         }
-        Op::LoadLocal | Op::StoreLocal | Op::CloneLocalCell | Op::ResetLocalCell
+        Opcode::LoadLocal
+        | Opcode::StoreLocal
+        | Opcode::CloneLocalCell
+        | Opcode::ResetLocalCell
           if operand >= local_count =>
         {
           return Err(format!(
-            "local slot {operand} at instruction {ip} is out of bounds"
+            "local slot {operand} at instruction {pc} is out of bounds"
           ));
         }
-        Op::GetUpvalue | Op::SetUpvalue if operand >= upvalue_count => {
+        Opcode::GetUpvalue | Opcode::SetUpvalue if operand >= upvalue_count => {
           return Err(format!(
-            "upvalue slot {operand} at instruction {ip} is out of bounds"
+            "upvalue slot {operand} at instruction {pc} is out of bounds"
           ));
         }
-        Op::LoadSpill | Op::StoreSpill if operand >= self.risc_spill_count as usize => {
+        Opcode::LoadSpill | Opcode::StoreSpill if operand >= self.spill_slot_count as usize => {
           return Err(format!(
-            "spill slot {operand} at instruction {ip} is out of bounds"
+            "spill slot {operand} at instruction {pc} is out of bounds"
           ));
         }
-        Op::Call | Op::TailCall | Op::Construct | Op::CallBuiltin => {
-          if decode_rd(word) != 0 || decode_rs(word) != 0 {
-            return Err(format!("call ABI registers at instruction {ip} must be r0"));
+        Opcode::Call | Opcode::TailCall | Opcode::Construct | Opcode::CallMethod => {
+          if decode_rd(word) != abi::V2_CALL_OPERAND.encoding()
+            || decode_rs(word) != abi::V2_CALL_OPERAND.encoding()
+          {
+            return Err(format!("call ABI registers at instruction {pc} must be r0"));
           }
-          self.verify_operand_window(ip, operand.saturating_sub(6))?;
+          self.verify_operand_window(pc, operand.saturating_sub(abi::REGISTER_ARGUMENT_COUNT))?;
         }
-        Op::BuildArray | Op::SuperConstruct => {
-          self.verify_operand_window(ip, operand)?;
+        Opcode::BuildArray | Opcode::SuperConstruct => {
+          self.verify_operand_window(pc, operand)?;
         }
-        Op::BuildObject => {
+        Opcode::BuildObject => {
           let required = operand
             .checked_mul(2)
-            .ok_or_else(|| format!("object operand window at instruction {ip} overflows"))?;
-          self.verify_operand_window(ip, required)?;
+            .ok_or_else(|| format!("object operand window at instruction {pc} overflows"))?;
+          self.verify_operand_window(pc, required)?;
         }
-        Op::SetProperty | Op::SetSuperProperty | Op::Spread
+        Opcode::SetProperty | Opcode::SetSuperProperty | Opcode::Spread
           if decode_aux8(word) > 15 || decode_aux8_2(word) != 0 =>
         {
           return Err(format!(
-            "extra register operand at instruction {ip} is malformed"
+            "extra register operand at instruction {pc} is malformed"
           ));
         }
         _ => {}
@@ -505,28 +620,28 @@ impl Chunk {
     for (index, handler) in self.finally_handlers.iter().enumerate() {
       if self.finally_handlers[..index]
         .iter()
-        .any(|other| other.push_ip == handler.push_ip)
+        .any(|other| other.push_pc == handler.push_pc)
       {
         return Err(format!(
           "finally handler push instruction {} is duplicated",
-          handler.push_ip
+          handler.push_pc
         ));
       }
       if self
-        .code
-        .get(handler.push_ip)
-        .and_then(|word| Op::from_byte(opcode_from_instr(*word)))
-        != Some(Op::PushHandler)
+        .words
+        .get(handler.push_pc)
+        .and_then(|word| Opcode::from_byte(opcode_from_word(*word)))
+        != Some(Opcode::PushHandler)
       {
         return Err(format!(
           "finally handler push instruction {} is invalid",
-          handler.push_ip
+          handler.push_pc
         ));
       }
-      if handler.finalizer_ip >= self.code.len() {
+      if handler.finalizer_pc >= self.words.len() {
         return Err(format!(
           "finally handler target {} is out of bounds",
-          handler.finalizer_ip
+          handler.finalizer_pc
         ));
       }
       if handler.return_slot >= local_count || handler.did_return_slot >= local_count {
@@ -542,17 +657,17 @@ impl Chunk {
 
   fn verify_constant_index(
     &self,
-    ip: usize,
+    pc: usize,
     index: usize,
     require_string: bool,
   ) -> Result<(), String> {
     let constant = self
       .constants
       .get(index)
-      .ok_or_else(|| format!("constant index {index} at instruction {ip} is out of bounds"))?;
+      .ok_or_else(|| format!("constant index {index} at instruction {pc} is out of bounds"))?;
     if require_string && !matches!(constant, Constant::String(_)) {
       return Err(format!(
-        "constant index {index} at instruction {ip} must contain a string"
+        "constant index {index} at instruction {pc} must contain a string"
       ));
     }
     Ok(())
@@ -560,10 +675,10 @@ impl Chunk {
 
   fn verify_module_descriptor(
     &self,
-    ip: usize,
+    pc: usize,
     index: usize,
   ) -> Result<(), String> {
-    self.verify_constant_index(ip, index, true)?;
+    self.verify_constant_index(pc, index, true)?;
     let Constant::String(descriptor) = &self.constants[index] else {
       unreachable!("string constant verified above");
     };
@@ -583,26 +698,26 @@ impl Chunk {
 
   fn verify_operand_window(
     &self,
-    ip: usize,
+    pc: usize,
     required: usize,
   ) -> Result<(), String> {
-    let available = usize::from(self.risc_spill_count - self.risc_value_spill_count);
+    let available = usize::from(self.spill_slot_count - self.value_spill_slot_count);
     if required > available {
       return Err(format!(
-        "operand window of {required} values at instruction {ip} exceeds {available} slots"
+        "operand window of {required} values at instruction {pc} exceeds {available} slots"
       ));
     }
     Ok(())
   }
 
-  /// Writes a packed instruction word to the chunk with line number info.
+  /// Writes a packed instruction word to the code with line number info.
   /// The instruction layout: low 8 bits = opcode, upper 24 bits = payload.
   pub fn write_instr(
     &mut self,
     instr: u32,
     line: u32,
   ) {
-    self.code.push(instr);
+    self.words.push(instr);
     self.lines.push(line);
   }
 
@@ -628,7 +743,7 @@ impl Chunk {
   /// Adds a function prototype to the function list and returns its index
   pub fn add_function(
     &mut self,
-    proto: FunctionProto,
+    proto: Function,
   ) -> usize {
     self.functions.push(proto);
     self.functions.len() - 1
@@ -640,7 +755,7 @@ impl Chunk {
     &self,
     idx: usize,
   ) -> Option<i32> {
-    let w = *self.code.get(idx)?;
+    let w = *self.words.get(idx)?;
     let payload = (w >> 8_i32) & 0x00FF_FFFF;
     let signed = if (payload & 0x0080_0000) != 0 {
       (payload | 0xFF00_0000) as i32
@@ -657,16 +772,16 @@ impl Chunk {
     idx: usize,
     val: i32,
   ) -> bool {
-    if idx >= self.code.len() {
+    if idx >= self.words.len() {
       return false;
     }
     if !(-(1_i32 << 23_i32)..(1_i32 << 23_i32)).contains(&val) {
       return false;
     }
-    let instr = self.code[idx];
+    let instr = self.words[idx];
     let payload_u32 = (val.cast_unsigned() & 0x00FF_FFFF) << 8_u32;
     let new = (instr & 0x0000_00FF) | payload_u32;
-    self.code[idx] = new;
+    self.words[idx] = new;
     true
   }
 
@@ -680,21 +795,21 @@ impl Chunk {
     self.write_i24_payload_at(idx, val as i32)
   }
 
-  /// Return the instruction-index target of a RISC branch at `ip`.
-  pub fn jump_target_from_ip(
+  /// Return the instruction-index target of a branch at `pc`.
+  pub fn jump_target_from_pc(
     &self,
-    ip: usize,
+    pc: usize,
   ) -> Option<usize> {
-    let instr = *self.code.get(ip)?;
-    let op_byte = opcode_from_instr(instr);
-    let op = Op::from_byte(op_byte)?;
+    let instr = *self.words.get(pc)?;
+    let op_byte = opcode_from_word(instr);
+    let op = Opcode::from_byte(op_byte)?;
     if !op.is_jump() {
       return None;
     }
-    let offset = self.decode_at(ip).ok()?.branch_offset()?;
-    let next = ip as i64 + 1;
+    let offset = self.decode_at(pc).ok()?.branch_offset()?;
+    let next = pc as i64 + 1;
     let target = next.checked_add(offset as i64)?;
-    if target < 0 || target >= (self.code.len() as i64) {
+    if target < 0 || target >= (self.words.len() as i64) {
       return None;
     }
     usize::try_from(target).ok()
@@ -751,52 +866,54 @@ pub fn decode_aux8_2(instr: u32) -> u8 {
 
 /// Encodes both rd and rs into a single u32
 #[inline]
-pub fn encode_registers(
+pub fn encode_register_fields(
   rd: u8,
   rs: u8,
 ) -> u32 {
   encode_rd(rd) | encode_rs(rs)
 }
 
-/// Encode a normal RISC instruction with destination and source registers.
-pub fn encode_risc_registers(
-  op: Op,
+/// Encode a normal instruction with destination and source registers.
+pub fn encode_register_instruction(
+  op: Opcode,
   rd: u8,
   rs: u8,
 ) -> u32 {
-  op as u32 | encode_registers(rd, rs)
+  op as u32 | encode_register_fields(rd, rs)
 }
 
-/// Encode a RISC instruction with `rd` and a 16-bit auxiliary operand.
-pub fn encode_risc_aux16(
-  op: Op,
+/// Encode a instruction with `rd` and a 16-bit auxiliary operand.
+pub fn encode_aux16_instruction(
+  op: Opcode,
   rd: u8,
   aux: u16,
 ) -> u32 {
   op as u32 | encode_rd(rd) | ((aux as u32) << 16)
 }
 
-/// Decode the 16-bit auxiliary operand from a normal RISC instruction.
-pub fn decode_risc_aux16(instr: u32) -> u16 {
+/// Decode the 16-bit auxiliary operand from a normal instruction.
+pub fn decode_aux16(instr: u32) -> u16 {
   (instr >> 16) as u16
 }
 
-/// Encode a RISC conditional jump using `rd` and a signed 20-bit offset.
-pub fn encode_risc_cond_jump(
-  op: Op,
+/// Encode a conditional jump using `rd` and a signed 20-bit offset.
+pub fn encode_conditional_branch(
+  op: Opcode,
   rd: u8,
   offset: i32,
 ) -> Option<u32> {
-  if !matches!(op, Op::JumpIfFalse | Op::JumpIfTrue | Op::JumpIfNullish)
-    || !(-(1 << 19)..(1 << 19)).contains(&offset)
+  if !matches!(
+    op,
+    Opcode::JumpIfFalse | Opcode::JumpIfTrue | Opcode::JumpIfNullish
+  ) || !(-(1 << 19)..(1 << 19)).contains(&offset)
   {
     return None;
   }
   Some(op as u32 | encode_rd(rd) | (((offset as u32) & 0x000F_FFFF) << 12))
 }
 
-/// Decode the signed 20-bit offset from a RISC conditional jump.
-pub fn decode_risc_cond_offset(instr: u32) -> i32 {
+/// Decode the signed 20-bit offset from a conditional jump.
+pub fn decode_conditional_branch_offset(instr: u32) -> i32 {
   let value = (instr >> 12) & 0x000F_FFFF;
   if value & 0x0008_0000 != 0 {
     (value | 0xFFF0_0000) as i32
@@ -805,7 +922,7 @@ pub fn decode_risc_cond_offset(instr: u32) -> i32 {
   }
 }
 
-/// Pack a RISC compare-and-branch instruction.
+/// Pack a compare-and-branch instruction.
 ///
 /// The signed instruction-relative offset is limited to 13 bits. Larger
 /// branches must use an inverted short branch followed by a long jump.
@@ -822,10 +939,10 @@ pub fn encode_compare_jump(
     | ((left as u32) << 3)
     | ((right as u32) << 7)
     | (((offset as u16 as u32) & 0x1FFF) << 11);
-  Some(Op::CompareJump as u32 | (payload << 8))
+  Some(Opcode::CompareJump as u32 | (payload << 8))
 }
 
-/// Decode a RISC compare-and-branch word as `(condition, left, right, offset)`.
+/// Decode a compare-and-branch word as `(condition, left, right, offset)`.
 pub fn decode_compare_jump(instr: u32) -> (u8, u8, u8, i16) {
   let payload = instr >> 8;
   let condition = (payload & 0x7) as u8;
@@ -842,7 +959,7 @@ pub fn decode_compare_jump(instr: u32) -> (u8, u8, u8, i16) {
 
 /// Returns the opcode from `instr`.
 #[inline]
-pub fn opcode_from_instr(instr: u32) -> u8 {
+pub fn opcode_from_word(instr: u32) -> u8 {
   (instr & 0xFF) as u8
 }
 
@@ -859,7 +976,7 @@ pub fn payload_byte(
   }
 }
 
-impl FunctionProto {
+impl Function {
   fn verify_metadata(
     &self,
     enclosing_local_count: usize,
@@ -921,13 +1038,13 @@ impl FunctionProto {
       }
     }
     self
-      .chunk
+      .code
       .verify_with_layout(local_count, self.upvalues.len())
   }
 
   /// Return the exact source substring used to define this function, if tracked.
   pub fn source_text(&self) -> Option<&str> {
-    let text = &self.chunk.source_text;
+    let text = &self.code.source_text;
     let start = self.span.start as usize;
     let end = self.span.end as usize;
     if start <= end && end <= text.len() {
@@ -946,7 +1063,7 @@ impl Default for Chunk {
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq)]
-/// Bytecode operation codes for the RISC v2 format.
+/// Opcodes for the bytecode v2 format.
 ///
 /// All opcodes fit in a single 32-bit word with this layout:
 /// - Bits 0-7:    Opcode
@@ -958,10 +1075,10 @@ impl Default for Chunk {
 /// - Jump: aux field contains i24 signed offset (bits 8-31)
 /// - CompareJump: cond(3) | rs1(4) | rs2(4) | signed offset(13)
 ///
-/// NOTE: The numeric discriminant of each `Op` variant is part of the runtime
+/// NOTE: The numeric discriminant of each `Opcode` variant is part of the runtime
 /// bytecode format. Do not reorder or insert variants in the middle without
 /// defining a new bytecode version and corresponding compatibility handling.
-pub enum Op {
+pub enum Opcode {
   /// Load constant from pool → rd. Aux: constant index (u16)
   Const = 0,
   /// Load null → rd
@@ -1058,8 +1175,8 @@ pub enum Op {
   TailCall,
   /// Construct: new r0(...). Aux: argument count (u16)
   Construct,
-  /// CallBuiltin: call the builtin in r0 with receiver r1 and Call's arguments.
-  CallBuiltin,
+  /// CallMethod: call the builtin in r0 with receiver r1 and Call's arguments.
+  CallMethod,
 
   /// rd = MakeClosure(proto_idx). Aux: prototype index (u16)
   MakeClosure,
@@ -1128,9 +1245,9 @@ pub enum Op {
   Spread,
   /// ResetLocalCell: create a fresh uninitialized lexical cell. Aux: slot index (u16)
   ResetLocalCell,
-  /// Load a RISC spill slot into `rd`. Aux: spill index (u16).
+  /// Load a spill slot into `rd`. Aux: spill index (u16).
   LoadSpill,
-  /// Store `rd` into a RISC spill slot. Aux: spill index (u16).
+  /// Store `rd` into a spill slot. Aux: spill index (u16).
   StoreSpill,
   /// rd = ~rs (bitwise NOT)
   BitNot,
@@ -1146,26 +1263,26 @@ pub enum Op {
 }
 
 /// Total number of opcode variants.
-pub const OP_COUNT: usize = Op::PushLexicalEnv as usize + 1;
+pub const OP_COUNT: usize = Opcode::PushLexicalEnv as usize + 1;
 
-impl Op {
-  /// Converts a byte to an Op if valid, returns None otherwise
-  pub fn from_byte(b: u8) -> Option<Op> {
-    Op::try_from(b).ok()
+impl Opcode {
+  /// Converts a byte to an Opcode if valid, returns None otherwise
+  pub fn from_byte(b: u8) -> Option<Opcode> {
+    Opcode::try_from(b).ok()
   }
 
   /// Decode an opcode after bytecode verification has established validity.
   ///
   /// # Safety
   ///
-  /// `b` must be a valid [`Op`] discriminant. In particular, the retired
+  /// `b` must be a valid [`Opcode`] discriminant. In particular, the retired
   /// discriminants 50 through 53 are invalid.
   #[inline(always)]
-  pub(crate) unsafe fn from_byte_unchecked(b: u8) -> Op {
+  pub(crate) unsafe fn from_byte_unchecked(b: u8) -> Opcode {
     debug_assert!(Self::from_byte(b).is_some());
-    // SAFETY: the caller guarantees that `b` is a valid `#[repr(u8)]` Op
+    // SAFETY: the caller guarantees that `b` is a valid `#[repr(u8)]` Opcode
     // discriminant. Chunk verification enforces this before VM execution.
-    unsafe { std::mem::transmute::<u8, Op>(b) }
+    unsafe { std::mem::transmute::<u8, Opcode>(b) }
   }
 
   /// Returns the byte representation of this opcode.
@@ -1176,85 +1293,85 @@ impl Op {
   /// Returns the human-readable name of this opcode.
   pub fn name(&self) -> &'static str {
     match self {
-      Op::Const => "Const",
-      Op::Null => "Null",
-      Op::True => "True",
-      Op::False => "False",
-      Op::Undefined => "Undefined",
-      Op::LoadLocal => "LoadLocal",
-      Op::StoreLocal => "StoreLocal",
-      Op::Move => "Move",
-      Op::Add => "Add",
-      Op::Sub => "Sub",
-      Op::Mul => "Mul",
-      Op::Div => "Div",
-      Op::Mod => "Mod",
-      Op::Pow => "Pow",
-      Op::Neg => "Neg",
-      Op::BitAnd => "BitAnd",
-      Op::BitOr => "BitOr",
-      Op::BitXor => "BitXor",
-      Op::Shl => "Shl",
-      Op::Shr => "Shr",
-      Op::Ushr => "Ushr",
-      Op::CompareJump => "CompareJump",
-      Op::Jump => "Jump",
-      Op::JumpIfTrue => "JumpIfTrue",
-      Op::JumpIfFalse => "JumpIfFalse",
-      Op::JumpIfNullish => "JumpIfNullish",
-      Op::And => "And",
-      Op::Or => "Or",
-      Op::Not => "Not",
-      Op::Typeof => "Typeof",
-      Op::GetProperty => "GetProperty",
-      Op::SetProperty => "SetProperty",
-      Op::DeleteProperty => "DeleteProperty",
-      Op::HasProperty => "HasProperty",
-      Op::GetGlobal => "GetGlobal",
-      Op::TypeofGlobal => "TypeofGlobal",
-      Op::SetGlobal => "SetGlobal",
-      Op::GetUpvalue => "GetUpvalue",
-      Op::SetUpvalue => "SetUpvalue",
-      Op::Call => "Call",
-      Op::TailCall => "TailCall",
-      Op::Construct => "Construct",
-      Op::CallBuiltin => "CallBuiltin",
-      Op::MakeClosure => "MakeClosure",
-      Op::GetThis => "GetThis",
-      Op::GetNewTarget => "GetNewTarget",
-      Op::GetSuperProperty => "GetSuperProperty",
-      Op::BuildArray => "BuildArray",
-      Op::BuildObject => "BuildObject",
-      Op::ArrayFromSpread => "ArrayFromSpread",
-      Op::Throw => "Throw",
-      Op::PushHandler => "PushHandler",
-      Op::PopHandler => "PopHandler",
-      Op::IteratorNext => "IteratorNext",
-      Op::IteratorClose => "IteratorClose",
-      Op::Yield => "Yield",
-      Op::YieldStar => "YieldStar",
-      Op::Return => "Return",
-      Op::PushWithEnv => "PushWithEnv",
-      Op::PopEnv => "PopEnv",
-      Op::AwaitPromise => "AwaitPromise",
-      Op::SuperConstruct => "SuperConstruct",
-      Op::GeneratorInitDone => "GeneratorInitDone",
-      Op::GetModuleExport => "GetModuleExport",
-      Op::SetModuleExport => "SetModuleExport",
-      Op::CloneLocalCell => "CloneLocalCell",
-      Op::SetSuperProperty => "SetSuperProperty",
-      Op::DeleteIdentifier => "DeleteIdentifier",
-      Op::GetBuiltin => "GetBuiltin",
-      Op::InstanceOf => "InstanceOf",
-      Op::Spread => "Spread",
-      Op::ResetLocalCell => "ResetLocalCell",
-      Op::LoadSpill => "LoadSpill",
-      Op::StoreSpill => "StoreSpill",
-      Op::BitNot => "BitNot",
-      Op::GetAsyncIterator => "GetAsyncIterator",
-      Op::Increment => "Increment",
-      Op::Decrement => "Decrement",
-      Op::PushLexicalEnv => "PushLexicalEnv",
+      Opcode::Const => "Const",
+      Opcode::Null => "Null",
+      Opcode::True => "True",
+      Opcode::False => "False",
+      Opcode::Undefined => "Undefined",
+      Opcode::LoadLocal => "LoadLocal",
+      Opcode::StoreLocal => "StoreLocal",
+      Opcode::Move => "Move",
+      Opcode::Add => "Add",
+      Opcode::Sub => "Sub",
+      Opcode::Mul => "Mul",
+      Opcode::Div => "Div",
+      Opcode::Mod => "Mod",
+      Opcode::Pow => "Pow",
+      Opcode::Neg => "Neg",
+      Opcode::BitAnd => "BitAnd",
+      Opcode::BitOr => "BitOr",
+      Opcode::BitXor => "BitXor",
+      Opcode::Shl => "Shl",
+      Opcode::Shr => "Shr",
+      Opcode::Ushr => "Ushr",
+      Opcode::CompareJump => "CompareJump",
+      Opcode::Jump => "Jump",
+      Opcode::JumpIfTrue => "JumpIfTrue",
+      Opcode::JumpIfFalse => "JumpIfFalse",
+      Opcode::JumpIfNullish => "JumpIfNullish",
+      Opcode::And => "And",
+      Opcode::Or => "Or",
+      Opcode::Not => "Not",
+      Opcode::Typeof => "Typeof",
+      Opcode::GetProperty => "GetProperty",
+      Opcode::SetProperty => "SetProperty",
+      Opcode::DeleteProperty => "DeleteProperty",
+      Opcode::HasProperty => "HasProperty",
+      Opcode::GetGlobal => "GetGlobal",
+      Opcode::TypeofGlobal => "TypeofGlobal",
+      Opcode::SetGlobal => "SetGlobal",
+      Opcode::GetUpvalue => "GetUpvalue",
+      Opcode::SetUpvalue => "SetUpvalue",
+      Opcode::Call => "Call",
+      Opcode::TailCall => "TailCall",
+      Opcode::Construct => "Construct",
+      Opcode::CallMethod => "CallMethod",
+      Opcode::MakeClosure => "MakeClosure",
+      Opcode::GetThis => "GetThis",
+      Opcode::GetNewTarget => "GetNewTarget",
+      Opcode::GetSuperProperty => "GetSuperProperty",
+      Opcode::BuildArray => "BuildArray",
+      Opcode::BuildObject => "BuildObject",
+      Opcode::ArrayFromSpread => "ArrayFromSpread",
+      Opcode::Throw => "Throw",
+      Opcode::PushHandler => "PushHandler",
+      Opcode::PopHandler => "PopHandler",
+      Opcode::IteratorNext => "IteratorNext",
+      Opcode::IteratorClose => "IteratorClose",
+      Opcode::Yield => "Yield",
+      Opcode::YieldStar => "YieldStar",
+      Opcode::Return => "Return",
+      Opcode::PushWithEnv => "PushWithEnv",
+      Opcode::PopEnv => "PopEnv",
+      Opcode::AwaitPromise => "AwaitPromise",
+      Opcode::SuperConstruct => "SuperConstruct",
+      Opcode::GeneratorInitDone => "GeneratorInitDone",
+      Opcode::GetModuleExport => "GetModuleExport",
+      Opcode::SetModuleExport => "SetModuleExport",
+      Opcode::CloneLocalCell => "CloneLocalCell",
+      Opcode::SetSuperProperty => "SetSuperProperty",
+      Opcode::DeleteIdentifier => "DeleteIdentifier",
+      Opcode::GetBuiltin => "GetBuiltin",
+      Opcode::InstanceOf => "InstanceOf",
+      Opcode::Spread => "Spread",
+      Opcode::ResetLocalCell => "ResetLocalCell",
+      Opcode::LoadSpill => "LoadSpill",
+      Opcode::StoreSpill => "StoreSpill",
+      Opcode::BitNot => "BitNot",
+      Opcode::GetAsyncIterator => "GetAsyncIterator",
+      Opcode::Increment => "Increment",
+      Opcode::Decrement => "Decrement",
+      Opcode::PushLexicalEnv => "PushLexicalEnv",
     }
   }
 
@@ -1262,7 +1379,11 @@ impl Op {
   pub fn is_jump(&self) -> bool {
     matches!(
       self,
-      Op::CompareJump | Op::Jump | Op::JumpIfTrue | Op::JumpIfFalse | Op::JumpIfNullish
+      Opcode::CompareJump
+        | Opcode::Jump
+        | Opcode::JumpIfTrue
+        | Opcode::JumpIfFalse
+        | Opcode::JumpIfNullish
     )
   }
 
@@ -1270,27 +1391,33 @@ impl Op {
   pub fn is_arithmetic(&self) -> bool {
     matches!(
       self,
-      Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Mod | Op::Pow | Op::Neg
+      Opcode::Add
+        | Opcode::Sub
+        | Opcode::Mul
+        | Opcode::Div
+        | Opcode::Mod
+        | Opcode::Pow
+        | Opcode::Neg
     )
   }
 
   /// Returns whether this opcode is a comparison operation.
   pub fn is_comparison(&self) -> bool {
-    matches!(self, Op::CompareJump)
+    matches!(self, Opcode::CompareJump)
   }
 
   /// Returns whether this opcode is a logical or boolean operator.
   pub fn is_logical(&self) -> bool {
-    matches!(self, Op::And | Op::Or | Op::Not)
+    matches!(self, Opcode::And | Opcode::Or | Opcode::Not)
   }
 }
 
-impl TryFrom<u8> for Op {
+impl TryFrom<u8> for Opcode {
   type Error = ();
 
-  /// Converts a u8 value into an Op variant. Returns an error if the value is out of range.
+  /// Converts a u8 value into an Opcode variant. Returns an error if the value is out of range.
   fn try_from(value: u8) -> Result<Self, Self::Error> {
-    use Op::*;
+    use Opcode::*;
     match value {
       0 => Ok(Const),
       1 => Ok(Null),
@@ -1334,7 +1461,7 @@ impl TryFrom<u8> for Op {
       39 => Ok(Call),
       40 => Ok(TailCall),
       41 => Ok(Construct),
-      42 => Ok(CallBuiltin),
+      42 => Ok(CallMethod),
       43 => Ok(MakeClosure),
       44 => Ok(GetThis),
       45 => Ok(GetNewTarget),
@@ -1376,8 +1503,8 @@ impl TryFrom<u8> for Op {
   }
 }
 
-impl From<Op> for u8 {
-  fn from(op: Op) -> Self {
+impl From<Opcode> for u8 {
+  fn from(op: Opcode) -> Self {
     op as u8
   }
 }
@@ -1390,7 +1517,7 @@ mod tests {
   use std::rc::Rc;
 
   #[test]
-  fn compiled_chunks_are_sendable_between_threads() {
+  fn compiled_code_are_sendable_between_threads() {
     fn assert_send<T: Send>() {}
     assert_send::<Chunk>();
   }
@@ -1403,27 +1530,27 @@ mod tests {
 
   #[test]
   fn op_round_trip() {
-    assert_eq!(OP_COUNT, Op::Decrement as usize + 1);
-    for i in 0u8..=Op::Decrement as u8 {
-      let Ok(op) = Op::try_from(i) else {
+    assert_eq!(OP_COUNT, Opcode::PushLexicalEnv as usize + 1);
+    for i in 0u8..=Opcode::PushLexicalEnv as u8 {
+      let Ok(op) = Opcode::try_from(i) else {
         assert!((50..=53).contains(&i), "unexpected opcode gap at {i}");
         continue;
       };
       let b = u8::from(op);
       assert_eq!(b, i);
-      let op2 = Op::from_byte(b).expect("from_byte");
+      let op2 = Opcode::from_byte(b).expect("from_byte");
       assert_eq!(op2, op);
     }
     for retired in 50..=53 {
-      assert!(Op::from_byte(retired).is_none());
+      assert!(Opcode::from_byte(retired).is_none());
     }
   }
 
   #[test]
-  fn chunks_have_a_fixed_risc_v2_version() {
-    let chunk = Chunk::default();
-    assert_eq!(chunk.version, BytecodeVersion::RiscV2);
-    assert_eq!(chunk.version as u8, 2);
+  fn chunks_have_a_fixed_v2_version() {
+    let code = Chunk::default();
+    assert_eq!(code.version, BytecodeVersion::RiscV2);
+    assert_eq!(code.version as u8, 2);
   }
 
   #[test]
@@ -1438,7 +1565,7 @@ mod tests {
     );
 
     let mut invalid_jump = Chunk::default();
-    invalid_jump.write_instr(Op::Jump as u32 | (10 << 8), 1);
+    invalid_jump.write_instr(Opcode::Jump as u32 | (10 << 8), 1);
     assert!(
       invalid_jump
         .verify()
@@ -1448,12 +1575,12 @@ mod tests {
   }
 
   #[test]
-  fn verifier_rejects_invalid_risc_operands_and_metadata() {
+  fn verifier_rejects_invalid_operands_and_metadata() {
     let mut invalid_global = Chunk::default();
     invalid_global
       .constants
       .push(Constant::Number(1.0));
-    invalid_global.write_instr(encode_risc_aux16(Op::GetGlobal, 0, 0), 1);
+    invalid_global.write_instr(encode_aux16_instruction(Opcode::GetGlobal, 0, 0), 1);
     assert!(
       invalid_global
         .verify()
@@ -1468,7 +1595,7 @@ mod tests {
       root_slot_immutable: vec![false],
       ..Chunk::default()
     };
-    invalid_local.write_instr(encode_risc_aux16(Op::LoadLocal, 0, 1), 1);
+    invalid_local.write_instr(encode_aux16_instruction(Opcode::LoadLocal, 0, 1), 1);
     assert!(
       invalid_local
         .verify()
@@ -1477,10 +1604,10 @@ mod tests {
     );
 
     let mut invalid_spill = Chunk {
-      risc_spill_count: 1,
+      spill_slot_count: 1,
       ..Chunk::default()
     };
-    invalid_spill.write_instr(encode_risc_aux16(Op::LoadSpill, 0, 1), 1);
+    invalid_spill.write_instr(encode_aux16_instruction(Opcode::LoadSpill, 0, 1), 1);
     assert!(
       invalid_spill
         .verify()
@@ -1489,11 +1616,11 @@ mod tests {
     );
 
     let mut invalid_window = Chunk {
-      risc_spill_count: 2,
-      risc_value_spill_count: 1,
+      spill_slot_count: 2,
+      value_spill_slot_count: 1,
       ..Chunk::default()
     };
-    invalid_window.write_instr(encode_risc_aux16(Op::BuildArray, 0, 2), 1);
+    invalid_window.write_instr(encode_aux16_instruction(Opcode::BuildArray, 0, 2), 1);
     assert!(
       invalid_window
         .verify()
@@ -1502,12 +1629,12 @@ mod tests {
     );
 
     let mut invalid_finally = Chunk::default();
-    invalid_finally.write_instr(Op::Undefined as u32, 1);
+    invalid_finally.write_instr(Opcode::Undefined as u32, 1);
     invalid_finally
       .finally_handlers
       .push(FinallyHandler {
-        push_ip: 0,
-        finalizer_ip: 0,
+        push_pc: 0,
+        finalizer_pc: 0,
         return_slot: 0,
         did_return_slot: 0,
       });
@@ -1520,47 +1647,74 @@ mod tests {
   }
 
   #[test]
-  fn decoded_branch_offsets_follow_risc_layouts() {
+  fn decoded_branch_offsets_follow_layouts() {
     let compare_word = encode_compare_jump(2, 3, 4, -3).expect("compare jump");
-    let instruction = DecodedInstruction {
-      op: Op::CompareJump,
+    let instruction = Instruction {
+      opcode: Opcode::CompareJump,
       payload: compare_word >> 8,
     };
     assert_eq!(instruction.branch_offset(), Some(-3));
 
     let conditional_word =
-      encode_risc_cond_jump(Op::JumpIfFalse, 7, -42).expect("conditional jump");
-    let instruction = DecodedInstruction {
-      op: Op::JumpIfFalse,
+      encode_conditional_branch(Opcode::JumpIfFalse, 7, -42).expect("conditional jump");
+    let instruction = Instruction {
+      opcode: Opcode::JumpIfFalse,
       payload: conditional_word >> 8,
     };
     assert_eq!(instruction.branch_offset(), Some(-42));
   }
 
   #[test]
-  fn risc_compare_jump_encoding_round_trips() {
+  fn compare_jump_encoding_round_trips() {
     let word = encode_compare_jump(6, 3, 14, -4096).expect("encodable branch");
     assert_eq!(decode_compare_jump(word), (6, 3, 14, -4096));
     assert!(encode_compare_jump(0, 0, 0, 4096).is_none());
   }
 
   #[test]
-  fn verifier_uses_risc_conditional_branch_layout() {
-    let mut chunk = Chunk::default();
-    chunk.write_instr(
-      encode_risc_cond_jump(Op::JumpIfTrue, 15, 1).expect("conditional jump"),
+  fn verifier_uses_conditional_branch_layout() {
+    let mut code = Chunk::default();
+    code.write_instr(
+      encode_conditional_branch(Opcode::JumpIfTrue, 15, 1).expect("conditional jump"),
       1,
     );
-    chunk.write_instr(Op::Undefined as u32, 1);
-    chunk.write_instr(Op::Return as u32, 1);
-    assert!(chunk.verify().is_ok());
+    code.write_instr(Opcode::Undefined as u32, 1);
+    code.write_instr(Opcode::Return as u32, 1);
+    assert!(code.verify().is_ok());
 
-    chunk.code[0] = encode_risc_cond_jump(Op::JumpIfTrue, 15, 10).expect("conditional jump");
+    code.words[0] =
+      encode_conditional_branch(Opcode::JumpIfTrue, 15, 10).expect("conditional jump");
     assert!(
-      chunk
+      code
         .verify()
         .unwrap_err()
         .contains("out-of-bounds instruction")
     );
+  }
+
+  #[test]
+  fn register_abi_has_conventional_call_roles() {
+    assert_eq!(abi::RETURN, Register::R0);
+    assert_eq!(abi::RECEIVER, Register::R1);
+    assert_eq!(abi::REGISTER_ARGUMENT_COUNT, 6);
+    assert_eq!(
+      (0..abi::REGISTER_ARGUMENT_COUNT)
+        .map(|index| abi::argument_register(index).expect("register argument"))
+        .collect::<Vec<_>>(),
+      [
+        Register::R2,
+        Register::R3,
+        Register::R4,
+        Register::R5,
+        Register::R6,
+        Register::R7,
+      ]
+    );
+    assert_eq!(abi::argument_register(abi::REGISTER_ARGUMENT_COUNT), None);
+    assert!(abi::is_argument_register(Register::R2));
+    assert!(abi::is_argument_register(Register::R7));
+    assert!(abi::is_temporary_register(Register::R8));
+    assert!(abi::is_temporary_register(Register::R15));
+    assert!(!abi::is_temporary_register(Register::R7));
   }
 }

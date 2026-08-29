@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use super::*;
-use crate::bytecode::{Chunk, FunctionProto};
+use crate::bytecode::{Chunk, Function};
 use crate::typecheck::Type;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 impl Compiler {
-  /// Compile a function declaration into a FunctionProto with its own scope.
+  /// Compile a function declaration into a Function with its own scope.
   ///
   /// Creates an inner compiler scope, compiles the function body, and returns
   /// the compiled prototype with all metadata about parameters, locals, and closures.
@@ -18,7 +18,7 @@ impl Compiler {
     func: &oast::Function,
     return_type: Option<Type>,
     allow_super: bool,
-  ) -> Result<(FunctionProto, usize), crate::errors::CompilerError> {
+  ) -> Result<(Function, usize), crate::errors::CompilerError> {
     self.compile_function_with_instance_fields(name, self_name, func, return_type, allow_super, &[])
   }
 
@@ -30,7 +30,7 @@ impl Compiler {
     return_type: Option<Type>,
     allow_super: bool,
     instance_fields: &[crate::compiler::core::PreparedClassField],
-  ) -> Result<(FunctionProto, usize), crate::errors::CompilerError> {
+  ) -> Result<(Function, usize), crate::errors::CompilerError> {
     let _env_len = self.locals.len();
     let function_is_strict = self.strict_context
       || func
@@ -121,8 +121,8 @@ impl Compiler {
     }
 
     let mut inner = Compiler {
-      chunk: Chunk::new(Arc::clone(&self.source_text)),
-      risc: super::risc::RiscBuilder::new(),
+      code: Chunk::new(Arc::clone(&self.source_text)),
+      risc: super::bytecode::Lowering::new(),
       source_text: Arc::clone(&self.source_text),
       locals: Vec::new(),
       local_types: Vec::new(),
@@ -163,8 +163,8 @@ impl Compiler {
       emission_error: None,
     };
     inner.strict_context = function_is_strict;
-    inner.chunk.allow_new_target = inner.allow_new_target;
-    inner.chunk.allow_super = inner.allow_super;
+    inner.code.allow_new_target = inner.allow_new_target;
+    inner.code.allow_super = inner.allow_super;
     if !has_simple_parameter_list && !function_is_strict {
       inner.outer_bindings.clear();
     }
@@ -244,7 +244,7 @@ impl Compiler {
       inner.emit_hoisted_function_decls_oast_stmts(&body.statements)?;
     }
     if func.generator {
-      inner.emit(Op::GeneratorInitDone, LINE);
+      inner.emit(LoweringOpcode::GeneratorInitDone, LINE);
     }
     if !allow_super {
       inner.emit_pending_instance_field_initializers()?;
@@ -261,12 +261,12 @@ impl Compiler {
     }
 
     inner.emit_fallthrough_return(LINE);
-    let mut chunk = super::risc::RiscBuilder::finish(
-      std::mem::take(&mut inner.chunk),
+    let mut code = super::bytecode::Lowering::finish(
+      std::mem::take(&mut inner.code),
       std::mem::take(&mut inner.risc),
     )?;
-    chunk.allow_new_target = inner.allow_new_target;
-    chunk.allow_super = inner.allow_super;
+    code.allow_new_target = inner.allow_new_target;
+    code.allow_super = inner.allow_super;
     let has_rest = func.params.rest.is_some();
     let has_simple_parameter_list = Self::has_simple_parameter_list(func);
     let mut slot_names = if has_simple_parameter_list {
@@ -280,12 +280,12 @@ impl Compiler {
     let has_prototype_property = !func.r#async;
     let is_constructor = !func.r#async && !func.generator;
     Ok((
-      FunctionProto {
+      Function {
         name: name.to_string(),
         span: func.span,
         arity: func.params.items.len() + usize::from(has_rest),
         length: Self::expected_argument_count(&func.params),
-        chunk: Arc::new(chunk),
+        code: Arc::new(code),
         slot_types,
         slot_names,
         lexical_tdz,
@@ -310,7 +310,7 @@ impl Compiler {
     ))
   }
 
-  /// Compile an arrow function expression into a FunctionProto with its own scope.
+  /// Compile an arrow function expression into a Function with its own scope.
   ///
   /// Similar to `compile_function` but with key differences:
   /// - No `arguments` binding
@@ -322,7 +322,7 @@ impl Compiler {
     name: &str,
     func: &oast::ArrowFunctionExpression,
     return_type: Option<Type>,
-  ) -> Result<(FunctionProto, usize), crate::errors::CompilerError> {
+  ) -> Result<(Function, usize), crate::errors::CompilerError> {
     let _env_len = self.locals.len();
     let function_is_strict = self.strict_context || Self::has_use_strict_directive(&func.body);
     let body_has_use_strict = Self::has_use_strict_directive(&func.body);
@@ -400,8 +400,8 @@ impl Compiler {
     }
 
     let mut inner = Compiler {
-      chunk: Chunk::new(Arc::clone(&self.source_text)),
-      risc: super::risc::RiscBuilder::new(),
+      code: Chunk::new(Arc::clone(&self.source_text)),
+      risc: super::bytecode::Lowering::new(),
       source_text: Arc::clone(&self.source_text),
       locals: Vec::new(),
       local_types: Vec::new(),
@@ -442,8 +442,8 @@ impl Compiler {
       emission_error: None,
     };
     inner.strict_context = function_is_strict;
-    inner.chunk.allow_new_target = inner.allow_new_target;
-    inner.chunk.allow_super = inner.allow_super;
+    inner.code.allow_new_target = inner.allow_new_target;
+    inner.code.allow_super = inner.allow_super;
 
     let mut raw_param_slots = Vec::new();
     if has_simple_parameter_list {
@@ -504,7 +504,7 @@ impl Compiler {
       if func.expression && func.body.statements.len() == 1 {
         if let oast::Statement::ExpressionStatement(expr_stmt) = &func.body.statements[0] {
           inner.compile_expr_oast_tail(&expr_stmt.expression)?;
-          inner.emit(Op::Return, LINE);
+          inner.emit(LoweringOpcode::Return, LINE);
         } else {
           for stmt in &func.body.statements {
             if !matches!(stmt, oast::Statement::FunctionDeclaration(_)) {
@@ -525,7 +525,7 @@ impl Compiler {
     } else if func.expression && func.body.statements.len() == 1 {
       if let oast::Statement::ExpressionStatement(expr_stmt) = &func.body.statements[0] {
         inner.compile_expr_oast_tail(&expr_stmt.expression)?;
-        inner.emit(Op::Return, LINE);
+        inner.emit(LoweringOpcode::Return, LINE);
       } else {
         for stmt in &func.body.statements {
           if !matches!(stmt, oast::Statement::FunctionDeclaration(_)) {
@@ -546,12 +546,12 @@ impl Compiler {
 
     inner.exit_scope();
 
-    let mut chunk = super::risc::RiscBuilder::finish(
-      std::mem::take(&mut inner.chunk),
+    let mut code = super::bytecode::Lowering::finish(
+      std::mem::take(&mut inner.code),
       std::mem::take(&mut inner.risc),
     )?;
-    chunk.allow_new_target = inner.allow_new_target;
-    chunk.allow_super = inner.allow_super;
+    code.allow_new_target = inner.allow_new_target;
+    code.allow_super = inner.allow_super;
     let has_rest = func.params.rest.is_some();
     let mut slot_names = if has_simple_parameter_list {
       inner.environment_slot_names()
@@ -562,12 +562,12 @@ impl Compiler {
     let slot_types = inner.local_types;
     let lexical_tdz = inner.local_tdz;
     Ok((
-      FunctionProto {
+      Function {
         name: name.to_string(),
         span: func.span,
         arity: func.params.items.len() + usize::from(has_rest),
         length: Self::expected_argument_count(&func.params),
-        chunk: Arc::new(chunk),
+        code: Arc::new(code),
         slot_types,
         slot_names,
         lexical_tdz,

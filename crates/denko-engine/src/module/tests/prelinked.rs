@@ -26,7 +26,7 @@ fn prelinked_direct_import_is_parser_free_and_uses_canonical_slots() {
         dependencies: vec![],
         exports: vec![export("answer", 0)],
         imports: vec![],
-        chunk: value_chunk,
+        code: value_chunk,
       },
       PrelinkedModule {
         specifier: "graph:entry".to_string(),
@@ -35,7 +35,7 @@ fn prelinked_direct_import_is_parser_free_and_uses_canonical_slots() {
         dependencies: vec![0],
         exports: vec![],
         imports: vec![import("answer", 0)],
-        chunk: entry_chunk,
+        code: entry_chunk,
       },
     ],
     1,
@@ -109,7 +109,7 @@ fn source_import_can_reach_a_public_prelinked_root() {
       dependencies: vec![],
       exports: vec![export("answer", 0)],
       imports: vec![],
-      chunk: compile_prelinked_chunk(
+      code: compile_prelinked_chunk(
         crate::js!(module, "export const answer = 42;"),
         0,
         &[],
@@ -160,7 +160,7 @@ fn prelinked_public_root_attaches_declaration_source() {
       dependencies: vec![],
       exports: vec![],
       imports: vec![],
-      chunk: compile_prelinked_chunk("", 0, &[], &[]),
+      code: compile_prelinked_chunk("", 0, &[], &[]),
     }],
     0,
     vec![0],
@@ -206,7 +206,7 @@ fn prelinked_declarations_reject_private_and_unknown_targets_without_installing_
         dependencies: vec![],
         exports: vec![],
         imports: vec![],
-        chunk: compile_prelinked_chunk("", 0, &[], &[]),
+        code: compile_prelinked_chunk("", 0, &[], &[]),
       },
       PrelinkedModule {
         specifier: "declarations:public".to_string(),
@@ -215,7 +215,7 @@ fn prelinked_declarations_reject_private_and_unknown_targets_without_installing_
         dependencies: vec![],
         exports: vec![],
         imports: vec![],
-        chunk: compile_prelinked_chunk("", 1, &[], &[]),
+        code: compile_prelinked_chunk("", 1, &[], &[]),
       },
     ],
     0,
@@ -249,7 +249,7 @@ fn prelinked_declarations_reject_duplicate_targets_without_installing_graph() {
       dependencies: vec![],
       exports: vec![],
       imports: vec![],
-      chunk: compile_prelinked_chunk("", 0, &[], &[]),
+      code: compile_prelinked_chunk("", 0, &[], &[]),
     }],
     0,
     vec![0],
@@ -290,7 +290,7 @@ fn source_import_cannot_reach_a_private_prelinked_module() {
         dependencies: vec![],
         exports: vec![],
         imports: vec![],
-        chunk: compile_prelinked_chunk("", 0, &[], &[]),
+        code: compile_prelinked_chunk("", 0, &[], &[]),
       },
       PrelinkedModule {
         specifier: "visibility:public".to_string(),
@@ -299,7 +299,7 @@ fn source_import_cannot_reach_a_private_prelinked_module() {
         dependencies: vec![],
         exports: vec![],
         imports: vec![],
-        chunk: compile_prelinked_chunk("", 1, &[], &[]),
+        code: compile_prelinked_chunk("", 1, &[], &[]),
       },
     ],
     0,
@@ -337,7 +337,7 @@ fn public_prelinked_entry_evaluates_its_private_dependency() {
         dependencies: vec![],
         exports: vec![export("answer", 0)],
         imports: vec![],
-        chunk: compile_prelinked_chunk(
+        code: compile_prelinked_chunk(
           crate::js!(module, "export const answer = 42;"),
           0,
           &[],
@@ -351,7 +351,7 @@ fn public_prelinked_entry_evaluates_its_private_dependency() {
         dependencies: vec![0],
         exports: vec![],
         imports: vec![import("answer", 0)],
-        chunk: compile_prelinked_chunk(
+        code: compile_prelinked_chunk(
           crate::js!(
             module,
             "import { answer } from 'visibility:private'; globalThis.visibilityResult = answer;"
@@ -397,7 +397,7 @@ fn private_prelinked_host_module_injects_exports_without_executing_bytecode() {
         dependencies: vec![],
         exports: vec![export("host", 0)],
         imports: vec![],
-        chunk: compile_prelinked_chunk(
+        code: compile_prelinked_chunk(
           crate::js!(
             module,
             "export const host = undefined; globalThis.hostInitializerRan = true;"
@@ -414,7 +414,7 @@ fn private_prelinked_host_module_injects_exports_without_executing_bytecode() {
         dependencies: vec![0],
         exports: vec![],
         imports: vec![import("host", 0)],
-        chunk: compile_prelinked_chunk(
+        code: compile_prelinked_chunk(
           crate::js!(
             module,
             "import { host } from 'host:private'; globalThis.injectedHost = host;"
@@ -467,7 +467,7 @@ fn private_prelinked_specifiers_still_collide() {
         dependencies: vec![],
         exports: vec![],
         imports: vec![],
-        chunk: compile_prelinked_chunk("", 0, &[], &[]),
+        code: compile_prelinked_chunk("", 0, &[], &[]),
       },
       PrelinkedModule {
         specifier: "visibility:public".to_string(),
@@ -476,7 +476,7 @@ fn private_prelinked_specifiers_still_collide() {
         dependencies: vec![],
         exports: vec![],
         imports: vec![],
-        chunk: compile_prelinked_chunk("", 1, &[], &[]),
+        code: compile_prelinked_chunk("", 1, &[], &[]),
       },
     ],
     0,
@@ -507,7 +507,7 @@ fn private_prelinked_specifiers_still_collide() {
         dependencies: vec![],
         exports: vec![],
         imports: vec![],
-        chunk: compile_prelinked_chunk("", 0, &[], &[]),
+        code: compile_prelinked_chunk("", 0, &[], &[]),
       },
       PrelinkedModule {
         specifier: "visibility:other-public".to_string(),
@@ -516,7 +516,7 @@ fn private_prelinked_specifiers_still_collide() {
         dependencies: vec![],
         exports: vec![],
         imports: vec![],
-        chunk: compile_prelinked_chunk("", 1, &[], &[]),
+        code: compile_prelinked_chunk("", 1, &[], &[]),
       },
     ],
     0,
@@ -568,7 +568,7 @@ fn prelinked_cycles_read_preallocated_live_bindings() {
         dependencies: vec![1],
         exports: vec![export("a", 0), export("readB", 1)],
         imports: vec![import("getB", 2)],
-        chunk: a_chunk,
+        code: a_chunk,
       },
       PrelinkedModule {
         specifier: "cycle:b".to_string(),
@@ -577,7 +577,7 @@ fn prelinked_cycles_read_preallocated_live_bindings() {
         dependencies: vec![0],
         exports: vec![export("getB", 2)],
         imports: vec![import("a", 0)],
-        chunk: b_chunk,
+        code: b_chunk,
       },
       PrelinkedModule {
         specifier: "cycle:entry".to_string(),
@@ -586,7 +586,7 @@ fn prelinked_cycles_read_preallocated_live_bindings() {
         dependencies: vec![0],
         exports: vec![],
         imports: vec![import("readB", 1)],
-        chunk: entry_chunk,
+        code: entry_chunk,
       },
     ],
     3,
@@ -676,7 +676,7 @@ fn prelinked_reexports_and_export_all_share_the_origin_slot() {
         dependencies: vec![],
         exports: vec![export("value", 0)],
         imports: vec![],
-        chunk: base_chunk,
+        code: base_chunk,
       },
       PrelinkedModule {
         specifier: "reexport:alias".to_string(),
@@ -685,7 +685,7 @@ fn prelinked_reexports_and_export_all_share_the_origin_slot() {
         dependencies: vec![0],
         exports: vec![export("renamed", 0)],
         imports: vec![],
-        chunk: alias_chunk,
+        code: alias_chunk,
       },
       PrelinkedModule {
         specifier: "reexport:star".to_string(),
@@ -694,7 +694,7 @@ fn prelinked_reexports_and_export_all_share_the_origin_slot() {
         dependencies: vec![1],
         exports: vec![export("renamed", 0)],
         imports: vec![],
-        chunk: star_chunk,
+        code: star_chunk,
       },
       PrelinkedModule {
         specifier: "reexport:entry".to_string(),
@@ -703,7 +703,7 @@ fn prelinked_reexports_and_export_all_share_the_origin_slot() {
         dependencies: vec![2],
         exports: vec![],
         imports: vec![import("renamed", 0)],
-        chunk: entry_chunk,
+        code: entry_chunk,
       },
     ],
     1,
@@ -770,7 +770,7 @@ fn prelinked_namespace_imports_share_one_live_namespace() {
         dependencies: vec![],
         exports: vec![export("value", 0)],
         imports: vec![],
-        chunk: base_chunk,
+        code: base_chunk,
       },
       PrelinkedModule {
         specifier: "namespace:entry".to_string(),
@@ -779,7 +779,7 @@ fn prelinked_namespace_imports_share_one_live_namespace() {
         dependencies: vec![0, 0],
         exports: vec![],
         imports: vec![],
-        chunk: entry_chunk,
+        code: entry_chunk,
       },
     ],
     1,
@@ -838,7 +838,7 @@ fn prelinked_namespace_reexports_use_the_target_namespace_without_parsing() {
         dependencies: vec![],
         exports: vec![export("value", 0)],
         imports: vec![],
-        chunk: base_chunk,
+        code: base_chunk,
       },
       PrelinkedModule {
         specifier: "namespace-prelinked:reexport".to_string(),
@@ -847,7 +847,7 @@ fn prelinked_namespace_reexports_use_the_target_namespace_without_parsing() {
         dependencies: vec![0],
         exports: vec![export("ns", 1)],
         imports: vec![],
-        chunk: reexport_chunk,
+        code: reexport_chunk,
       },
       PrelinkedModule {
         specifier: "namespace-prelinked:entry".to_string(),
@@ -856,7 +856,7 @@ fn prelinked_namespace_reexports_use_the_target_namespace_without_parsing() {
         dependencies: vec![1, 0],
         exports: vec![],
         imports: vec![import("ns", 1)],
-        chunk: entry_chunk,
+        code: entry_chunk,
       },
     ],
     2,
@@ -913,7 +913,7 @@ fn prelinked_dependency_edges_control_side_effect_order() {
       dependencies: vec![],
       exports: vec![],
       imports: vec![],
-      chunk: compile_prelinked_chunk(
+      code: compile_prelinked_chunk(
         crate::js!(module, "globalThis.order = (globalThis.order || '') + 'A';"),
         0,
         &[],
@@ -927,7 +927,7 @@ fn prelinked_dependency_edges_control_side_effect_order() {
       dependencies: vec![],
       exports: vec![],
       imports: vec![],
-      chunk: compile_prelinked_chunk(
+      code: compile_prelinked_chunk(
         crate::js!(module, "globalThis.order = (globalThis.order || '') + 'B';"),
         1,
         &[],
@@ -941,7 +941,7 @@ fn prelinked_dependency_edges_control_side_effect_order() {
       dependencies: vec![1, 0],
       exports: vec![],
       imports: vec![],
-      chunk: compile_prelinked_chunk(
+      code: compile_prelinked_chunk(
         crate::js!(module, "globalThis.order = (globalThis.order || '') + 'E';"),
         2,
         &[],
@@ -992,7 +992,7 @@ fn source_modules_mix_with_prelinked_graphs_and_keep_reserved_indices() {
       dependencies: vec![],
       exports: vec![export("answer", 0)],
       imports: vec![],
-      chunk: compile_prelinked_chunk(
+      code: compile_prelinked_chunk(
         crate::js!(module, "export const answer = 42;"),
         0,
         &[],
@@ -1114,7 +1114,7 @@ fn precompiled_virtual_modules_keep_source_metadata_and_stable_indices() {
     exports: HashSet::from(["value".to_string()]),
     namespace_exports: HashMap::new(),
   };
-  let chunk =
+  let code =
     crate::compiler::compile_oxc_with_ctx(session.program(), Some(&context), session.source())
       .expect("precompiled source compiles");
   let mut loader = ModuleLoader::new();
@@ -1125,7 +1125,7 @@ fn precompiled_virtual_modules_keep_source_metadata_and_stable_indices() {
       SourceType::mjs(),
       None,
       7,
-      chunk,
+      code,
     ))
     .expect("precompiled registration succeeds");
   loader

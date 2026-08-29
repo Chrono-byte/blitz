@@ -21,12 +21,12 @@ impl Vm {
     };
     let session = crate::parser::Parser::parse_source(&wrapped)
       .map_err(|e| RuntimeError::from(format!("parse: {}", e)))?;
-    let chunk = crate::compiler::compile_repl_session(&session)
+    let code = crate::compiler::compile_repl_session(&session)
       .map_err(|e| RuntimeError::from(format!("compile: {}", e)))?;
     let mut child = self.fork_execution();
     child.adopt_eval_context(self);
     child.set_current_strict_mode(strict);
-    match child.run_nested(chunk, false) {
+    match child.run_nested(code, false) {
       Ok(value) => Ok(value),
       Err(failure) => {
         if let Some(thrown) = failure.thrown {
@@ -59,9 +59,9 @@ impl Vm {
     };
     let session = crate::parser::Parser::parse_source(&wrapped)
       .map_err(|e| RuntimeError::from(format!("parse: {}", e)))?;
-    let chunk = crate::compiler::compile_repl_session(&session)
+    let code = crate::compiler::compile_repl_session(&session)
       .map_err(|e| RuntimeError::from(format!("compile: {}", e)))?;
-    match self.run_nested(chunk, true) {
+    match self.run_nested(code, true) {
       Ok(value) => Ok(value),
       Err(failure) => {
         if let Some(thrown) = failure.thrown {

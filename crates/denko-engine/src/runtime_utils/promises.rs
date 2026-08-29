@@ -410,7 +410,7 @@ pub(crate) fn shadowrealm_evaluate(
   };
   let session = Parser::parse_source(source)
     .map_err(|e| syntax_error(vm, format!("ShadowRealm evaluate parse: {}", e)))?;
-  let chunk = compiler::compile_session(&session)
+  let code = compiler::compile_session(&session)
     .map_err(|e| syntax_error(vm, format!("ShadowRealm evaluate compile: {}", e)))?;
 
   let mut transfer_set: Option<HashSet<usize>> = None;
@@ -437,7 +437,7 @@ pub(crate) fn shadowrealm_evaluate(
 
   let inner_result = record
     .borrow_vm()
-    .run(chunk)
+    .run(code)
     .map_err(|err| vm.throw_type_error(&format!("ShadowRealm evaluate error: {}", err)))?;
 
   clone_value_across_realms(vm, &inner_result, transfer_set.as_ref())

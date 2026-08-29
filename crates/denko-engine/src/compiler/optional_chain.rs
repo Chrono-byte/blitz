@@ -20,25 +20,25 @@ impl Compiler {
 
     self.compile_optional_chain_expression(&member.object, &mut |this| {
       if member.optional {
-        this.emit(Op::Copy, LINE);
-        this.emit(Op::JumpIfNullish, LINE);
-        let nullish = this.current_ip();
+        this.emit(LoweringOpcode::Copy, LINE);
+        this.emit(LoweringOpcode::JumpIfNullish, LINE);
+        let nullish = this.current_pc();
         this.emit_jump_placeholder();
 
         this.emit_constant(Value::String(member.property.name.to_string().into()), LINE);
-        this.emit(Op::GetProperty, LINE);
+        this.emit(LoweringOpcode::GetProperty, LINE);
         continuation(this)?;
 
-        this.emit(Op::Jump, LINE);
-        let end = this.current_ip();
+        this.emit(LoweringOpcode::Jump, LINE);
+        let end = this.current_pc();
         this.emit_jump_placeholder();
         this.patch_jump(nullish);
-        this.emit(Op::Discard, LINE);
-        this.emit(Op::Undefined, LINE);
+        this.emit(LoweringOpcode::Discard, LINE);
+        this.emit(LoweringOpcode::Undefined, LINE);
         this.patch_jump(end);
       } else {
         this.emit_constant(Value::String(member.property.name.to_string().into()), LINE);
-        this.emit(Op::GetProperty, LINE);
+        this.emit(LoweringOpcode::GetProperty, LINE);
         continuation(this)?;
       }
       Ok(())
@@ -62,25 +62,25 @@ impl Compiler {
 
     self.compile_optional_chain_expression(&member.object, &mut |this| {
       if member.optional {
-        this.emit(Op::Copy, LINE);
-        this.emit(Op::JumpIfNullish, LINE);
-        let nullish = this.current_ip();
+        this.emit(LoweringOpcode::Copy, LINE);
+        this.emit(LoweringOpcode::JumpIfNullish, LINE);
+        let nullish = this.current_pc();
         this.emit_jump_placeholder();
 
         this.compile_expr_oast(&member.expression)?;
-        this.emit(Op::GetProperty, LINE);
+        this.emit(LoweringOpcode::GetProperty, LINE);
         continuation(this)?;
 
-        this.emit(Op::Jump, LINE);
-        let end = this.current_ip();
+        this.emit(LoweringOpcode::Jump, LINE);
+        let end = this.current_pc();
         this.emit_jump_placeholder();
         this.patch_jump(nullish);
-        this.emit(Op::Discard, LINE);
-        this.emit(Op::Undefined, LINE);
+        this.emit(LoweringOpcode::Discard, LINE);
+        this.emit(LoweringOpcode::Undefined, LINE);
         this.patch_jump(end);
       } else {
         this.compile_expr_oast(&member.expression)?;
-        this.emit(Op::GetProperty, LINE);
+        this.emit(LoweringOpcode::GetProperty, LINE);
         continuation(this)?;
       }
       Ok(())
@@ -94,27 +94,27 @@ impl Compiler {
   ) -> Result<(), crate::errors::CompilerError> {
     self.compile_optional_chain_expression(&member.object, &mut |this| {
       if member.optional {
-        this.emit(Op::Copy, LINE);
-        this.emit(Op::JumpIfNullish, LINE);
-        let nullish = this.current_ip();
+        this.emit(LoweringOpcode::Copy, LINE);
+        this.emit(LoweringOpcode::JumpIfNullish, LINE);
+        let nullish = this.current_pc();
         this.emit_jump_placeholder();
 
         let key = this.ensure_private_name_constant(&member.field.name);
         this.emit_constant(key, LINE);
-        this.emit(Op::GetProperty, LINE);
+        this.emit(LoweringOpcode::GetProperty, LINE);
         continuation(this)?;
 
-        this.emit(Op::Jump, LINE);
-        let end = this.current_ip();
+        this.emit(LoweringOpcode::Jump, LINE);
+        let end = this.current_pc();
         this.emit_jump_placeholder();
         this.patch_jump(nullish);
-        this.emit(Op::Discard, LINE);
-        this.emit(Op::Undefined, LINE);
+        this.emit(LoweringOpcode::Discard, LINE);
+        this.emit(LoweringOpcode::Undefined, LINE);
         this.patch_jump(end);
       } else {
         let key = this.ensure_private_name_constant(&member.field.name);
         this.emit_constant(key, LINE);
-        this.emit(Op::GetProperty, LINE);
+        this.emit(LoweringOpcode::GetProperty, LINE);
         continuation(this)?;
       }
       Ok(())
@@ -139,27 +139,27 @@ impl Compiler {
         }
         self.compile_optional_chain_expression(&member.object, &mut |this| {
           if member.optional {
-            this.emit(Op::Copy, LINE);
-            this.emit(Op::JumpIfNullish, LINE);
-            let nullish = this.current_ip();
+            this.emit(LoweringOpcode::Copy, LINE);
+            this.emit(LoweringOpcode::JumpIfNullish, LINE);
+            let nullish = this.current_pc();
             this.emit_jump_placeholder();
 
-            this.emit(Op::Copy, LINE);
+            this.emit(LoweringOpcode::Copy, LINE);
             this.emit_constant(Value::String(member.property.name.to_string().into()), LINE);
-            this.emit(Op::GetProperty, LINE);
+            this.emit(LoweringOpcode::GetProperty, LINE);
             continuation(this)?;
 
-            this.emit(Op::Jump, LINE);
-            let end = this.current_ip();
+            this.emit(LoweringOpcode::Jump, LINE);
+            let end = this.current_pc();
             this.emit_jump_placeholder();
             this.patch_jump(nullish);
-            this.emit(Op::Discard, LINE);
-            this.emit(Op::Undefined, LINE);
+            this.emit(LoweringOpcode::Discard, LINE);
+            this.emit(LoweringOpcode::Undefined, LINE);
             this.patch_jump(end);
           } else {
-            this.emit(Op::Copy, LINE);
+            this.emit(LoweringOpcode::Copy, LINE);
             this.emit_constant(Value::String(member.property.name.to_string().into()), LINE);
-            this.emit(Op::GetProperty, LINE);
+            this.emit(LoweringOpcode::GetProperty, LINE);
             continuation(this)?;
           }
           Ok(())
@@ -177,27 +177,27 @@ impl Compiler {
         }
         self.compile_optional_chain_expression(&member.object, &mut |this| {
           if member.optional {
-            this.emit(Op::Copy, LINE);
-            this.emit(Op::JumpIfNullish, LINE);
-            let nullish = this.current_ip();
+            this.emit(LoweringOpcode::Copy, LINE);
+            this.emit(LoweringOpcode::JumpIfNullish, LINE);
+            let nullish = this.current_pc();
             this.emit_jump_placeholder();
 
-            this.emit(Op::Copy, LINE);
+            this.emit(LoweringOpcode::Copy, LINE);
             this.compile_expr_oast(&member.expression)?;
-            this.emit(Op::GetProperty, LINE);
+            this.emit(LoweringOpcode::GetProperty, LINE);
             continuation(this)?;
 
-            this.emit(Op::Jump, LINE);
-            let end = this.current_ip();
+            this.emit(LoweringOpcode::Jump, LINE);
+            let end = this.current_pc();
             this.emit_jump_placeholder();
             this.patch_jump(nullish);
-            this.emit(Op::Discard, LINE);
-            this.emit(Op::Undefined, LINE);
+            this.emit(LoweringOpcode::Discard, LINE);
+            this.emit(LoweringOpcode::Undefined, LINE);
             this.patch_jump(end);
           } else {
-            this.emit(Op::Copy, LINE);
+            this.emit(LoweringOpcode::Copy, LINE);
             this.compile_expr_oast(&member.expression)?;
-            this.emit(Op::GetProperty, LINE);
+            this.emit(LoweringOpcode::GetProperty, LINE);
             continuation(this)?;
           }
           Ok(())
@@ -206,29 +206,29 @@ impl Compiler {
       oast::Expression::PrivateFieldExpression(member) => {
         self.compile_optional_chain_expression(&member.object, &mut |this| {
           if member.optional {
-            this.emit(Op::Copy, LINE);
-            this.emit(Op::JumpIfNullish, LINE);
-            let nullish = this.current_ip();
+            this.emit(LoweringOpcode::Copy, LINE);
+            this.emit(LoweringOpcode::JumpIfNullish, LINE);
+            let nullish = this.current_pc();
             this.emit_jump_placeholder();
 
-            this.emit(Op::Copy, LINE);
+            this.emit(LoweringOpcode::Copy, LINE);
             let key = this.ensure_private_name_constant(&member.field.name);
             this.emit_constant(key, LINE);
-            this.emit(Op::GetProperty, LINE);
+            this.emit(LoweringOpcode::GetProperty, LINE);
             continuation(this)?;
 
-            this.emit(Op::Jump, LINE);
-            let end = this.current_ip();
+            this.emit(LoweringOpcode::Jump, LINE);
+            let end = this.current_pc();
             this.emit_jump_placeholder();
             this.patch_jump(nullish);
-            this.emit(Op::Discard, LINE);
-            this.emit(Op::Undefined, LINE);
+            this.emit(LoweringOpcode::Discard, LINE);
+            this.emit(LoweringOpcode::Undefined, LINE);
             this.patch_jump(end);
           } else {
-            this.emit(Op::Copy, LINE);
+            this.emit(LoweringOpcode::Copy, LINE);
             let key = this.ensure_private_name_constant(&member.field.name);
             this.emit_constant(key, LINE);
-            this.emit(Op::GetProperty, LINE);
+            this.emit(LoweringOpcode::GetProperty, LINE);
             continuation(this)?;
           }
           Ok(())
@@ -246,12 +246,12 @@ impl Compiler {
     let arg_count = self.checked_arg_count(call.arguments.len())?;
     let receiver_slot = if has_receiver {
       let callee_slot = self.alloc_temp_local("chain_spread_callee");
-      self.emit(Op::StoreLocal, LINE);
+      self.emit(LoweringOpcode::StoreLocal, LINE);
       self.emit_slot(callee_slot, LINE);
       let receiver_slot = self.alloc_temp_local("chain_spread_receiver");
-      self.emit(Op::StoreLocal, LINE);
+      self.emit(LoweringOpcode::StoreLocal, LINE);
       self.emit_slot(receiver_slot, LINE);
-      self.emit(Op::LoadLocal, LINE);
+      self.emit(LoweringOpcode::LoadLocal, LINE);
       self.emit_slot(callee_slot, LINE);
       Some(receiver_slot)
     } else {
@@ -271,31 +271,45 @@ impl Compiler {
             spread_flags.push(false);
           }
           None => {
-            self.emit(Op::Undefined, LINE);
+            self.emit(LoweringOpcode::Undefined, LINE);
             spread_flags.push(false);
           }
         },
       }
     }
 
-    self.emit(Op::BuildArray, LINE);
+    self.emit(LoweringOpcode::BuildArray, LINE);
     self.emit_byte(arg_count, LINE);
     for (index, is_spread) in spread_flags.into_iter().enumerate() {
       if index == 0
         && let Some(receiver_slot) = receiver_slot
       {
-        self.emit(Op::LoadLocal, LINE);
+        self.emit(LoweringOpcode::LoadLocal, LINE);
         self.emit_slot(receiver_slot, LINE);
-        self.emit(if is_spread { Op::True } else { Op::False }, LINE);
-        self.emit(Op::BuildArray, LINE);
+        self.emit(
+          if is_spread {
+            LoweringOpcode::True
+          } else {
+            LoweringOpcode::False
+          },
+          LINE,
+        );
+        self.emit(LoweringOpcode::BuildArray, LINE);
         self.emit_byte(2, LINE);
         continue;
       }
-      self.emit(if is_spread { Op::True } else { Op::False }, LINE);
+      self.emit(
+        if is_spread {
+          LoweringOpcode::True
+        } else {
+          LoweringOpcode::False
+        },
+        LINE,
+      );
     }
-    self.emit(Op::BuildArray, LINE);
+    self.emit(LoweringOpcode::BuildArray, LINE);
     self.emit_byte(arg_count, LINE);
-    self.emit(Op::Spread, LINE);
+    self.emit(LoweringOpcode::Spread, LINE);
     self.emit_byte(arg_count, LINE);
     Ok(())
   }
@@ -313,9 +327,9 @@ impl Compiler {
     );
     let mut emit_call = |this: &mut Self| {
       let cleanup = if call.optional {
-        this.emit(Op::Copy, LINE);
-        this.emit(Op::JumpIfNullish, LINE);
-        let nullish = this.current_ip();
+        this.emit(LoweringOpcode::Copy, LINE);
+        this.emit(LoweringOpcode::JumpIfNullish, LINE);
+        let nullish = this.current_pc();
         this.emit_jump_placeholder();
         Some(nullish)
       } else {
@@ -332,9 +346,9 @@ impl Compiler {
         let arg_count = this.compile_call_arguments(&call.arguments)?;
         this.emit_call_with_arg_count(
           if member_callee {
-            Op::CallBuiltin
+            LoweringOpcode::CallMethod
           } else {
-            Op::Call
+            LoweringOpcode::Call
           },
           arg_count,
         )?;
@@ -342,15 +356,15 @@ impl Compiler {
       continuation(this)?;
 
       if let Some(nullish) = cleanup {
-        this.emit(Op::Jump, LINE);
-        let end = this.current_ip();
+        this.emit(LoweringOpcode::Jump, LINE);
+        let end = this.current_pc();
         this.emit_jump_placeholder();
         this.patch_jump(nullish);
         if member_callee {
-          this.emit(Op::Discard, LINE);
+          this.emit(LoweringOpcode::Discard, LINE);
         }
-        this.emit(Op::Discard, LINE);
-        this.emit(Op::Undefined, LINE);
+        this.emit(LoweringOpcode::Discard, LINE);
+        this.emit(LoweringOpcode::Undefined, LINE);
         this.patch_jump(end);
       }
       Ok(())

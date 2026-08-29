@@ -96,8 +96,8 @@ pub(crate) fn set_builtin_name(
 const MAX_ARRAY_LENGTH_F: f64 = 4294967295.0_f64;
 const MAX_SAFE_INTEGER_F: f64 = 9007199254740991.0_f64;
 
-/// Clears the slot types in a chunk and its nested function chunks.
-pub fn clear_slot_types_in_chunk(chunk: bytecode::Chunk) -> bytecode::Chunk {
+/// Clears the slot types in chunk and its nested functions.
+pub fn clear_slot_types_in_code(code: bytecode::Chunk) -> bytecode::Chunk {
   fn rebuild(
     rc_chunk: &Arc<bytecode::Chunk>,
     visited: &mut HashMap<*const bytecode::Chunk, Arc<bytecode::Chunk>>,
@@ -116,11 +116,11 @@ pub fn clear_slot_types_in_chunk(chunk: bytecode::Chunk) -> bytecode::Chunk {
 
     let mut new_funcs = Vec::new();
     for f in &rc_chunk.functions {
-      let nested = rebuild(&f.chunk, visited);
+      let nested = rebuild(&f.code, visited);
       let mut nf = f.clone();
       nf.slot_types = nf.slot_types.iter().map(|_| None).collect();
       nf.return_type = None;
-      nf.chunk = nested;
+      nf.code = nested;
       new_funcs.push(nf);
     }
     new_chunk.functions = new_funcs;
@@ -130,7 +130,7 @@ pub fn clear_slot_types_in_chunk(chunk: bytecode::Chunk) -> bytecode::Chunk {
     rc_new
   }
 
-  let rc = Arc::new(chunk);
+  let rc = Arc::new(code);
   let mut visited: HashMap<*const bytecode::Chunk, Arc<bytecode::Chunk>> = HashMap::new();
   let rc_cleared = rebuild(&rc, &mut visited);
   Arc::try_unwrap(rc_cleared).unwrap_or_else(|rc| (*rc).clone())

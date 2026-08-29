@@ -37,7 +37,7 @@ impl Vm {
   /// never be hidden by the cache.
   pub(super) fn get_property_value_cached(
     &mut self,
-    instruction_ip: usize,
+    instruction_pc: usize,
     obj: &Value,
     key: &PropertyKey,
   ) -> Result<Value, RuntimeError> {
@@ -59,8 +59,8 @@ impl Vm {
       return self.get_property_value(obj, key);
     };
     let site = (
-      std::sync::Arc::as_ptr(&self.execution.active.chunk) as usize,
-      instruction_ip,
+      std::sync::Arc::as_ptr(&self.execution.active.code) as usize,
+      instruction_pc,
     );
 
     if let Some(entry) = self.caches.property_get.get(&site)

@@ -9,8 +9,8 @@ mod sequences;
 
 use crate::binding::BindingCell;
 use crate::bytecode::{
-  Chunk, Op, VerifiedChunk, decode_aux8, decode_compare_jump, decode_rd, decode_risc_aux16,
-  decode_risc_cond_offset, decode_rs,
+  Chunk, Opcode, VerifiedChunk, abi, decode_aux8, decode_aux16, decode_compare_jump,
+  decode_conditional_branch_offset, decode_rd, decode_rs,
 };
 use crate::ecmascript::semantics::properties::own_property_descriptor;
 use crate::environment::EnvironmentRecord;
@@ -43,12 +43,12 @@ pub(crate) struct NestedRunFailure {
 impl Vm {
   pub fn run(
     &mut self,
-    chunk: Chunk,
+    code: Chunk,
   ) -> Result<Value, RuntimeError> {
-    chunk
+    code
       .verify()
       .map_err(|error| RuntimeError::from(format!("Invalid bytecode: {}", error)))?;
-    self.run_risc_root(Arc::new(chunk))
+    self.run_root(Arc::new(code))
   }
 
   /// Execute one interactive submission and retain its top-level bindings.
@@ -58,12 +58,12 @@ impl Vm {
   /// successful submission must remain visible to later submissions.
   pub fn run_repl(
     &mut self,
-    chunk: Chunk,
+    code: Chunk,
   ) -> Result<Value, RuntimeError> {
-    chunk
+    code
       .verify()
       .map_err(|error| RuntimeError::from(format!("Invalid bytecode: {}", error)))?;
-    let result = self.run_risc_root(Arc::new(chunk))?;
+    let result = self.run_root(Arc::new(code))?;
     if self.current_module_specifier().is_none() {
       self.persist_root_bindings();
     }
@@ -73,25 +73,25 @@ impl Vm {
   /// Execute bytecode that has already passed structural verification.
   pub fn run_verified(
     &mut self,
-    chunk: &VerifiedChunk,
+    code: &VerifiedChunk,
   ) -> Result<Value, RuntimeError> {
-    self.run_risc_root(chunk.chunk())
+    self.run_root(code.code())
   }
 
-  fn run_risc_root(
+  fn run_root(
     &mut self,
     chunk_rc: Arc<Chunk>,
   ) -> Result<Value, RuntimeError> {
     self.execution.root_chunk = Some(Arc::clone(&chunk_rc));
-    self.execution.active.chunk = chunk_rc;
-    self.execution.active.ip = 0;
+    self.execution.active.code = chunk_rc;
+    self.execution.active.pc = 0;
     self.execution.active.locals.clear();
     self.execution.call_stack.clear();
-    self.execution.active.strict = self.execution.active.chunk.root_strict;
+    self.execution.active.strict = self.execution.active.code.root_strict;
     self.exceptions.handlers.clear();
     self.exceptions.pending = None;
     self.exceptions.pending_frame_count = None;
-    self.exceptions.unwound_risc_state = None;
+    self.exceptions.unwound_register_state = None;
     self.caches.property_get.clear();
     self.execution.active.slots = None;
     self.execution.direct_eval_outer = None;
@@ -126,14 +126,14 @@ impl Vm {
     gc::reset_allocation_pressure();
     self.begin_opcode_profile_run();
 
-    let result = self.run_risc_loop(true);
+    let result = self.run_loop(true);
     if result.is_ok() && self.current_module_specifier().is_none() {
       self.persist_root_bindings();
     }
     result
   }
 
-  pub(super) fn run_risc_loop(
+  pub(super) fn run_loop(
     &mut self,
     _root_execution: bool,
   ) -> Result<Value, RuntimeError> {
@@ -144,25 +144,26 @@ impl Vm {
       .entry(function_id)
       .or_default()
       .record_call();
-    let mut state = RiscExecutionState::new(
+    let mut state = RegisterState::new(
       self.execution.active.this_value.clone(),
-      self.execution.active.chunk.risc_spill_count as usize,
+      &[],
+      self.execution.active.code.spill_slot_count as usize,
     );
-    match self.run_risc_state(&mut state, false)? {
-      RiscRunOutcome::Return(value) => Ok(value),
-      RiscRunOutcome::Yield(_) | RiscRunOutcome::YieldStar(_) => {
+    match self.run_state(&mut state, false)? {
+      RunOutcome::Return(value) => Ok(value),
+      RunOutcome::Yield(_) | RunOutcome::YieldStar(_) => {
         Err(RuntimeError::from("yield outside generator execution"))
       }
-      RiscRunOutcome::Await(_) => Err(RuntimeError::from("await outside async execution")),
-      RiscRunOutcome::Initialized => Err(RuntimeError::from(
+      RunOutcome::Await(_) => Err(RuntimeError::from("await outside async execution")),
+      RunOutcome::Initialized => Err(RuntimeError::from(
         "generator boundary outside generator execution",
       )),
     }
   }
 
-  pub(crate) fn discard_suspended_risc_activation(
+  pub(crate) fn discard_suspended_activation(
     &mut self,
-    state: &mut RiscExecutionState,
+    state: &mut RegisterState,
   ) {
     while let Some(frame) = self.execution.call_stack.pop() {
       self.execution.active = frame.context;
@@ -176,15 +177,15 @@ impl Vm {
     self.exceptions.handlers.clear();
     self.exceptions.pending = None;
     self.exceptions.pending_frame_count = None;
-    self.exceptions.unwound_risc_state = None;
+    self.exceptions.unwound_register_state = None;
     state.clear();
   }
 
-  fn restore_pending_risc_exception(
+  fn restore_pending_exception(
     &mut self,
     registers: &mut [Value; 16],
-    spills: &mut Vec<Value>,
-    resume_register: &mut Option<usize>,
+    spill_slots: &mut Vec<Value>,
+    resume_destination: &mut Option<usize>,
     boundary_frame_count: usize,
   ) -> bool {
     if self.exceptions.pending.is_none()
@@ -195,13 +196,13 @@ impl Vm {
     {
       return false;
     }
-    if let Some(caller_state) = self.exceptions.unwound_risc_state.take() {
+    if let Some(caller_state) = self.exceptions.unwound_register_state.take() {
       *registers = caller_state.registers;
-      *spills = caller_state.spills;
-      *resume_register = caller_state.resume_register;
+      *spill_slots = caller_state.spill_slots;
+      *resume_destination = caller_state.resume_destination;
     }
     self.exceptions.pending_frame_count = None;
-    registers[7] = self
+    registers[abi::EXCEPTION.index()] = self
       .exceptions
       .pending
       .take()
@@ -209,24 +210,24 @@ impl Vm {
     true
   }
 
-  fn finish_risc_return(
+  fn finish_return(
     &mut self,
     registers: &mut [Value; 16],
-    spills: &mut Vec<Value>,
-    resume_register: &mut Option<usize>,
+    spill_slots: &mut Vec<Value>,
+    resume_destination: &mut Option<usize>,
     result: Value,
-  ) -> Result<Option<RiscRunOutcome>, RuntimeError> {
+  ) -> Result<Option<RunOutcome>, RuntimeError> {
     if let Some(caller_state) = self
       .execution
       .call_stack
       .last_mut()
-      .and_then(|frame| frame.risc_state.take())
+      .and_then(|frame| frame.register_state.take())
     {
       self.execute_return(result.clone())?;
       *registers = caller_state.registers;
       registers[0] = result;
-      *spills = caller_state.spills;
-      *resume_register = caller_state.resume_register;
+      *spill_slots = caller_state.spill_slots;
+      *resume_destination = caller_state.resume_destination;
       return Ok(None);
     }
     if self.execution.call_stack.is_empty() && self.execution.interpreter_depth == 1 {
@@ -239,23 +240,22 @@ impl Vm {
       self.memory.kept_alive.clear();
       self.finish_opcode_profile_run("risc-return");
     }
-    Ok(Some(RiscRunOutcome::Return(result)))
+    Ok(Some(RunOutcome::Return(result)))
   }
 
-  pub(super) fn run_risc_state(
+  pub(super) fn run_state(
     &mut self,
-    state: &mut RiscExecutionState,
+    state: &mut RegisterState,
     stop_at_generator_init: bool,
-  ) -> Result<RiscRunOutcome, RuntimeError> {
+  ) -> Result<RunOutcome, RuntimeError> {
     self.execution.interpreter_depth += 1;
     let result = (|| {
       if !stop_at_generator_init {
-        self.try_run_baseline(state)?.map_or_else(
-          || self.run_risc_state_inner(state, stop_at_generator_init),
-          Ok,
-        )
+        self
+          .try_run_baseline(state)?
+          .map_or_else(|| self.run_state_inner(state, stop_at_generator_init), Ok)
       } else {
-        self.run_risc_state_inner(state, stop_at_generator_init)
+        self.run_state_inner(state, stop_at_generator_init)
       }
     })();
     self.process_baseline_requests();
@@ -263,16 +263,16 @@ impl Vm {
     result
   }
 
-  fn run_risc_state_inner(
+  fn run_state_inner(
     &mut self,
-    state: &mut RiscExecutionState,
+    state: &mut RegisterState,
     stop_at_generator_init: bool,
-  ) -> Result<RiscRunOutcome, RuntimeError> {
+  ) -> Result<RunOutcome, RuntimeError> {
     const GC_POLL_INTERVAL: u8 = 64;
 
     let boundary_frame_count = self.execution.call_stack.len();
     let registers = &mut state.registers;
-    let spills = &mut state.spills;
+    let spill_slots = &mut state.spill_slots;
     let mut gc_poll_countdown = GC_POLL_INTERVAL;
 
     if self
@@ -282,14 +282,14 @@ impl Vm {
       && let Some(exception) = self.exceptions.pending.take()
     {
       self.exceptions.pending_frame_count = None;
-      registers[7] = exception;
+      registers[abi::EXCEPTION.index()] = exception;
     }
 
     if let Err(error) = self.poll_execution_interrupt()
-      && !self.restore_pending_risc_exception(
+      && !self.restore_pending_exception(
         registers,
-        spills,
-        &mut state.resume_register,
+        spill_slots,
+        &mut state.resume_destination,
         boundary_frame_count,
       )
     {
@@ -302,10 +302,10 @@ impl Vm {
           match $operation {
             Ok(value) => value,
             Err(error) => {
-              if self.restore_pending_risc_exception(
+              if self.restore_pending_exception(
                 registers,
-                spills,
-                &mut state.resume_register,
+                spill_slots,
+                &mut state.resume_destination,
                 boundary_frame_count,
               ) {
                 continue;
@@ -326,17 +326,17 @@ impl Vm {
           }
           PendingOperationStep::Await { value, operation } => {
             state.pending_operation = Some(operation);
-            return Ok(RiscRunOutcome::Await(value));
+            return Ok(RunOutcome::Await(value));
           }
           PendingOperationStep::Throw(reason) => {
             let error = match self.throw_value(reason) {
               Ok(()) => RuntimeError::from("JS exception"),
               Err(error) => error,
             };
-            if self.restore_pending_risc_exception(
+            if self.restore_pending_exception(
               registers,
-              spills,
-              &mut state.resume_register,
+              spill_slots,
+              &mut state.resume_destination,
               boundary_frame_count,
             ) {
               continue;
@@ -353,7 +353,7 @@ impl Vm {
       if let SiteAction::Region(region) = action
         && boundary_try!(self.try_native_region(region, registers))
       {
-        self.record_jit_backedge(self.execution.active.ip.saturating_sub(1));
+        self.record_jit_backedge(self.execution.active.pc.saturating_sub(1));
         let cost = self
           .caches
           .active_regions
@@ -374,12 +374,12 @@ impl Vm {
         && boundary_try!(self.try_numeric_compare_branch_sequence(registers))
       {
         if self.profiling.enabled {
-          self.profiling.opcode_counts[Op::LoadLocal as usize] =
-            self.profiling.opcode_counts[Op::LoadLocal as usize].saturating_add(1);
-          self.profiling.opcode_counts[Op::Const as usize] =
-            self.profiling.opcode_counts[Op::Const as usize].saturating_add(1);
-          self.profiling.opcode_counts[Op::CompareJump as usize] =
-            self.profiling.opcode_counts[Op::CompareJump as usize].saturating_add(1);
+          self.profiling.opcode_counts[Opcode::LoadLocal as usize] =
+            self.profiling.opcode_counts[Opcode::LoadLocal as usize].saturating_add(1);
+          self.profiling.opcode_counts[Opcode::Const as usize] =
+            self.profiling.opcode_counts[Opcode::Const as usize].saturating_add(1);
+          self.profiling.opcode_counts[Opcode::CompareJump as usize] =
+            self.profiling.opcode_counts[Opcode::CompareJump as usize].saturating_add(1);
         }
         gc_poll_countdown = gc_poll_countdown.saturating_sub(3);
         if gc_poll_countdown == 0 {
@@ -393,12 +393,12 @@ impl Vm {
       {
         if self.profiling.enabled {
           for (op, count) in [
-            (Op::LoadLocal, 4),
-            (Op::StoreLocal, 1),
-            (Op::Const, 1),
-            (Op::GetProperty, 1),
-            (Op::Move, 4),
-            (Op::CallBuiltin, 1),
+            (Opcode::LoadLocal, 4),
+            (Opcode::StoreLocal, 1),
+            (Opcode::Const, 1),
+            (Opcode::GetProperty, 1),
+            (Opcode::Move, 4),
+            (Opcode::CallMethod, 1),
           ] {
             self.profiling.opcode_counts[op as usize] =
               self.profiling.opcode_counts[op as usize].saturating_add(count);
@@ -416,11 +416,11 @@ impl Vm {
       {
         if self.profiling.enabled {
           for (op, count) in [
-            (Op::LoadLocal, 4),
-            (Op::Const, 1),
-            (Op::GetProperty, 1),
-            (Op::Add, 1),
-            (Op::StoreLocal, 2),
+            (Opcode::LoadLocal, 4),
+            (Opcode::Const, 1),
+            (Opcode::GetProperty, 1),
+            (Opcode::Add, 1),
+            (Opcode::StoreLocal, 2),
           ] {
             self.profiling.opcode_counts[op as usize] =
               self.profiling.opcode_counts[op as usize].saturating_add(count);
@@ -438,12 +438,12 @@ impl Vm {
       {
         if self.profiling.enabled {
           for (op, count) in [
-            (Op::LoadLocal, 3),
-            (Op::Neg, 2),
-            (Op::Const, 1),
-            (Op::Move, 1),
-            (Op::Add, 1),
-            (Op::StoreLocal, 2),
+            (Opcode::LoadLocal, 3),
+            (Opcode::Neg, 2),
+            (Opcode::Const, 1),
+            (Opcode::Move, 1),
+            (Opcode::Add, 1),
+            (Opcode::StoreLocal, 2),
           ] {
             self.profiling.opcode_counts[op as usize] =
               self.profiling.opcode_counts[op as usize].saturating_add(count);
@@ -460,12 +460,12 @@ impl Vm {
         && boundary_try!(self.try_numeric_add_local_sequence(registers))
       {
         if self.profiling.enabled {
-          self.profiling.opcode_counts[Op::LoadLocal as usize] =
-            self.profiling.opcode_counts[Op::LoadLocal as usize].saturating_add(2);
-          self.profiling.opcode_counts[Op::Add as usize] =
-            self.profiling.opcode_counts[Op::Add as usize].saturating_add(1);
-          self.profiling.opcode_counts[Op::StoreLocal as usize] =
-            self.profiling.opcode_counts[Op::StoreLocal as usize].saturating_add(1);
+          self.profiling.opcode_counts[Opcode::LoadLocal as usize] =
+            self.profiling.opcode_counts[Opcode::LoadLocal as usize].saturating_add(2);
+          self.profiling.opcode_counts[Opcode::Add as usize] =
+            self.profiling.opcode_counts[Opcode::Add as usize].saturating_add(1);
+          self.profiling.opcode_counts[Opcode::StoreLocal as usize] =
+            self.profiling.opcode_counts[Opcode::StoreLocal as usize].saturating_add(1);
         }
         gc_poll_countdown = gc_poll_countdown.saturating_sub(4);
         if gc_poll_countdown == 0 {
@@ -478,15 +478,15 @@ impl Vm {
       let word = *self
         .execution
         .active
-        .chunk
         .code
-        .get(self.execution.active.ip)
-        .ok_or_else(|| RuntimeError::from("RISC instruction pointer out of bounds"))?;
-      let instruction_ip = self.execution.active.ip;
-      self.execution.active.ip += 1;
-      // SAFETY: every public execution entry verifies the chunk recursively
+        .words
+        .get(self.execution.active.pc)
+        .ok_or_else(|| RuntimeError::from("instruction pointer out of bounds"))?;
+      let instruction_pc = self.execution.active.pc;
+      self.execution.active.pc += 1;
+      // SAFETY: every public execution entry verifies the code recursively
       // before this loop runs, including nested function chunks.
-      let op = unsafe { Op::from_byte_unchecked((word & 0xFF) as u8) };
+      let op = unsafe { Opcode::from_byte_unchecked((word & 0xFF) as u8) };
       let rd = decode_rd(word) as usize;
       let rs = decode_rs(word) as usize;
       if self.profiling.enabled {
@@ -499,54 +499,54 @@ impl Vm {
           self
             .execution
             .active
-            .chunk
-            .disassemble_at(instruction_ip)
-            .unwrap_or_else(|_| format!("ip={instruction_ip}"))
+            .code
+            .disassemble_at(instruction_pc)
+            .unwrap_or_else(|_| format!("pc={instruction_pc}"))
         );
       }
 
-      let mut switched_risc_context = false;
-      let step_result = (|| -> Result<Option<RiscRunOutcome>, RuntimeError> {
+      let mut switched_context = false;
+      let step_result = (|| -> Result<Option<RunOutcome>, RuntimeError> {
         match op {
-          Op::Const => {
+          Opcode::Const => {
             registers[rd] = self
               .execution
               .active
-              .chunk
+              .code
               .constants
-              .get(decode_risc_aux16(word) as usize)
+              .get(decode_aux16(word) as usize)
               .map(crate::bytecode::Constant::to_value)
-              .ok_or_else(|| RuntimeError::from("RISC constant index out of bounds"))?;
+              .ok_or_else(|| RuntimeError::from("constant index out of bounds"))?;
           }
-          Op::Null => registers[rd] = Value::Null,
-          Op::True => registers[rd] = Value::Bool(true),
-          Op::False => registers[rd] = Value::Bool(false),
-          Op::Undefined => registers[rd] = Value::Undefined,
-          Op::Move => registers[rd] = registers[rs].clone(),
-          Op::LoadSpill => {
-            registers[rd] = spills
-              .get(decode_risc_aux16(word) as usize)
+          Opcode::Null => registers[rd] = Value::Null,
+          Opcode::True => registers[rd] = Value::Bool(true),
+          Opcode::False => registers[rd] = Value::Bool(false),
+          Opcode::Undefined => registers[rd] = Value::Undefined,
+          Opcode::Move => registers[rd] = registers[rs].clone(),
+          Opcode::LoadSpill => {
+            registers[rd] = spill_slots
+              .get(decode_aux16(word) as usize)
               .cloned()
-              .ok_or_else(|| RuntimeError::from("RISC spill load out of bounds"))?;
+              .ok_or_else(|| RuntimeError::from("spill load out of bounds"))?;
           }
-          Op::StoreSpill => {
-            let spill = spills
-              .get_mut(decode_risc_aux16(word) as usize)
-              .ok_or_else(|| RuntimeError::from("RISC spill store out of bounds"))?;
+          Opcode::StoreSpill => {
+            let spill = spill_slots
+              .get_mut(decode_aux16(word) as usize)
+              .ok_or_else(|| RuntimeError::from("spill store out of bounds"))?;
             *spill = registers[rd].clone();
           }
-          Op::MakeClosure => {
-            registers[rd] = self.make_closure_value(decode_risc_aux16(word) as usize)?;
+          Opcode::MakeClosure => {
+            registers[rd] = self.make_closure_value(decode_aux16(word) as usize)?;
           }
-          Op::LoadLocal => {
-            let slot = decode_risc_aux16(word) as usize;
+          Opcode::LoadLocal => {
+            let slot = decode_aux16(word) as usize;
             let value = self
               .execution
               .active
               .locals
               .get(slot)
               .map(BindingCell::value)
-              .ok_or_else(|| RuntimeError::from("bad RISC local slot"))?;
+              .ok_or_else(|| RuntimeError::from("bad bytecode local slot"))?;
             if matches!(value, Value::Uninitialized) {
               return Err(
                 self.throw_reference_error("Cannot access lexical binding before initialization"),
@@ -554,8 +554,8 @@ impl Vm {
             }
             registers[rd] = value;
           }
-          Op::StoreLocal => {
-            let slot = decode_risc_aux16(word) as usize;
+          Opcode::StoreLocal => {
+            let slot = decode_aux16(word) as usize;
             ensure_slot(&mut self.execution.active.locals, slot);
             let was_uninitialized = self.execution.active.locals[slot].is_uninitialized();
             let immutable = self
@@ -585,7 +585,7 @@ impl Vm {
                     self
                       .execution
                       .active
-                      .chunk
+                      .code
                       .root_slot_names
                       .get(slot)
                       .and_then(Clone::clone)
@@ -644,19 +644,19 @@ impl Vm {
               }
             }
           }
-          Op::CloneLocalCell => {
-            let slot = decode_risc_aux16(word) as usize;
+          Opcode::CloneLocalCell => {
+            let slot = decode_aux16(word) as usize;
             ensure_slot(&mut self.execution.active.locals, slot);
             let value = self.execution.active.locals[slot].value();
             self.execution.active.locals[slot] = BindingCell::new(value);
           }
-          Op::ResetLocalCell => {
-            let slot = decode_risc_aux16(word) as usize;
+          Opcode::ResetLocalCell => {
+            let slot = decode_aux16(word) as usize;
             ensure_slot(&mut self.execution.active.locals, slot);
             self.execution.active.locals[slot] = BindingCell::new(Value::Uninitialized);
           }
-          Op::GetUpvalue => {
-            let index = decode_risc_aux16(word) as usize;
+          Opcode::GetUpvalue => {
+            let index = decode_aux16(word) as usize;
             let value = {
               let environment = self
                 .execution
@@ -682,8 +682,8 @@ impl Vm {
             }
             registers[rd] = value;
           }
-          Op::SetUpvalue => {
-            let index = decode_risc_aux16(word) as usize;
+          Opcode::SetUpvalue => {
+            let index = decode_aux16(word) as usize;
             let (mirror_global_name, immutable, sloppy_immutable_silent) = self
               .execution
               .call_stack
@@ -728,10 +728,10 @@ impl Vm {
               }
             }
           }
-          Op::GetGlobal | Op::TypeofGlobal => {
-            let name = self.string_constant(decode_risc_aux16(word) as usize)?;
+          Opcode::GetGlobal | Opcode::TypeofGlobal => {
+            let name = self.string_constant(decode_aux16(word) as usize)?;
             let value = self.resolve_identifier_value(name.as_str_lossy())?;
-            registers[rd] = if matches!(op, Op::TypeofGlobal) {
+            registers[rd] = if matches!(op, Opcode::TypeofGlobal) {
               Value::String(
                 value
                   .as_ref()
@@ -742,13 +742,13 @@ impl Vm {
               value.ok_or_else(|| self.throw_reference_error(&format!("{name} is not defined")))?
             };
           }
-          Op::SetGlobal => {
-            let name = self.string_constant(decode_risc_aux16(word) as usize)?;
+          Opcode::SetGlobal => {
+            let name = self.string_constant(decode_aux16(word) as usize)?;
             let value = registers[rd].clone();
             self.set_global_value(name.as_str_lossy(), value)?;
           }
-          Op::GetBuiltin => {
-            let name = self.string_constant(decode_risc_aux16(word) as usize)?;
+          Opcode::GetBuiltin => {
+            let name = self.string_constant(decode_aux16(word) as usize)?;
             let value = self
               .realm_state
               .realm
@@ -761,9 +761,8 @@ impl Vm {
             }
             registers[rd] = value;
           }
-          Op::GetModuleExport => {
-            let (module_index, name) =
-              self.module_export_descriptor(decode_risc_aux16(word) as usize)?;
+          Opcode::GetModuleExport => {
+            let (module_index, name) = self.module_export_descriptor(decode_aux16(word) as usize)?;
             let value = self
               .modules
               .table
@@ -778,9 +777,8 @@ impl Vm {
             }
             registers[rd] = value;
           }
-          Op::SetModuleExport => {
-            let (module_index, name) =
-              self.module_export_descriptor(decode_risc_aux16(word) as usize)?;
+          Opcode::SetModuleExport => {
+            let (module_index, name) = self.module_export_descriptor(decode_aux16(word) as usize)?;
             while self.modules.table.len() <= module_index {
               self.modules.table.push(HashMap::new());
             }
@@ -791,38 +789,40 @@ impl Vm {
                 .insert(name, BindingCell::new(registers[rd].clone()));
             }
           }
-          Op::GetThis => registers[rd] = self.get_this(),
-          Op::GetNewTarget => registers[rd] = self.get_new_target(),
-          Op::Neg => {
+          Opcode::GetThis => registers[rd] = self.get_this(),
+          Opcode::GetNewTarget => registers[rd] = self.get_new_target(),
+          Opcode::Neg => {
             registers[rd] = match registers[rs].clone() {
               Value::BigInt(value) => Value::BigInt(-value),
               value => Value::Number(-self.to_number_value(&value)?),
             };
           }
-          Op::Not => registers[rd] = Value::Bool(!registers[rs].is_truthy()),
-          Op::BitNot => {
+          Opcode::Not => registers[rd] = Value::Bool(!registers[rs].is_truthy()),
+          Opcode::BitNot => {
             registers[rd] = match registers[rs].clone() {
               Value::BigInt(value) => Value::BigInt(!value),
               value => Value::Number((!self.to_int32_value(&value)?) as f64),
             };
           }
-          Op::Typeof => registers[rd] = Value::String(registers[rs].type_name().to_string().into()),
-          Op::Increment | Op::Decrement => {
+          Opcode::Typeof => {
+            registers[rd] = Value::String(registers[rs].type_name().to_string().into())
+          }
+          Opcode::Increment | Opcode::Decrement => {
             let value = self.to_primitive(&registers[rd], Some("number"))?;
             registers[rd] = match value {
-              Value::BigInt(value) => Value::BigInt(if matches!(op, Op::Increment) {
+              Value::BigInt(value) => Value::BigInt(if matches!(op, Opcode::Increment) {
                 value + 1
               } else {
                 value - 1
               }),
-              value => Value::Number(if matches!(op, Op::Increment) {
+              value => Value::Number(if matches!(op, Opcode::Increment) {
                 self.to_number_value(&value)? + 1.0
               } else {
                 self.to_number_value(&value)? - 1.0
               }),
             };
           }
-          Op::Add => {
+          Opcode::Add => {
             let left = self.to_primitive(&registers[rd], None)?;
             let right = self.to_primitive(&registers[rs], None)?;
             registers[rd] = if matches!(left, Value::String(_)) || matches!(right, Value::String(_))
@@ -845,22 +845,22 @@ impl Vm {
               }
             };
           }
-          Op::Sub | Op::Mul | Op::Div | Op::Mod | Op::Pow => {
+          Opcode::Sub | Opcode::Mul | Opcode::Div | Opcode::Mod | Opcode::Pow => {
             let left = registers[rd].clone();
             let right = registers[rs].clone();
             registers[rd] = match (left, right) {
               (Value::BigInt(left), Value::BigInt(right)) => match op {
-                Op::Sub => Value::BigInt(left - right),
-                Op::Mul => Value::BigInt(left * right),
-                Op::Div if right.is_zero() => {
+                Opcode::Sub => Value::BigInt(left - right),
+                Opcode::Mul => Value::BigInt(left * right),
+                Opcode::Div if right.is_zero() => {
                   return Err(self.throw_range_error("Division by zero"));
                 }
-                Op::Div => Value::BigInt(left / right),
-                Op::Mod if right.is_zero() => {
+                Opcode::Div => Value::BigInt(left / right),
+                Opcode::Mod if right.is_zero() => {
                   return Err(self.throw_range_error("Division by zero"));
                 }
-                Op::Mod => Value::BigInt(left % right),
-                Op::Pow => {
+                Opcode::Mod => Value::BigInt(left % right),
+                Opcode::Pow => {
                   let exponent = right
                     .to_u32()
                     .ok_or_else(|| self.throw_range_error("Invalid BigInt exponent"))?;
@@ -875,38 +875,43 @@ impl Vm {
                 let left = self.to_number_value(&left)?;
                 let right = self.to_number_value(&right)?;
                 Value::Number(match op {
-                  Op::Sub => left - right,
-                  Op::Mul => left * right,
-                  Op::Div => left / right,
-                  Op::Mod => left % right,
-                  Op::Pow => number_exponentiate(left, right),
+                  Opcode::Sub => left - right,
+                  Opcode::Mul => left * right,
+                  Opcode::Div => left / right,
+                  Opcode::Mod => left % right,
+                  Opcode::Pow => number_exponentiate(left, right),
                   _ => unreachable!(),
                 })
               }
             };
           }
-          Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr | Op::Ushr => {
+          Opcode::BitAnd
+          | Opcode::BitOr
+          | Opcode::BitXor
+          | Opcode::Shl
+          | Opcode::Shr
+          | Opcode::Ushr => {
             let left = self.to_numeric_value(&registers[rd])?;
             let right = self.to_numeric_value(&registers[rs])?;
             registers[rd] = match (&left, &right) {
               (Value::BigInt(left), Value::BigInt(right)) => match op {
-                Op::BitAnd => Value::BigInt(left & right),
-                Op::BitOr => Value::BigInt(left | right),
-                Op::BitXor => Value::BigInt(left ^ right),
-                Op::Shl | Op::Shr => {
+                Opcode::BitAnd => Value::BigInt(left & right),
+                Opcode::BitOr => Value::BigInt(left | right),
+                Opcode::BitXor => Value::BigInt(left ^ right),
+                Opcode::Shl | Opcode::Shr => {
                   let reverse = right.is_negative();
                   let shift = right
                     .abs()
                     .to_usize()
                     .ok_or_else(|| self.throw_range_error("BigInt shift count is too large"))?;
-                  let shift_left = matches!(op, Op::Shl) != reverse;
+                  let shift_left = matches!(op, Opcode::Shl) != reverse;
                   Value::BigInt(if shift_left {
                     left << shift
                   } else {
                     left >> shift
                   })
                 }
-                Op::Ushr => {
+                Opcode::Ushr => {
                   return Err(self.throw_type_error("BigInts have no unsigned right shift"));
                 }
                 _ => unreachable!(),
@@ -915,26 +920,26 @@ impl Vm {
                 return Err(self.throw_type_error("Cannot mix BigInt and other types"));
               }
               _ => match op {
-                Op::BitAnd => {
+                Opcode::BitAnd => {
                   Value::Number((self.to_int32_value(&left)? & self.to_int32_value(&right)?) as f64)
                 }
-                Op::BitOr => {
+                Opcode::BitOr => {
                   Value::Number((self.to_int32_value(&left)? | self.to_int32_value(&right)?) as f64)
                 }
-                Op::BitXor => {
+                Opcode::BitXor => {
                   Value::Number((self.to_int32_value(&left)? ^ self.to_int32_value(&right)?) as f64)
                 }
-                Op::Shl => Value::Number(
+                Opcode::Shl => Value::Number(
                   self
                     .to_int32_value(&left)?
                     .wrapping_shl(self.to_uint32_value(&right)? & 0x1f) as f64,
                 ),
-                Op::Shr => Value::Number(
+                Opcode::Shr => Value::Number(
                   self
                     .to_int32_value(&left)?
                     .wrapping_shr(self.to_uint32_value(&right)? & 0x1f) as f64,
                 ),
-                Op::Ushr => Value::Number(
+                Opcode::Ushr => Value::Number(
                   self
                     .to_uint32_value(&left)?
                     .wrapping_shr(self.to_uint32_value(&right)? & 0x1f) as f64,
@@ -943,13 +948,13 @@ impl Vm {
               },
             };
           }
-          Op::And => {
+          Opcode::And => {
             registers[rd] = Value::Bool(registers[rd].is_truthy() && registers[rs].is_truthy());
           }
-          Op::Or => {
+          Opcode::Or => {
             registers[rd] = Value::Bool(registers[rd].is_truthy() || registers[rs].is_truthy());
           }
-          Op::Jump => {
+          Opcode::Jump => {
             let offset = ((word >> 8) & 0x00FF_FFFF) as i32;
             let offset = if offset & 0x0080_0000 != 0 {
               offset | !0x00FF_FFFF
@@ -957,31 +962,31 @@ impl Vm {
               offset
             };
             if offset < 0 {
-              self.record_jit_backedge(instruction_ip);
+              self.record_jit_backedge(instruction_pc);
             }
-            self.execution.active.ip =
-              usize::try_from(self.execution.active.ip as i64 + offset as i64)
-                .map_err(|_| RuntimeError::from("negative RISC jump target"))?;
+            self.execution.active.pc =
+              usize::try_from(self.execution.active.pc as i64 + offset as i64)
+                .map_err(|_| RuntimeError::from("negative bytecode jump target"))?;
           }
-          Op::JumpIfFalse | Op::JumpIfTrue | Op::JumpIfNullish => {
+          Opcode::JumpIfFalse | Opcode::JumpIfTrue | Opcode::JumpIfNullish => {
             let value = &registers[rd];
             let take = match op {
-              Op::JumpIfFalse => !value.is_truthy(),
-              Op::JumpIfTrue => value.is_truthy(),
-              Op::JumpIfNullish => matches!(value, Value::Null | Value::Undefined),
+              Opcode::JumpIfFalse => !value.is_truthy(),
+              Opcode::JumpIfTrue => value.is_truthy(),
+              Opcode::JumpIfNullish => matches!(value, Value::Null | Value::Undefined),
               _ => unreachable!(),
             };
-            let offset = decode_risc_cond_offset(word);
+            let offset = decode_conditional_branch_offset(word);
             if take && offset < 0 {
-              self.record_jit_backedge(instruction_ip);
+              self.record_jit_backedge(instruction_pc);
             }
             if take {
-              self.execution.active.ip =
-                usize::try_from(self.execution.active.ip as i64 + offset as i64)
-                  .map_err(|_| RuntimeError::from("negative RISC conditional target"))?;
+              self.execution.active.pc =
+                usize::try_from(self.execution.active.pc as i64 + offset as i64)
+                  .map_err(|_| RuntimeError::from("negative conditional target"))?;
             }
           }
-          Op::CompareJump => {
+          Opcode::CompareJump => {
             let (condition, left, right, offset) = decode_compare_jump(word);
             let left = &registers[left as usize];
             let right = &registers[right as usize];
@@ -1006,14 +1011,14 @@ impl Vm {
             };
             if !result {
               if offset < 0 {
-                self.record_jit_backedge(instruction_ip);
+                self.record_jit_backedge(instruction_pc);
               }
-              self.execution.active.ip =
-                usize::try_from(self.execution.active.ip as i64 + offset as i64)
-                  .map_err(|_| RuntimeError::from("negative RISC compare target"))?;
+              self.execution.active.pc =
+                usize::try_from(self.execution.active.pc as i64 + offset as i64)
+                  .map_err(|_| RuntimeError::from("negative compare target"))?;
             }
           }
-          Op::GetProperty => {
+          Opcode::GetProperty => {
             let object = registers[rd].clone();
             let key = registers[rs].clone();
             let key = self.to_property_key(&key)?;
@@ -1023,9 +1028,9 @@ impl Vm {
             {
               return Err(self.throw_type_error("Cannot access private member on this object"));
             }
-            registers[rd] = self.get_property_value_cached(instruction_ip, &object, &key)?;
+            registers[rd] = self.get_property_value_cached(instruction_pc, &object, &key)?;
           }
-          Op::SetProperty => {
+          Opcode::SetProperty => {
             let receiver = registers[rd].clone();
             let key = self.to_property_key(&registers[rs])?;
             let value = registers[(decode_aux8(word) & 0xF) as usize].clone();
@@ -1043,7 +1048,7 @@ impl Vm {
             }
             registers[rd] = value;
           }
-          Op::DeleteProperty => {
+          Opcode::DeleteProperty => {
             let base = registers[rd].clone();
             if matches!(base, Value::Undefined | Value::Null) {
               return Err(self.throw_type_error("Cannot delete property of null or undefined"));
@@ -1060,7 +1065,7 @@ impl Vm {
             }
             registers[rd] = Value::Bool(deleted);
           }
-          Op::HasProperty => {
+          Opcode::HasProperty => {
             let object = registers[rd].clone();
             if !object.is_object() {
               return Err(self.throw_type_error("Right-hand side of 'in' is not an object"));
@@ -1068,49 +1073,49 @@ impl Vm {
             let key = self.to_property_key(&registers[rs])?;
             registers[rd] = Value::Bool(self.has_property_host(&object, &key)?);
           }
-          Op::InstanceOf => {
+          Opcode::InstanceOf => {
             let value = registers[rd].clone();
             let constructor = registers[rs].clone();
             registers[rd] = Value::Bool(self.instance_of(&value, &constructor)?);
           }
-          Op::GetSuperProperty => {
+          Opcode::GetSuperProperty => {
             let receiver = registers[rd].clone();
             let key = registers[rs].clone();
             registers[rd] = self.get_super_property(&receiver, &key)?;
           }
-          Op::SetSuperProperty => {
+          Opcode::SetSuperProperty => {
             let value_register = (decode_aux8(word) & 0xF) as usize;
             let receiver = registers[rd].clone();
             let key = registers[rs].clone();
             let value = registers[value_register].clone();
             registers[rd] = self.set_super_property(&receiver, &key, value)?;
           }
-          Op::BuildArray => {
-            let count = decode_risc_aux16(word) as usize;
-            let base = self.execution.active.chunk.risc_value_spill_count as usize;
-            let values = spills
+          Opcode::BuildArray => {
+            let count = decode_aux16(word) as usize;
+            let base = self.execution.active.code.value_spill_slot_count as usize;
+            let values = spill_slots
               .get(base..base + count)
-              .ok_or_else(|| RuntimeError::from("RISC array operand window out of bounds"))?
+              .ok_or_else(|| RuntimeError::from("array operand window out of bounds"))?
               .to_vec();
             registers[rd] = self.build_array_value(values)?;
           }
-          Op::BuildObject => {
-            let count = decode_risc_aux16(word) as usize;
+          Opcode::BuildObject => {
+            let count = decode_aux16(word) as usize;
             let operand_count = count.saturating_mul(2);
-            let base = self.execution.active.chunk.risc_value_spill_count as usize;
-            let values = spills
+            let base = self.execution.active.code.value_spill_slot_count as usize;
+            let values = spill_slots
               .get(base..base + operand_count)
-              .ok_or_else(|| RuntimeError::from("RISC object operand window out of bounds"))?
+              .ok_or_else(|| RuntimeError::from("object operand window out of bounds"))?
               .to_vec();
             registers[rd] = self.build_object_value(values)?;
           }
-          Op::ArrayFromSpread => {
+          Opcode::ArrayFromSpread => {
             let values = registers[rd].clone();
             let mask = registers[rs].clone();
             let values = self.flatten_spread_values(values, mask)?;
             registers[rd] = self.build_array_value(values)?;
           }
-          Op::Spread => {
+          Opcode::Spread => {
             let callee = registers[rd].clone();
             let values = registers[rs].clone();
             let mut mask = registers[(decode_aux8(word) & 0xF) as usize].clone();
@@ -1167,39 +1172,43 @@ impl Vm {
               self.call_value(&callee, &arguments)?
             };
           }
-          Op::Call | Op::TailCall | Op::CallBuiltin => {
-            let count = decode_risc_aux16(word) as usize;
-            let fast_result = if op != Op::TailCall
-              && (2..=6).contains(&count)
-              && matches!(registers[2], Value::Number(_))
-              && matches!(registers[3], Value::Number(_))
+          Opcode::Call | Opcode::TailCall | Opcode::CallMethod => {
+            let count = decode_aux16(word) as usize;
+            let fast_result = if op != Opcode::TailCall
+              && (2..=abi::REGISTER_ARGUMENT_COUNT).contains(&count)
+              && matches!(registers[abi::FIRST_ARGUMENT.index()], Value::Number(_))
+              && matches!(registers[abi::FIRST_ARGUMENT.index() + 1], Value::Number(_))
             {
               self.try_cached_numeric_call(
-                instruction_ip,
-                &registers[0],
-                &registers[2..2 + count],
+                instruction_pc,
+                &registers[abi::V2_CALL_OPERAND.index()],
+                &registers[abi::FIRST_ARGUMENT.index()..abi::FIRST_ARGUMENT.index() + count],
               )?
             } else {
               None
             };
             if let Some(result) = fast_result {
-              registers[0] = result;
+              registers[abi::RETURN.index()] = result;
               return Ok(None);
             }
-            let mut args: Vec<Value> = (0..count.min(6))
-              .map(|index| registers[2 + index].clone())
+            let mut args: Vec<Value> = (0..count.min(abi::REGISTER_ARGUMENT_COUNT))
+              .map(|index| {
+                let register = abi::argument_register(index)
+                  .expect("bounded call argument must have an ABI register");
+                registers[register.index()].clone()
+              })
               .collect();
-            let overflow = count.saturating_sub(6);
-            let base = self.execution.active.chunk.risc_value_spill_count as usize;
+            let overflow = count.saturating_sub(abi::REGISTER_ARGUMENT_COUNT);
+            let base = self.execution.active.code.value_spill_slot_count as usize;
             if overflow > 0 {
               args.extend_from_slice(
-                spills
+                spill_slots
                   .get(base..base + overflow)
-                  .ok_or_else(|| RuntimeError::from("RISC call operand window out of bounds"))?,
+                  .ok_or_else(|| RuntimeError::from("call operand window out of bounds"))?,
               );
             }
-            let callee = registers[0].clone();
-            if op != Op::TailCall
+            let callee = registers[abi::V2_CALL_OPERAND.index()].clone();
+            if op != Opcode::TailCall
               && let Value::Closure { proto, env, .. } = &callee
               && !proto.is_generator
               && !proto.is_async
@@ -1208,8 +1217,8 @@ impl Vm {
                 return Err(self.throw_class_constructor_call_error_for(&callee, proto));
               }
               let call_args = self.prepare_call_args(args, proto)?;
-              let receiver = if op == Op::CallBuiltin {
-                registers[1].clone()
+              let receiver = if op == Opcode::CallMethod {
+                registers[abi::RECEIVER.index()].clone()
               } else {
                 Value::Undefined
               };
@@ -1220,20 +1229,28 @@ impl Vm {
                 this_arg
               };
               if let Some(result) =
-                self.try_direct_baseline_call(instruction_ip, proto, &this_arg, &call_args)?
+                self.try_direct_baseline_call(instruction_pc, proto, &this_arg, &call_args)?
               {
-                registers[0] = result;
+                registers[abi::RETURN.index()] = result;
               } else {
+                let register_arguments = call_args
+                  .iter()
+                  .take(crate::bytecode::abi::REGISTER_ARGUMENT_COUNT)
+                  .cloned()
+                  .collect::<Vec<_>>();
                 self.push_call_frame(proto, env, call_args, this_arg, callee.clone())?;
                 let callee_this = self.execution.active.this_value.clone();
-                let callee_spill_count = self.execution.active.chunk.risc_spill_count as usize;
-                let caller_state = RiscExecutionState {
+                let callee_spill_count = self.execution.active.code.spill_slot_count as usize;
+                let caller_state = RegisterState {
                   registers: std::mem::replace(
                     registers,
                     std::array::from_fn(|_| Value::Undefined),
                   ),
-                  spills: std::mem::replace(spills, vec![Value::Undefined; callee_spill_count]),
-                  resume_register: state.resume_register,
+                  spill_slots: std::mem::replace(
+                    spill_slots,
+                    vec![Value::Undefined; callee_spill_count],
+                  ),
+                  resume_destination: state.resume_destination,
                   pending_operation: None,
                   await_settlement: None,
                 };
@@ -1242,27 +1259,27 @@ impl Vm {
                   .call_stack
                   .last_mut()
                   .expect("call frame was just pushed")
-                  .risc_state = Some(caller_state);
-                registers[1] = callee_this;
-                state.resume_register = None;
+                  .register_state = Some(caller_state);
+                *registers = RegisterState::call_registers(callee_this, &register_arguments);
+                state.resume_destination = None;
                 if let Some(result) = self.try_run_nested_baseline(registers, false)? {
-                  let outcome = self.finish_risc_return(
+                  let outcome = self.finish_return(
                     registers,
-                    spills,
-                    &mut state.resume_register,
+                    spill_slots,
+                    &mut state.resume_destination,
                     result,
                   )?;
-                  switched_risc_context = outcome.is_none();
+                  switched_context = outcome.is_none();
                   if outcome.is_some() {
                     return Ok(outcome);
                   }
                 } else {
-                  switched_risc_context = true;
+                  switched_context = true;
                 }
               }
-            } else if op != Op::TailCall {
-              registers[0] = if matches!(op, Op::CallBuiltin) {
-                let receiver = registers[1].clone();
+            } else if op != Opcode::TailCall {
+              registers[abi::RETURN.index()] = if matches!(op, Opcode::CallMethod) {
+                let receiver = registers[abi::RECEIVER.index()].clone();
                 self.call_value_with_this(&callee, &receiver, &args)?
               } else {
                 self.call_value(&callee, &args)?
@@ -1275,6 +1292,11 @@ impl Vm {
                 return Err(self.throw_class_constructor_call_error_for(&callee, proto));
               }
               let call_args = self.prepare_call_args(args, proto)?;
+              let register_arguments = call_args
+                .iter()
+                .take(crate::bytecode::abi::REGISTER_ARGUMENT_COUNT)
+                .cloned()
+                .collect::<Vec<_>>();
               let this_arg = Self::closure_lexical_this(&callee).unwrap_or(Value::Undefined);
               let this_arg = if proto.is_derived_constructor {
                 Value::Uninitialized
@@ -1291,102 +1313,118 @@ impl Vm {
                 self.exceptions.handlers.pop();
               }
               if let Some(frame) = self.execution.call_stack.last_mut() {
-                frame.callee = callee.clone();
                 frame.new_target = None;
                 frame.upvalues = proto.upvalues.clone();
               }
               self.configure_call_frame(proto, env, call_args, this_arg, callee.clone())?;
-              registers.fill(Value::Undefined);
-              registers[1] = self.execution.active.this_value.clone();
-              spills.clear();
-              spills.resize(
-                self.execution.active.chunk.risc_spill_count as usize,
+              *registers = RegisterState::call_registers(
+                self.execution.active.this_value.clone(),
+                &register_arguments,
+              );
+              spill_slots.clear();
+              spill_slots.resize(
+                self.execution.active.code.spill_slot_count as usize,
                 Value::Undefined,
               );
-              state.resume_register = None;
+              state.resume_destination = None;
               if let Some(result) = self.try_run_nested_baseline(registers, true)? {
-                let outcome =
-                  self.finish_risc_return(registers, spills, &mut state.resume_register, result)?;
-                switched_risc_context = outcome.is_none();
+                let outcome = self.finish_return(
+                  registers,
+                  spill_slots,
+                  &mut state.resume_destination,
+                  result,
+                )?;
+                switched_context = outcome.is_none();
                 if outcome.is_some() {
                   return Ok(outcome);
                 }
               } else {
-                switched_risc_context = true;
+                switched_context = true;
               }
             } else {
               let result = self.call_value(&callee, &args)?;
-              let outcome =
-                self.finish_risc_return(registers, spills, &mut state.resume_register, result)?;
-              switched_risc_context = outcome.is_none();
+              let outcome = self.finish_return(
+                registers,
+                spill_slots,
+                &mut state.resume_destination,
+                result,
+              )?;
+              switched_context = outcome.is_none();
               return Ok(outcome);
             }
           }
-          Op::Construct => {
-            let count = decode_risc_aux16(word) as usize;
-            let mut args: Vec<Value> = (0..count.min(6))
-              .map(|index| registers[2 + index].clone())
+          Opcode::Construct => {
+            let count = decode_aux16(word) as usize;
+            let mut args: Vec<Value> = (0..count.min(abi::REGISTER_ARGUMENT_COUNT))
+              .map(|index| {
+                let register = abi::argument_register(index)
+                  .expect("bounded constructor argument must have an ABI register");
+                registers[register.index()].clone()
+              })
               .collect();
-            let overflow = count.saturating_sub(6);
-            let base = self.execution.active.chunk.risc_value_spill_count as usize;
+            let overflow = count.saturating_sub(abi::REGISTER_ARGUMENT_COUNT);
+            let base = self.execution.active.code.value_spill_slot_count as usize;
             if overflow > 0 {
-              args.extend_from_slice(spills.get(base..base + overflow).ok_or_else(|| {
-                RuntimeError::from("RISC construct operand window out of bounds")
-              })?);
+              args.extend_from_slice(
+                spill_slots
+                  .get(base..base + overflow)
+                  .ok_or_else(|| RuntimeError::from("construct operand window out of bounds"))?,
+              );
             }
-            let callee = registers[0].clone();
-            registers[0] = self.construct_value_with_new_target(&callee, &args, callee.clone())?;
+            let callee = registers[abi::V2_CALL_OPERAND.index()].clone();
+            registers[abi::RETURN.index()] =
+              self.construct_value_with_new_target(&callee, &args, callee.clone())?;
           }
-          Op::SuperConstruct => {
-            let count = decode_risc_aux16(word) as usize;
-            let base = self.execution.active.chunk.risc_value_spill_count as usize;
-            let args = spills
+          Opcode::SuperConstruct => {
+            let count = decode_aux16(word) as usize;
+            let base = self.execution.active.code.value_spill_slot_count as usize;
+            let args = spill_slots
               .get(base..base + count)
-              .ok_or_else(|| RuntimeError::from("RISC super operand window out of bounds"))?
+              .ok_or_else(|| RuntimeError::from("super operand window out of bounds"))?
               .to_vec();
             registers[rd] = self.construct_super_value(args)?;
           }
-          Op::PushHandler => {
+          Opcode::PushHandler => {
             let offset = ((word >> 8) & 0x00FF_FFFF) as i32;
             let offset = if offset & 0x0080_0000 != 0 {
               offset | !0x00FF_FFFF
             } else {
               offset
             };
-            let handler_ip = usize::try_from(self.execution.active.ip as i64 + offset as i64)
-              .map_err(|_| RuntimeError::from("negative RISC handler target"))?;
+            let handler_pc = usize::try_from(self.execution.active.pc as i64 + offset as i64)
+              .map_err(|_| RuntimeError::from("negative handler target"))?;
             let finally = self
               .execution
               .active
-              .chunk
+              .code
               .finally_handlers
               .iter()
-              .find(|handler| handler.push_ip == instruction_ip)
+              .find(|handler| handler.push_pc == instruction_pc)
               .map(|handler| FinallyHandlerRecord {
-                finalizer_ip: handler.finalizer_ip,
+                finalizer_pc: handler.finalizer_pc,
                 return_slot: handler.return_slot,
                 did_return_slot: handler.did_return_slot,
               });
             self.exceptions.handlers.push(HandlerRecord {
-              chunk: Arc::clone(&self.execution.active.chunk),
-              handler_ip,
+              code: Arc::clone(&self.execution.active.code),
+              handler_pc,
               saved_locals_len: self.execution.active.locals.len(),
               frame_count: self.execution.call_stack.len(),
               saved_lexical_env: Rc::clone(&self.execution.active.lexical_env),
               finally,
             });
           }
-          Op::PopHandler => {
+          Opcode::PopHandler => {
             self.exceptions.handlers.pop();
           }
-          Op::Throw => {
+          Opcode::Throw => {
             self.throw_value(registers[rd].clone())?;
             return Err(RuntimeError::from("JS exception"));
           }
-          Op::DeleteIdentifier => {
+          Opcode::DeleteIdentifier => {
             registers[rd] = self.delete_identifier(registers[rd].clone())?;
           }
-          Op::IteratorNext => {
+          Opcode::IteratorNext => {
             let iterator = registers[rd].clone();
             if let Some(step) = self.begin_async_iterator_next(&iterator, rd)? {
               match step {
@@ -1395,7 +1433,7 @@ impl Vm {
                 }
                 PendingOperationStep::Await { value, operation } => {
                   state.pending_operation = Some(operation);
-                  return Ok(Some(RiscRunOutcome::Await(value)));
+                  return Ok(Some(RunOutcome::Await(value)));
                 }
                 PendingOperationStep::Throw(reason) => {
                   self.throw_value(reason)?;
@@ -1406,7 +1444,7 @@ impl Vm {
               registers[rd] = self.iterator_next(iterator)?;
             }
           }
-          Op::IteratorClose => {
+          Opcode::IteratorClose => {
             let iterator = registers[rd].clone();
             if let Some(step) = self.begin_async_iterator_close(&iterator, rd)? {
               match step {
@@ -1415,7 +1453,7 @@ impl Vm {
                 }
                 PendingOperationStep::Await { value, operation } => {
                   state.pending_operation = Some(operation);
-                  return Ok(Some(RiscRunOutcome::Await(value)));
+                  return Ok(Some(RunOutcome::Await(value)));
                 }
                 PendingOperationStep::Throw(reason) => {
                   self.throw_value(reason)?;
@@ -1426,10 +1464,10 @@ impl Vm {
               registers[rd] = self.iterator_close(iterator)?;
             }
           }
-          Op::GetAsyncIterator => {
+          Opcode::GetAsyncIterator => {
             registers[rd] = self.get_async_iterator(registers[rd].clone())?;
           }
-          Op::PushWithEnv => {
+          Opcode::PushWithEnv => {
             let object = self.to_object_value(registers[rd].clone())?;
             self.execution.active.lexical_env =
               Rc::new(RefCell::new(EnvironmentRecord::new_object(
@@ -1438,12 +1476,12 @@ impl Vm {
                 true,
               )));
           }
-          Op::PushLexicalEnv => {
+          Opcode::PushLexicalEnv => {
             let name = match &registers[rd] {
               Value::String(name) => name.to_string(),
               _ => return Err(RuntimeError::from("lexical binding name must be a string")),
             };
-            let slot = decode_risc_aux16(word) as usize;
+            let slot = decode_aux16(word) as usize;
             let cell = self
               .execution
               .active
@@ -1469,42 +1507,42 @@ impl Vm {
             }
             self.execution.active.lexical_env = Rc::new(RefCell::new(environment));
           }
-          Op::PopEnv => {
+          Opcode::PopEnv => {
             let outer = self.execution.active.lexical_env.borrow().outer();
             self.execution.active.lexical_env =
               outer.unwrap_or_else(|| Rc::clone(&self.realm_state.global_env));
           }
-          Op::GeneratorInitDone if stop_at_generator_init => {
-            return Ok(Some(RiscRunOutcome::Initialized));
+          Opcode::GeneratorInitDone if stop_at_generator_init => {
+            return Ok(Some(RunOutcome::Initialized));
           }
-          Op::GeneratorInitDone => {}
-          Op::Yield => {
-            state.resume_register = Some(rd);
-            return Ok(Some(RiscRunOutcome::Yield(registers[rd].clone())));
+          Opcode::GeneratorInitDone => {}
+          Opcode::Yield => {
+            state.resume_destination = Some(rd);
+            return Ok(Some(RunOutcome::Yield(registers[rd].clone())));
           }
-          Op::YieldStar => {
+          Opcode::YieldStar => {
             if self.execution.active.yield_star.is_none() {
               self.execution.active.yield_star =
                 Some(self.create_yield_star_state(registers[rd].clone())?);
             }
             match self.resume_yield_star()? {
               YieldStarStep::Yield(value) => {
-                self.execution.active.ip = self.execution.active.ip.saturating_sub(1);
-                return Ok(Some(RiscRunOutcome::YieldStar(value)));
+                self.execution.active.pc = self.execution.active.pc.saturating_sub(1);
+                return Ok(Some(RunOutcome::YieldStar(value)));
               }
               YieldStarStep::Complete(value) => registers[rd] = value,
               YieldStarStep::Return(value) => {
                 if !self.begin_generator_return(value.clone()) {
-                  return Ok(Some(RiscRunOutcome::Return(value)));
+                  return Ok(Some(RunOutcome::Return(value)));
                 }
               }
             }
           }
-          Op::AwaitPromise => {
-            state.resume_register = Some(rd);
-            return Ok(Some(RiscRunOutcome::Await(registers[rd].clone())));
+          Opcode::AwaitPromise => {
+            state.resume_destination = Some(rd);
+            return Ok(Some(RunOutcome::Await(registers[rd].clone())));
           }
-          Op::Return => {
+          Opcode::Return => {
             let result = registers[rd].clone();
             if self.execution.generator_return_frame_count == Some(self.execution.call_stack.len())
             {
@@ -1513,9 +1551,13 @@ impl Vm {
               }
               self.execution.generator_return_frame_count = None;
             }
-            let outcome =
-              self.finish_risc_return(registers, spills, &mut state.resume_register, result)?;
-            switched_risc_context = outcome.is_none();
+            let outcome = self.finish_return(
+              registers,
+              spill_slots,
+              &mut state.resume_destination,
+              result,
+            )?;
+            switched_context = outcome.is_none();
             return Ok(outcome);
           }
         }
@@ -1523,13 +1565,13 @@ impl Vm {
       })();
       match step_result {
         Ok(Some(result)) => return Ok(result),
-        Ok(None) if switched_risc_context => continue,
+        Ok(None) if switched_context => continue,
         Ok(None) => {}
         Err(_error)
-          if self.restore_pending_risc_exception(
+          if self.restore_pending_exception(
             registers,
-            spills,
-            &mut state.resume_register,
+            spill_slots,
+            &mut state.resume_destination,
             boundary_frame_count,
           ) =>
         {
@@ -1550,7 +1592,7 @@ impl Vm {
           self
             .memory
             .temporary
-            .extend(spills.iter().cloned());
+            .extend(spill_slots.iter().cloned());
           self.maybe_collect_garbage_prototype();
           self.memory.temporary.truncate(temp_root_base);
         }
@@ -1558,17 +1600,17 @@ impl Vm {
     }
   }
 
-  /// Execute a chunk without resetting the caller's live lexical bindings.
+  /// Execute a code without resetting the caller's live lexical bindings.
   ///
   /// This is used for direct `eval`, where the evaluated code must observe
   /// and update the current execution context.
   #[allow(clippy::too_many_lines)]
   pub(crate) fn run_nested(
     &mut self,
-    chunk: Chunk,
+    code: Chunk,
     direct_eval: bool,
   ) -> Result<Value, NestedRunFailure> {
-    chunk.verify().map_err(|error| NestedRunFailure {
+    code.verify().map_err(|error| NestedRunFailure {
       error: RuntimeError::from(format!("Invalid bytecode: {}", error)),
       thrown: None,
     })?;
@@ -1581,13 +1623,13 @@ impl Vm {
     let saved_pending_exception = self.exceptions.pending.clone();
     let saved_pending_exception_frame_count = self.exceptions.pending_frame_count;
     let saved_handlers = std::mem::take(&mut self.exceptions.handlers);
-    let saved_unwound_risc_state = self.exceptions.unwound_risc_state.take();
+    let saved_unwound_state = self.exceptions.unwound_register_state.take();
     let saved_direct_eval_outer = self.execution.direct_eval_outer.clone();
-    let saved_frame_risc_states = self
+    let saved_frame_states = self
       .execution
       .call_stack
       .iter_mut()
-      .map(|frame| frame.risc_state.take())
+      .map(|frame| frame.register_state.take())
       .collect::<Vec<_>>();
 
     self.memory.temporary.extend(
@@ -1623,7 +1665,7 @@ impl Vm {
       .lexical_env
       .borrow()
       .collect_binding_values(&mut self.memory.temporary);
-    for state in saved_frame_risc_states.iter().flatten() {
+    for state in saved_frame_states.iter().flatten() {
       self
         .memory
         .temporary
@@ -1631,7 +1673,7 @@ impl Vm {
       self
         .memory
         .temporary
-        .extend(state.spills.iter().cloned());
+        .extend(state.spill_slots.iter().cloned());
     }
 
     if direct_eval {
@@ -1648,11 +1690,11 @@ impl Vm {
           });
     }
 
-    let chunk_rc = Arc::new(chunk);
+    let chunk_rc = Arc::new(code);
     self.execution.root_chunk = Some(Arc::clone(&chunk_rc));
-    self.execution.active.chunk = chunk_rc;
-    self.execution.active.ip = 0;
-    self.execution.active.strict = self.execution.active.chunk.root_strict;
+    self.execution.active.code = chunk_rc;
+    self.execution.active.pc = 0;
+    self.execution.active.strict = self.execution.active.code.root_strict;
     if !direct_eval {
       self.execution.active.lexical_env = Rc::clone(&self.realm_state.global_env);
     }
@@ -1664,23 +1706,18 @@ impl Vm {
     if !self
       .execution
       .active
-      .chunk
+      .code
       .root_slot_names
       .is_empty()
     {
       self.initialize_root_bindings();
     }
     if direct_eval {
-      let names = self
-        .execution
-        .active
-        .chunk
-        .root_slot_names
-        .clone();
+      let names = self.execution.active.code.root_slot_names.clone();
       let lexical = self
         .execution
         .active
-        .chunk
+        .code
         .root_lexical_tdz
         .clone();
       for (index, maybe_name) in names.into_iter().enumerate() {
@@ -1735,7 +1772,7 @@ impl Vm {
     }
     self.begin_opcode_profile_run();
 
-    let result = self.run_risc_loop(true);
+    let result = self.run_loop(true);
     let nested_thrown = self.exceptions.last_uncaught.take();
 
     if !direct_eval {
@@ -1751,15 +1788,15 @@ impl Vm {
     self.exceptions.pending = saved_pending_exception;
     self.exceptions.pending_frame_count = saved_pending_exception_frame_count;
     self.exceptions.handlers = saved_handlers;
-    self.exceptions.unwound_risc_state = saved_unwound_risc_state;
+    self.exceptions.unwound_register_state = saved_unwound_state;
     self.execution.direct_eval_outer = saved_direct_eval_outer;
-    for (frame, risc_state) in self
+    for (frame, register_state) in self
       .execution
       .call_stack
       .iter_mut()
-      .zip(saved_frame_risc_states)
+      .zip(saved_frame_states)
     {
-      frame.risc_state = risc_state;
+      frame.register_state = register_state;
     }
 
     result.map_err(|error| NestedRunFailure {
@@ -1775,11 +1812,11 @@ impl Vm {
   /// for the shared prototype collector.
   pub(crate) fn run_nested_in_realm(
     &mut self,
-    chunk: Chunk,
+    code: Chunk,
     globals: Rc<RefCell<ObjectData>>,
   ) -> Result<Value, NestedRunFailure> {
     if Rc::ptr_eq(&globals, &self.realm_state.globals) {
-      return self.run_nested(chunk, false);
+      return self.run_nested(code, false);
     }
 
     let Some((intrinsics, global_env)) = crate::runtime_utils::realm_kernel(&globals) else {
@@ -1804,7 +1841,7 @@ impl Vm {
         global_env,
       },
     );
-    let result = self.run_nested(chunk, false);
+    let result = self.run_nested(code, false);
     self.realm_state = previous_realm;
     self.memory.temporary.truncate(temp_root_base);
     result
@@ -1852,7 +1889,7 @@ impl Vm {
     &self,
     idx: usize,
   ) -> Result<js_string::JsString, RuntimeError> {
-    match self.execution.active.chunk.constants.get(idx) {
+    match self.execution.active.code.constants.get(idx) {
       Some(crate::bytecode::Constant::String(value)) => Ok(value.clone()),
       Some(_) => Err(RuntimeError::from("Constant is not a string")),
       None => Err(RuntimeError::from("String constant index out of bounds")),
@@ -1885,18 +1922,18 @@ impl Vm {
     }
     eprintln!("[diag] {label}: actual={}", offender.type_name());
     crate::trace::value_string("[diag] offending value", offender);
-    let start = self.execution.active.ip.saturating_sub(8);
+    let start = self.execution.active.pc.saturating_sub(8);
     let end = usize::min(
-      self.execution.active.ip + 8,
-      self.execution.active.chunk.code.len(),
+      self.execution.active.pc + 8,
+      self.execution.active.code.words.len(),
     );
-    for ip in start..end {
+    for pc in start..end {
       let instruction = self
         .execution
         .active
-        .chunk
-        .disassemble_at(ip)
-        .unwrap_or_else(|error| format!("{ip:#06} <{error}>"));
+        .code
+        .disassemble_at(pc)
+        .unwrap_or_else(|error| format!("{pc:#06} <{error}>"));
       eprintln!("[diag] {instruction}");
     }
   }

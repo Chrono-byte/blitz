@@ -54,10 +54,10 @@ impl Vm {
     let array = Value::Array(Rc::clone(&arr_rc), Rc::clone(&props));
     if crate::trace::enabled() {
       eprintln!(
-        "[trace] build_array: created Array arr_ptr={:p} props_ptr={:p} ip={}",
+        "[trace] build_array: created Array arr_ptr={:p} props_ptr={:p} pc={}",
         Rc::as_ptr(&arr_rc),
         Rc::as_ptr(&props),
-        self.execution.active.ip.saturating_sub(1)
+        self.execution.active.pc.saturating_sub(1)
       );
     }
     Ok(array)
@@ -110,9 +110,9 @@ impl Vm {
     let object = Value::Object(Rc::clone(&obj_rc));
     if crate::trace::enabled() {
       eprintln!(
-        "[trace] build_object: created Object obj_ptr={:p} ip={}",
+        "[trace] build_object: created Object obj_ptr={:p} pc={}",
         Rc::as_ptr(&obj_rc),
-        self.execution.active.ip.saturating_sub(1)
+        self.execution.active.pc.saturating_sub(1)
       );
     }
     Ok(object)
@@ -127,7 +127,7 @@ impl Vm {
     let proto = self
       .execution
       .active
-      .chunk
+      .code
       .functions
       .get(idx)
       .cloned()
@@ -346,11 +346,11 @@ impl Vm {
     if crate::trace::enabled() {
       if let Value::Closure { props, .. } = &closure {
         eprintln!(
-          "[trace] make_closure: created Closure props_ptr={:p} proto_idx={} proto_chunk_ptr={:p} ip={}",
+          "[trace] make_closure: created Closure props_ptr={:p} proto_idx={} proto_chunk_ptr={:p} pc={}",
           Rc::as_ptr(props),
           idx,
-          Arc::as_ptr(&closure_proto.chunk),
-          self.execution.active.ip.saturating_sub(1)
+          Arc::as_ptr(&closure_proto.code),
+          self.execution.active.pc.saturating_sub(1)
         );
       }
       if has_prototype_property

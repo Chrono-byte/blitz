@@ -83,13 +83,13 @@ impl Compiler {
         "SyntaxError: super used outside of a method",
       ));
     }
-    self.emit(Op::GetThis, LINE);
-    self.emit(Op::Copy, LINE);
+    self.emit(LoweringOpcode::GetThis, LINE);
+    self.emit(LoweringOpcode::Copy, LINE);
     self.emit_constant(Value::String(property.to_string().into()), LINE);
-    self.emit(Op::GetSuperProperty, LINE);
+    self.emit(LoweringOpcode::GetSuperProperty, LINE);
     if !preserve_receiver {
-      self.emit(Op::Exchange, LINE);
-      self.emit(Op::Discard, LINE);
+      self.emit(LoweringOpcode::Exchange, LINE);
+      self.emit(LoweringOpcode::Discard, LINE);
     }
     Ok(())
   }
@@ -104,13 +104,13 @@ impl Compiler {
         "SyntaxError: super used outside of a method",
       ));
     }
-    self.emit(Op::GetThis, LINE);
-    self.emit(Op::Copy, LINE);
+    self.emit(LoweringOpcode::GetThis, LINE);
+    self.emit(LoweringOpcode::Copy, LINE);
     self.compile_expr_oast(key_expr)?;
-    self.emit(Op::GetSuperProperty, LINE);
+    self.emit(LoweringOpcode::GetSuperProperty, LINE);
     if !preserve_receiver {
-      self.emit(Op::Exchange, LINE);
-      self.emit(Op::Discard, LINE);
+      self.emit(LoweringOpcode::Exchange, LINE);
+      self.emit(LoweringOpcode::Discard, LINE);
     }
     Ok(())
   }
@@ -125,13 +125,13 @@ impl Compiler {
         "SyntaxError: super used outside of a method",
       ));
     }
-    self.emit(Op::GetThis, LINE);
-    self.emit(Op::Copy, LINE);
+    self.emit(LoweringOpcode::GetThis, LINE);
+    self.emit(LoweringOpcode::Copy, LINE);
     self.emit_constant(Value::String(property.to_string().into()), LINE);
     self.compile_expr_oast(value_expr)?;
-    self.emit(Op::SetSuperProperty, LINE);
-    self.emit(Op::Exchange, LINE);
-    self.emit(Op::Discard, LINE);
+    self.emit(LoweringOpcode::SetSuperProperty, LINE);
+    self.emit(LoweringOpcode::Exchange, LINE);
+    self.emit(LoweringOpcode::Discard, LINE);
     Ok(())
   }
 
@@ -145,13 +145,13 @@ impl Compiler {
         "SyntaxError: super used outside of a method",
       ));
     }
-    self.emit(Op::GetThis, LINE);
-    self.emit(Op::Copy, LINE);
+    self.emit(LoweringOpcode::GetThis, LINE);
+    self.emit(LoweringOpcode::Copy, LINE);
     self.compile_expr_oast(key_expr)?;
     self.compile_expr_oast(value_expr)?;
-    self.emit(Op::SetSuperProperty, LINE);
-    self.emit(Op::Exchange, LINE);
-    self.emit(Op::Discard, LINE);
+    self.emit(LoweringOpcode::SetSuperProperty, LINE);
+    self.emit(LoweringOpcode::Exchange, LINE);
+    self.emit(LoweringOpcode::Discard, LINE);
     Ok(())
   }
 
@@ -161,12 +161,12 @@ impl Compiler {
   ) -> Result<(usize, usize), crate::errors::CompilerError> {
     self.compile_expr_oast(&m.object)?;
     let object_slot = self.alloc_temp_local("ref_obj");
-    self.emit(Op::StoreLocal, LINE);
+    self.emit(LoweringOpcode::StoreLocal, LINE);
     self.emit_slot(object_slot, LINE);
 
     self.emit_constant(Value::String(m.property.name.to_string().into()), LINE);
     let key_slot = self.alloc_temp_local("ref_key");
-    self.emit(Op::StoreLocal, LINE);
+    self.emit(LoweringOpcode::StoreLocal, LINE);
     self.emit_slot(key_slot, LINE);
     Ok((object_slot, key_slot))
   }
@@ -177,12 +177,12 @@ impl Compiler {
   ) -> Result<(usize, usize), crate::errors::CompilerError> {
     self.compile_expr_oast(&m.object)?;
     let object_slot = self.alloc_temp_local("ref_obj");
-    self.emit(Op::StoreLocal, LINE);
+    self.emit(LoweringOpcode::StoreLocal, LINE);
     self.emit_slot(object_slot, LINE);
 
     self.compile_expr_oast(&m.expression)?;
     let key_slot = self.alloc_temp_local("ref_key");
-    self.emit(Op::StoreLocal, LINE);
+    self.emit(LoweringOpcode::StoreLocal, LINE);
     self.emit_slot(key_slot, LINE);
     Ok((object_slot, key_slot))
   }
@@ -192,11 +192,11 @@ impl Compiler {
     object_slot: usize,
     key_slot: usize,
   ) -> Result<(), crate::errors::CompilerError> {
-    self.emit(Op::LoadLocal, LINE);
+    self.emit(LoweringOpcode::LoadLocal, LINE);
     self.emit_slot(object_slot, LINE);
-    self.emit(Op::LoadLocal, LINE);
+    self.emit(LoweringOpcode::LoadLocal, LINE);
     self.emit_slot(key_slot, LINE);
-    self.emit(Op::GetProperty, LINE);
+    self.emit(LoweringOpcode::GetProperty, LINE);
     Ok(())
   }
 
@@ -206,15 +206,15 @@ impl Compiler {
     key_slot: usize,
   ) -> Result<(), crate::errors::CompilerError> {
     let value_slot = self.alloc_temp_local("ref_value");
-    self.emit(Op::StoreLocal, LINE);
+    self.emit(LoweringOpcode::StoreLocal, LINE);
     self.emit_slot(value_slot, LINE);
-    self.emit(Op::LoadLocal, LINE);
+    self.emit(LoweringOpcode::LoadLocal, LINE);
     self.emit_slot(object_slot, LINE);
-    self.emit(Op::LoadLocal, LINE);
+    self.emit(LoweringOpcode::LoadLocal, LINE);
     self.emit_slot(key_slot, LINE);
-    self.emit(Op::LoadLocal, LINE);
+    self.emit(LoweringOpcode::LoadLocal, LINE);
     self.emit_slot(value_slot, LINE);
-    self.emit(Op::SetProperty, LINE);
+    self.emit(LoweringOpcode::SetProperty, LINE);
     Ok(())
   }
 
@@ -241,9 +241,9 @@ impl Compiler {
 
     self.compile_expr_oast(&binary.left)?;
     self.compile_expr_oast(&binary.right)?;
-    self.emit_with_payload(Op::CompareJump, cond_type as u32, LINE);
+    self.emit_with_payload(LoweringOpcode::CompareJump, cond_type as u32, LINE);
 
-    let patch_addr = self.current_ip().saturating_sub(1);
+    let patch_addr = self.current_pc().saturating_sub(1);
 
     Ok(Some(patch_addr))
   }
@@ -253,18 +253,18 @@ impl Compiler {
     op: oast::AssignmentOperator,
   ) {
     match op {
-      oast::AssignmentOperator::Addition => self.emit(Op::Add, LINE),
-      oast::AssignmentOperator::Subtraction => self.emit(Op::Sub, LINE),
-      oast::AssignmentOperator::Multiplication => self.emit(Op::Mul, LINE),
-      oast::AssignmentOperator::Division => self.emit(Op::Div, LINE),
-      oast::AssignmentOperator::Remainder => self.emit(Op::Mod, LINE),
-      oast::AssignmentOperator::Exponential => self.emit(Op::Pow, LINE),
-      oast::AssignmentOperator::BitwiseAnd => self.emit(Op::BitAnd, LINE),
-      oast::AssignmentOperator::BitwiseOR => self.emit(Op::BitOr, LINE),
-      oast::AssignmentOperator::BitwiseXOR => self.emit(Op::BitXor, LINE),
-      oast::AssignmentOperator::ShiftLeft => self.emit(Op::Shl, LINE),
-      oast::AssignmentOperator::ShiftRight => self.emit(Op::Shr, LINE),
-      oast::AssignmentOperator::ShiftRightZeroFill => self.emit(Op::Ushr, LINE),
+      oast::AssignmentOperator::Addition => self.emit(LoweringOpcode::Add, LINE),
+      oast::AssignmentOperator::Subtraction => self.emit(LoweringOpcode::Sub, LINE),
+      oast::AssignmentOperator::Multiplication => self.emit(LoweringOpcode::Mul, LINE),
+      oast::AssignmentOperator::Division => self.emit(LoweringOpcode::Div, LINE),
+      oast::AssignmentOperator::Remainder => self.emit(LoweringOpcode::Mod, LINE),
+      oast::AssignmentOperator::Exponential => self.emit(LoweringOpcode::Pow, LINE),
+      oast::AssignmentOperator::BitwiseAnd => self.emit(LoweringOpcode::BitAnd, LINE),
+      oast::AssignmentOperator::BitwiseOR => self.emit(LoweringOpcode::BitOr, LINE),
+      oast::AssignmentOperator::BitwiseXOR => self.emit(LoweringOpcode::BitXor, LINE),
+      oast::AssignmentOperator::ShiftLeft => self.emit(LoweringOpcode::Shl, LINE),
+      oast::AssignmentOperator::ShiftRight => self.emit(LoweringOpcode::Shr, LINE),
+      oast::AssignmentOperator::ShiftRightZeroFill => self.emit(LoweringOpcode::Ushr, LINE),
       _ => {}
     }
   }

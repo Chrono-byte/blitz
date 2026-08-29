@@ -43,12 +43,12 @@ fn builtin_eval_script(
     _ => return Ok(Value::Null),
   };
 
-  let chunk = crate::typecheck::with_strict_override(None, || {
+  let code = crate::typecheck::with_strict_override(None, || {
     let src = src.as_str_lossy();
     let session = Parser::parse_source(src).map_err(|e| format!("evalScript parse: {}", e))?;
     compiler::compile_repl_session(&session).map_err(|e| format!("evalScript compile: {}", e))
   })?;
-  vm.run_nested_in_realm(chunk, Rc::clone(globals))
+  vm.run_nested_in_realm(code, Rc::clone(globals))
     .map_err(|failure| format!("evalScript runtime: {}", failure.error))
 }
 

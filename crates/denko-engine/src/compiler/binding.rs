@@ -9,7 +9,7 @@
 //! The binding phase processes variable declarations and manages the storage
 //! of binding identifiers in local scopes.
 
-use super::emit::FrontendOp as Op;
+use super::emit::LoweringOpcode;
 use crate::value::Value;
 use oxc_ast::ast as oast;
 use std::collections::HashSet;
@@ -49,9 +49,9 @@ impl super::Compiler {
     let reference_slot = self.alloc_temp_local("with_identifier_reference");
     self.emit_get_builtin_name("resolveWithBindingObject");
     self.emit_constant(Value::String(name.into()), LINE);
-    self.emit(Op::Call, LINE);
+    self.emit(LoweringOpcode::Call, LINE);
     self.emit_byte(1, LINE);
-    self.emit(Op::StoreLocal, LINE);
+    self.emit(LoweringOpcode::StoreLocal, LINE);
     self.emit_slot(reference_slot, LINE);
     Ok(reference_slot)
   }
@@ -62,10 +62,10 @@ impl super::Compiler {
     name: &str,
   ) -> Result<(), crate::errors::CompilerError> {
     self.emit_get_builtin_name("getResolvedIdentifier");
-    self.emit(Op::LoadLocal, LINE);
+    self.emit(LoweringOpcode::LoadLocal, LINE);
     self.emit_slot(reference_slot, LINE);
     self.emit_constant(Value::String(name.into()), LINE);
-    self.emit(Op::Call, LINE);
+    self.emit(LoweringOpcode::Call, LINE);
     self.emit_byte(2, LINE);
     Ok(())
   }
@@ -76,15 +76,15 @@ impl super::Compiler {
     name: &str,
   ) -> Result<(), crate::errors::CompilerError> {
     let value_slot = self.alloc_reusable_temp_local("with_identifier_value");
-    self.emit(Op::StoreLocal, LINE);
+    self.emit(LoweringOpcode::StoreLocal, LINE);
     self.emit_slot(value_slot, LINE);
     self.emit_get_builtin_name("setResolvedIdentifier");
-    self.emit(Op::LoadLocal, LINE);
+    self.emit(LoweringOpcode::LoadLocal, LINE);
     self.emit_slot(reference_slot, LINE);
     self.emit_constant(Value::String(name.into()), LINE);
-    self.emit(Op::LoadLocal, LINE);
+    self.emit(LoweringOpcode::LoadLocal, LINE);
     self.emit_slot(value_slot, LINE);
-    self.emit(Op::Call, LINE);
+    self.emit(LoweringOpcode::Call, LINE);
     self.emit_byte(3, LINE);
     Ok(())
   }
@@ -100,8 +100,8 @@ impl super::Compiler {
       oast::AssignmentTarget::StaticMemberExpression(member) => {
         if matches!(&member.object, oast::Expression::Super(_)) {
           let receiver_slot = self.alloc_temp_local("destructuring_super_receiver");
-          self.emit(Op::GetThis, LINE);
-          self.emit(Op::StoreLocal, LINE);
+          self.emit(LoweringOpcode::GetThis, LINE);
+          self.emit(LoweringOpcode::StoreLocal, LINE);
           self.emit_slot(receiver_slot, LINE);
           return Ok(Some(PreparedAssignmentTarget::SuperStatic {
             receiver_slot,
@@ -110,7 +110,7 @@ impl super::Compiler {
         }
         self.compile_expr_oast(&member.object)?;
         let object_slot = self.alloc_temp_local("destructuring_target_object");
-        self.emit(Op::StoreLocal, LINE);
+        self.emit(LoweringOpcode::StoreLocal, LINE);
         self.emit_slot(object_slot, LINE);
         Ok(Some(PreparedAssignmentTarget::StaticMember {
           object_slot,
@@ -120,12 +120,12 @@ impl super::Compiler {
       oast::AssignmentTarget::ComputedMemberExpression(member) => {
         if matches!(&member.object, oast::Expression::Super(_)) {
           let receiver_slot = self.alloc_temp_local("destructuring_super_receiver");
-          self.emit(Op::GetThis, LINE);
-          self.emit(Op::StoreLocal, LINE);
+          self.emit(LoweringOpcode::GetThis, LINE);
+          self.emit(LoweringOpcode::StoreLocal, LINE);
           self.emit_slot(receiver_slot, LINE);
           self.compile_expr_oast(&member.expression)?;
           let key_slot = self.alloc_temp_local("destructuring_super_key");
-          self.emit(Op::StoreLocal, LINE);
+          self.emit(LoweringOpcode::StoreLocal, LINE);
           self.emit_slot(key_slot, LINE);
           return Ok(Some(PreparedAssignmentTarget::SuperComputed {
             receiver_slot,
@@ -134,11 +134,11 @@ impl super::Compiler {
         }
         self.compile_expr_oast(&member.object)?;
         let object_slot = self.alloc_temp_local("destructuring_target_object");
-        self.emit(Op::StoreLocal, LINE);
+        self.emit(LoweringOpcode::StoreLocal, LINE);
         self.emit_slot(object_slot, LINE);
         self.compile_expr_oast(&member.expression)?;
         let key_slot = self.alloc_temp_local("destructuring_target_key");
-        self.emit(Op::StoreLocal, LINE);
+        self.emit(LoweringOpcode::StoreLocal, LINE);
         self.emit_slot(key_slot, LINE);
         Ok(Some(PreparedAssignmentTarget::ComputedMember {
           object_slot,
@@ -163,8 +163,8 @@ impl super::Compiler {
       oast::AssignmentTargetMaybeDefault::StaticMemberExpression(member) => {
         if matches!(&member.object, oast::Expression::Super(_)) {
           let receiver_slot = self.alloc_temp_local("destructuring_super_receiver");
-          self.emit(Op::GetThis, LINE);
-          self.emit(Op::StoreLocal, LINE);
+          self.emit(LoweringOpcode::GetThis, LINE);
+          self.emit(LoweringOpcode::StoreLocal, LINE);
           self.emit_slot(receiver_slot, LINE);
           return Ok(Some(PreparedAssignmentTarget::SuperStatic {
             receiver_slot,
@@ -173,7 +173,7 @@ impl super::Compiler {
         }
         self.compile_expr_oast(&member.object)?;
         let object_slot = self.alloc_temp_local("destructuring_target_object");
-        self.emit(Op::StoreLocal, LINE);
+        self.emit(LoweringOpcode::StoreLocal, LINE);
         self.emit_slot(object_slot, LINE);
         Ok(Some(PreparedAssignmentTarget::StaticMember {
           object_slot,
@@ -183,12 +183,12 @@ impl super::Compiler {
       oast::AssignmentTargetMaybeDefault::ComputedMemberExpression(member) => {
         if matches!(&member.object, oast::Expression::Super(_)) {
           let receiver_slot = self.alloc_temp_local("destructuring_super_receiver");
-          self.emit(Op::GetThis, LINE);
-          self.emit(Op::StoreLocal, LINE);
+          self.emit(LoweringOpcode::GetThis, LINE);
+          self.emit(LoweringOpcode::StoreLocal, LINE);
           self.emit_slot(receiver_slot, LINE);
           self.compile_expr_oast(&member.expression)?;
           let key_slot = self.alloc_temp_local("destructuring_super_key");
-          self.emit(Op::StoreLocal, LINE);
+          self.emit(LoweringOpcode::StoreLocal, LINE);
           self.emit_slot(key_slot, LINE);
           return Ok(Some(PreparedAssignmentTarget::SuperComputed {
             receiver_slot,
@@ -197,11 +197,11 @@ impl super::Compiler {
         }
         self.compile_expr_oast(&member.object)?;
         let object_slot = self.alloc_temp_local("destructuring_target_object");
-        self.emit(Op::StoreLocal, LINE);
+        self.emit(LoweringOpcode::StoreLocal, LINE);
         self.emit_slot(object_slot, LINE);
         self.compile_expr_oast(&member.expression)?;
         let key_slot = self.alloc_temp_local("destructuring_target_key");
-        self.emit(Op::StoreLocal, LINE);
+        self.emit(LoweringOpcode::StoreLocal, LINE);
         self.emit_slot(key_slot, LINE);
         Ok(Some(PreparedAssignmentTarget::ComputedMember {
           object_slot,
@@ -223,15 +223,15 @@ impl super::Compiler {
         property,
       } => {
         let value_slot = self.alloc_temp_local("assign_member_value");
-        self.emit(Op::StoreLocal, LINE);
+        self.emit(LoweringOpcode::StoreLocal, LINE);
         self.emit_slot(value_slot, LINE);
-        self.emit(Op::LoadLocal, LINE);
+        self.emit(LoweringOpcode::LoadLocal, LINE);
         self.emit_slot(*object_slot, LINE);
         self.emit_constant(property.clone(), LINE);
-        self.emit(Op::LoadLocal, LINE);
+        self.emit(LoweringOpcode::LoadLocal, LINE);
         self.emit_slot(value_slot, LINE);
-        self.emit(Op::SetProperty, LINE);
-        self.emit(Op::Discard, LINE);
+        self.emit(LoweringOpcode::SetProperty, LINE);
+        self.emit(LoweringOpcode::Discard, LINE);
         Ok(())
       }
       PreparedAssignmentTarget::ComputedMember {
@@ -239,16 +239,16 @@ impl super::Compiler {
         key_slot,
       } => {
         let value_slot = self.alloc_temp_local("assign_member_value");
-        self.emit(Op::StoreLocal, LINE);
+        self.emit(LoweringOpcode::StoreLocal, LINE);
         self.emit_slot(value_slot, LINE);
-        self.emit(Op::LoadLocal, LINE);
+        self.emit(LoweringOpcode::LoadLocal, LINE);
         self.emit_slot(*object_slot, LINE);
-        self.emit(Op::LoadLocal, LINE);
+        self.emit(LoweringOpcode::LoadLocal, LINE);
         self.emit_slot(*key_slot, LINE);
-        self.emit(Op::LoadLocal, LINE);
+        self.emit(LoweringOpcode::LoadLocal, LINE);
         self.emit_slot(value_slot, LINE);
-        self.emit(Op::SetProperty, LINE);
-        self.emit(Op::Discard, LINE);
+        self.emit(LoweringOpcode::SetProperty, LINE);
+        self.emit(LoweringOpcode::Discard, LINE);
         Ok(())
       }
       PreparedAssignmentTarget::SuperStatic {
@@ -256,15 +256,15 @@ impl super::Compiler {
         property,
       } => {
         let value_slot = self.alloc_reusable_temp_local("assign_super_value");
-        self.emit(Op::StoreLocal, LINE);
+        self.emit(LoweringOpcode::StoreLocal, LINE);
         self.emit_slot(value_slot, LINE);
-        self.emit(Op::LoadLocal, LINE);
+        self.emit(LoweringOpcode::LoadLocal, LINE);
         self.emit_slot(*receiver_slot, LINE);
         self.emit_constant(property.clone(), LINE);
-        self.emit(Op::LoadLocal, LINE);
+        self.emit(LoweringOpcode::LoadLocal, LINE);
         self.emit_slot(value_slot, LINE);
-        self.emit(Op::SetSuperProperty, LINE);
-        self.emit(Op::Discard, LINE);
+        self.emit(LoweringOpcode::SetSuperProperty, LINE);
+        self.emit(LoweringOpcode::Discard, LINE);
         Ok(())
       }
       PreparedAssignmentTarget::SuperComputed {
@@ -272,16 +272,16 @@ impl super::Compiler {
         key_slot,
       } => {
         let value_slot = self.alloc_reusable_temp_local("assign_super_value");
-        self.emit(Op::StoreLocal, LINE);
+        self.emit(LoweringOpcode::StoreLocal, LINE);
         self.emit_slot(value_slot, LINE);
-        self.emit(Op::LoadLocal, LINE);
+        self.emit(LoweringOpcode::LoadLocal, LINE);
         self.emit_slot(*receiver_slot, LINE);
-        self.emit(Op::LoadLocal, LINE);
+        self.emit(LoweringOpcode::LoadLocal, LINE);
         self.emit_slot(*key_slot, LINE);
-        self.emit(Op::LoadLocal, LINE);
+        self.emit(LoweringOpcode::LoadLocal, LINE);
         self.emit_slot(value_slot, LINE);
-        self.emit(Op::SetSuperProperty, LINE);
-        self.emit(Op::Discard, LINE);
+        self.emit(LoweringOpcode::SetSuperProperty, LINE);
+        self.emit(LoweringOpcode::Discard, LINE);
         Ok(())
       }
     }
@@ -322,7 +322,7 @@ impl super::Compiler {
     match key {
       PreparedPropertyKey::Constant(value) => self.emit_constant(value.clone(), LINE),
       PreparedPropertyKey::Local(slot) => {
-        self.emit(Op::LoadLocal, LINE);
+        self.emit(LoweringOpcode::LoadLocal, LINE);
         self.emit_slot(*slot, LINE);
       }
     }
@@ -343,12 +343,12 @@ impl super::Compiler {
     })?;
     self.emit_get_builtin_name("toPropertyKey");
     self.compile_expr_oast(expression)?;
-    self.emit(Op::Call, LINE);
+    self.emit(LoweringOpcode::Call, LINE);
     self.emit_byte(1, LINE);
     let slot = self.alloc_temp_local("destructuring_property_key");
-    self.emit(Op::StoreLocal, LINE);
+    self.emit(LoweringOpcode::StoreLocal, LINE);
     self.emit_slot(slot, LINE);
-    self.emit(Op::LoadLocal, LINE);
+    self.emit(LoweringOpcode::LoadLocal, LINE);
     self.emit_slot(slot, LINE);
     Ok(PreparedPropertyKey::Local(slot))
   }
@@ -358,15 +358,15 @@ impl super::Compiler {
     excluded: &[PreparedPropertyKey],
   ) -> Result<(), crate::errors::CompilerError> {
     let source_slot = self.alloc_temp_local("object_rest_source");
-    self.emit(Op::StoreLocal, LINE);
+    self.emit(LoweringOpcode::StoreLocal, LINE);
     self.emit_slot(source_slot, LINE);
     self.emit_get_builtin_name("copyDataProperties");
-    self.emit(Op::LoadLocal, LINE);
+    self.emit(LoweringOpcode::LoadLocal, LINE);
     self.emit_slot(source_slot, LINE);
     for key in excluded {
       self.emit_prepared_property_key(key)?;
     }
-    self.emit(Op::Call, LINE);
+    self.emit(LoweringOpcode::Call, LINE);
     self.emit_byte(
       u8::try_from(excluded.len() + 1)
         .map_err(|_| crate::errors::CompilerError::from("too many object rest exclusions"))?,
@@ -402,13 +402,13 @@ impl super::Compiler {
           self.compile_expr_oast(init)?;
           if Self::is_anonymous_function_definition(init) {
             let value_slot = self.alloc_reusable_temp_local("variable_initializer");
-            self.emit(Op::StoreLocal, LINE);
+            self.emit(LoweringOpcode::StoreLocal, LINE);
             self.emit_slot(value_slot, LINE);
             self.emit_get_builtin_name("setFunctionNameIfAnonymous");
-            self.emit(Op::LoadLocal, LINE);
+            self.emit(LoweringOpcode::LoadLocal, LINE);
             self.emit_slot(value_slot, LINE);
             self.emit_constant(Value::String(name.to_string().into()), LINE);
-            self.emit(Op::Call, LINE);
+            self.emit(LoweringOpcode::Call, LINE);
             self.emit_byte(2, LINE);
           }
           self.emit_set_global_name(name);
@@ -427,7 +427,7 @@ impl super::Compiler {
         for name in names {
           let slot = self.predeclare_lexical_binding(&name, v.kind)?;
           if self.loop_depth > 0 {
-            self.emit(Op::ResetLocalCell, LINE);
+            self.emit(LoweringOpcode::ResetLocalCell, LINE);
             self.emit_slot(slot, LINE);
           }
         }
@@ -439,17 +439,17 @@ impl super::Compiler {
           && Self::is_anonymous_function_definition(init)
         {
           let value_slot = self.alloc_reusable_temp_local("variable_initializer");
-          self.emit(Op::StoreLocal, LINE);
+          self.emit(LoweringOpcode::StoreLocal, LINE);
           self.emit_slot(value_slot, LINE);
           self.emit_get_builtin_name("setFunctionNameIfAnonymous");
-          self.emit(Op::LoadLocal, LINE);
+          self.emit(LoweringOpcode::LoadLocal, LINE);
           self.emit_slot(value_slot, LINE);
           self.emit_constant(Value::String(name.into()), LINE);
-          self.emit(Op::Call, LINE);
+          self.emit(LoweringOpcode::Call, LINE);
           self.emit_byte(2, LINE);
         }
       } else {
-        self.emit(Op::Undefined, LINE);
+        self.emit(LoweringOpcode::Undefined, LINE);
       }
       self.compile_binding_pattern_assignment_oast(&dec.id, v.kind)?;
     }
@@ -547,9 +547,9 @@ impl super::Compiler {
       self.mark_local_immutable(slot);
     }
     if mirror_global {
-      self.emit(Op::Copy, LINE);
+      self.emit(LoweringOpcode::Copy, LINE);
     }
-    self.emit(Op::StoreLocal, LINE);
+    self.emit(LoweringOpcode::StoreLocal, LINE);
     self.emit_slot(slot, LINE);
     if self.is_root && mirror_global {
       self.emit_set_global_name(name);
@@ -580,9 +580,9 @@ impl super::Compiler {
       .as_ref()
       .is_some_and(|c| c.imports.contains_key(name))
     {
-      self.emit(Op::Discard, LINE);
+      self.emit(LoweringOpcode::Discard, LINE);
       self.emit_get_builtin_name("throwTypeError");
-      self.emit(Op::Call, LINE);
+      self.emit(LoweringOpcode::Call, LINE);
       self.emit_byte(0, LINE);
       return Ok(());
     }
@@ -590,23 +590,23 @@ impl super::Compiler {
       self.emit_set_global_name(name);
     } else if let Some(slot) = self.resolve_local(name) {
       let value_slot = self.alloc_reusable_temp_local("assignment_identifier_value");
-      self.emit(Op::StoreLocal, LINE);
+      self.emit(LoweringOpcode::StoreLocal, LINE);
       self.emit_slot(value_slot, LINE);
-      self.emit(Op::LoadLocal, LINE);
+      self.emit(LoweringOpcode::LoadLocal, LINE);
       self.emit_slot(slot, LINE);
-      self.emit(Op::Discard, LINE);
-      self.emit(Op::LoadLocal, LINE);
+      self.emit(LoweringOpcode::Discard, LINE);
+      self.emit(LoweringOpcode::LoadLocal, LINE);
       self.emit_slot(value_slot, LINE);
-      self.emit(Op::StoreLocal, LINE);
+      self.emit(LoweringOpcode::StoreLocal, LINE);
       self.emit_slot(slot, LINE);
       if self.local_mirrors_global(slot) {
-        self.emit(Op::LoadLocal, LINE);
+        self.emit(LoweringOpcode::LoadLocal, LINE);
         self.emit_slot(slot, LINE);
         self.emit_set_global_name(name);
       }
       self.emit_sync_local_module_export(name, slot)?;
     } else if let Some(upvalue) = self.resolve_upvalue(name) {
-      self.emit(Op::SetUpvalue, LINE);
+      self.emit(LoweringOpcode::SetUpvalue, LINE);
       self.emit_u16(upvalue, LINE);
       self.emit_sync_upvalue_module_export(upvalue)?;
     } else {
@@ -627,14 +627,14 @@ impl super::Compiler {
     m: &oast::StaticMemberExpression<'_>,
   ) -> Result<(), crate::errors::CompilerError> {
     let value_slot = self.alloc_temp_local("assign_member_value");
-    self.emit(Op::StoreLocal, LINE);
+    self.emit(LoweringOpcode::StoreLocal, LINE);
     self.emit_slot(value_slot, LINE);
     self.compile_expr_oast(&m.object)?;
     self.emit_constant(Value::String(m.property.name.to_string().into()), LINE);
-    self.emit(Op::LoadLocal, LINE);
+    self.emit(LoweringOpcode::LoadLocal, LINE);
     self.emit_slot(value_slot, LINE);
-    self.emit(Op::SetProperty, LINE);
-    self.emit(Op::Discard, LINE);
+    self.emit(LoweringOpcode::SetProperty, LINE);
+    self.emit(LoweringOpcode::Discard, LINE);
     Ok(())
   }
 
@@ -643,14 +643,14 @@ impl super::Compiler {
     m: &oast::ComputedMemberExpression<'_>,
   ) -> Result<(), crate::errors::CompilerError> {
     let value_slot = self.alloc_temp_local("assign_member_value");
-    self.emit(Op::StoreLocal, LINE);
+    self.emit(LoweringOpcode::StoreLocal, LINE);
     self.emit_slot(value_slot, LINE);
     self.compile_expr_oast(&m.object)?;
     self.compile_expr_oast(&m.expression)?;
-    self.emit(Op::LoadLocal, LINE);
+    self.emit(LoweringOpcode::LoadLocal, LINE);
     self.emit_slot(value_slot, LINE);
-    self.emit(Op::SetProperty, LINE);
-    self.emit(Op::Discard, LINE);
+    self.emit(LoweringOpcode::SetProperty, LINE);
+    self.emit(LoweringOpcode::Discard, LINE);
     Ok(())
   }
 
@@ -659,27 +659,27 @@ impl super::Compiler {
     label: &str,
   ) -> Result<(usize, usize, usize, usize, usize), crate::errors::CompilerError> {
     self.emit_get_builtin_name("requireObjectCoercible");
-    self.emit(Op::Exchange, LINE);
-    self.emit(Op::Call, LINE);
+    self.emit(LoweringOpcode::Exchange, LINE);
+    self.emit(LoweringOpcode::Call, LINE);
     self.emit_byte(1, LINE);
 
     let iterator_slot = self.alloc_temp_local(label);
     self.emit_get_builtin_name("getIterator");
-    self.emit(Op::Exchange, LINE);
-    self.emit(Op::Call, LINE);
+    self.emit(LoweringOpcode::Exchange, LINE);
+    self.emit(LoweringOpcode::Call, LINE);
     self.emit_byte(1, LINE);
-    self.emit(Op::StoreLocal, LINE);
+    self.emit(LoweringOpcode::StoreLocal, LINE);
     self.emit_slot(iterator_slot, LINE);
 
     let iterator_active_slot = self.alloc_temp_local("array_destructuring_iterator_active");
-    self.emit(Op::True, LINE);
-    self.emit(Op::StoreLocal, LINE);
+    self.emit(LoweringOpcode::True, LINE);
+    self.emit(LoweringOpcode::StoreLocal, LINE);
     self.emit_slot(iterator_active_slot, LINE);
 
     let thrown_slot = self.alloc_temp_local("array_destructuring_thrown");
-    let push_handler_ip = self.current_ip();
-    self.emit(Op::PushHandler, LINE);
-    let handler_jump = self.current_ip();
+    let push_handler_pc = self.current_pc();
+    self.emit(LoweringOpcode::PushHandler, LINE);
+    let handler_jump = self.current_pc();
     self.emit_byte(0, LINE);
     self.emit_byte(0, LINE);
     self.handler_depth += 1;
@@ -687,7 +687,7 @@ impl super::Compiler {
       iterator_slot,
       iterator_active_slot,
       thrown_slot,
-      push_handler_ip,
+      push_handler_pc,
       handler_jump,
     ))
   }
@@ -697,8 +697,15 @@ impl super::Compiler {
     active_slot: usize,
     active: bool,
   ) -> Result<(), crate::errors::CompilerError> {
-    self.emit(if active { Op::True } else { Op::False }, LINE);
-    self.emit(Op::StoreLocal, LINE);
+    self.emit(
+      if active {
+        LoweringOpcode::True
+      } else {
+        LoweringOpcode::False
+      },
+      LINE,
+    );
+    self.emit(LoweringOpcode::StoreLocal, LINE);
     self.emit_slot(active_slot, LINE);
     Ok(())
   }
@@ -710,22 +717,22 @@ impl super::Compiler {
   ) -> Result<(), crate::errors::CompilerError> {
     let result_slot = self.alloc_reusable_temp_local("array_destructuring_step");
     self.emit_get_builtin_name("iteratorDestructuringStep");
-    self.emit(Op::LoadLocal, LINE);
+    self.emit(LoweringOpcode::LoadLocal, LINE);
     self.emit_slot(iterator_slot, LINE);
-    self.emit(Op::Call, LINE);
+    self.emit(LoweringOpcode::Call, LINE);
     self.emit_byte(1, LINE);
-    self.emit(Op::StoreLocal, LINE);
+    self.emit(LoweringOpcode::StoreLocal, LINE);
     self.emit_slot(result_slot, LINE);
-    self.emit(Op::LoadLocal, LINE);
+    self.emit(LoweringOpcode::LoadLocal, LINE);
     self.emit_slot(result_slot, LINE);
     self.emit_constant(Value::String("1".into()), LINE);
-    self.emit(Op::GetProperty, LINE);
-    self.emit(Op::StoreLocal, LINE);
+    self.emit(LoweringOpcode::GetProperty, LINE);
+    self.emit(LoweringOpcode::StoreLocal, LINE);
     self.emit_slot(active_slot, LINE);
-    self.emit(Op::LoadLocal, LINE);
+    self.emit(LoweringOpcode::LoadLocal, LINE);
     self.emit_slot(result_slot, LINE);
     self.emit_constant(Value::String("0".into()), LINE);
-    self.emit(Op::GetProperty, LINE);
+    self.emit(LoweringOpcode::GetProperty, LINE);
     Ok(())
   }
 
@@ -734,16 +741,16 @@ impl super::Compiler {
     iterator_slot: usize,
     active_slot: usize,
   ) -> Result<(), crate::errors::CompilerError> {
-    self.emit(Op::LoadLocal, LINE);
+    self.emit(LoweringOpcode::LoadLocal, LINE);
     self.emit_slot(active_slot, LINE);
-    self.emit(Op::JumpIfFalse, LINE);
-    let skip_close = self.current_ip();
+    self.emit(LoweringOpcode::JumpIfFalse, LINE);
+    let skip_close = self.current_pc();
     self.emit_byte(0, LINE);
     self.emit_byte(0, LINE);
-    self.emit(Op::LoadLocal, LINE);
+    self.emit(LoweringOpcode::LoadLocal, LINE);
     self.emit_slot(iterator_slot, LINE);
-    self.emit(Op::IteratorClose, LINE);
-    self.emit(Op::Discard, LINE);
+    self.emit(LoweringOpcode::IteratorClose, LINE);
+    self.emit(LoweringOpcode::Discard, LINE);
     self.patch_jump(skip_close);
     Ok(())
   }
@@ -753,55 +760,55 @@ impl super::Compiler {
     iterator_slot: usize,
     iterator_active_slot: usize,
     thrown_slot: usize,
-    push_handler_ip: usize,
+    push_handler_pc: usize,
     handler_jump: usize,
     close_on_normal: bool,
   ) -> Result<(), crate::errors::CompilerError> {
     self.handler_depth = self.handler_depth.saturating_sub(1);
-    self.emit(Op::PopHandler, LINE);
+    self.emit(LoweringOpcode::PopHandler, LINE);
     if close_on_normal {
       self.close_array_destructuring_iterator_if_active(iterator_slot, iterator_active_slot)?;
     }
-    self.emit(Op::Jump, LINE);
-    let end_jump = self.current_ip();
+    self.emit(LoweringOpcode::Jump, LINE);
+    let end_jump = self.current_pc();
     self.emit_byte(0, LINE);
     self.emit_byte(0, LINE);
 
     self.patch_jump(handler_jump);
-    self.emit(Op::StoreLocal, LINE);
+    self.emit(LoweringOpcode::StoreLocal, LINE);
     self.emit_slot(thrown_slot, LINE);
 
-    self.emit(Op::PushHandler, LINE);
-    let close_handler_jump = self.current_ip();
+    self.emit(LoweringOpcode::PushHandler, LINE);
+    let close_handler_jump = self.current_pc();
     self.emit_byte(0, LINE);
     self.emit_byte(0, LINE);
     self.close_array_destructuring_iterator_if_active(iterator_slot, iterator_active_slot)?;
-    self.emit(Op::PopHandler, LINE);
-    self.emit(Op::Jump, LINE);
-    let close_done_jump = self.current_ip();
+    self.emit(LoweringOpcode::PopHandler, LINE);
+    self.emit(LoweringOpcode::Jump, LINE);
+    let close_done_jump = self.current_pc();
     self.emit_byte(0, LINE);
     self.emit_byte(0, LINE);
     self.patch_jump(close_handler_jump);
-    self.emit(Op::Discard, LINE);
+    self.emit(LoweringOpcode::Discard, LINE);
     self.patch_jump(close_done_jump);
 
-    self.emit(Op::LoadLocal, LINE);
+    self.emit(LoweringOpcode::LoadLocal, LINE);
     self.emit_slot(thrown_slot, LINE);
-    self.emit(Op::Throw, LINE);
+    self.emit(LoweringOpcode::Throw, LINE);
 
     let return_slot = self.alloc_temp_local("array_destructuring_return");
     let did_return_slot = self.alloc_temp_local("array_destructuring_did_return");
-    let return_cleanup_ip = self.current_ip();
+    let return_cleanup_pc = self.current_pc();
     self.close_array_destructuring_iterator_if_active(iterator_slot, iterator_active_slot)?;
-    self.emit(Op::LoadLocal, LINE);
+    self.emit(LoweringOpcode::LoadLocal, LINE);
     self.emit_slot(return_slot, LINE);
-    self.emit(Op::Return, LINE);
+    self.emit(LoweringOpcode::Return, LINE);
     self
-      .chunk
+      .code
       .finally_handlers
       .push(crate::bytecode::FinallyHandler {
-        push_ip: push_handler_ip,
-        finalizer_ip: return_cleanup_ip,
+        push_pc: push_handler_pc,
+        finalizer_pc: return_cleanup_pc,
         return_slot,
         did_return_slot,
       });
@@ -817,32 +824,32 @@ impl super::Compiler {
     match target {
       oast::AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(a) => {
         let temp_slot = self.alloc_temp_local("assign_default");
-        self.emit(Op::StoreLocal, LINE);
+        self.emit(LoweringOpcode::StoreLocal, LINE);
         self.emit_slot(temp_slot, LINE);
-        self.emit(Op::LoadLocal, LINE);
+        self.emit(LoweringOpcode::LoadLocal, LINE);
         self.emit_slot(temp_slot, LINE);
-        self.emit(Op::Undefined, LINE);
-        self.emit_with_payload(Op::CompareJump, 6, LINE);
-        let skip_default = self.current_ip();
+        self.emit(LoweringOpcode::Undefined, LINE);
+        self.emit_with_payload(LoweringOpcode::CompareJump, 6, LINE);
+        let skip_default = self.current_pc();
         self.emit_byte(0, LINE);
         self.emit_byte(0, LINE);
         self.compile_expr_oast(&a.init)?;
-        self.emit(Op::StoreLocal, LINE);
+        self.emit(LoweringOpcode::StoreLocal, LINE);
         self.emit_slot(temp_slot, LINE);
         if let Some(name) = Self::assignment_target_identifier_name(&a.binding)
           && Self::is_anonymous_function_definition(&a.init)
         {
           self.emit_get_builtin_name("setFunctionNameIfAnonymous");
-          self.emit(Op::LoadLocal, LINE);
+          self.emit(LoweringOpcode::LoadLocal, LINE);
           self.emit_slot(temp_slot, LINE);
           self.emit_constant(Value::String(name.into()), LINE);
-          self.emit(Op::Call, LINE);
+          self.emit(LoweringOpcode::Call, LINE);
           self.emit_byte(2, LINE);
-          self.emit(Op::StoreLocal, LINE);
+          self.emit(LoweringOpcode::StoreLocal, LINE);
           self.emit_slot(temp_slot, LINE);
         }
         self.patch_jump(skip_default);
-        self.emit(Op::LoadLocal, LINE);
+        self.emit(LoweringOpcode::LoadLocal, LINE);
         self.emit_slot(temp_slot, LINE);
         if let Some(prepared) = prepared {
           self.store_prepared_assignment_target(prepared)?;
@@ -888,7 +895,7 @@ impl super::Compiler {
     &mut self,
     a: &oast::ArrayAssignmentTarget<'_>,
   ) -> Result<(), crate::errors::CompilerError> {
-    let (iterator_slot, iterator_active_slot, thrown_slot, push_handler_ip, handler_jump) =
+    let (iterator_slot, iterator_active_slot, thrown_slot, push_handler_pc, handler_jump) =
       self.begin_array_destructuring_iterator("array_assign_iterator")?;
 
     for el in &a.elements {
@@ -901,17 +908,17 @@ impl super::Compiler {
       if let Some(el) = el {
         self.compile_assignment_target_maybe_default_prepared(el, prepared.as_ref())?;
       } else {
-        self.emit(Op::Discard, LINE);
+        self.emit(LoweringOpcode::Discard, LINE);
       }
     }
     if let Some(rest) = &a.rest {
       let prepared = self.prepare_assignment_target(&rest.target)?;
       self.set_array_destructuring_iterator_active(iterator_active_slot, false)?;
-      self.emit(Op::LoadLocal, LINE);
+      self.emit(LoweringOpcode::LoadLocal, LINE);
       self.emit_slot(iterator_slot, LINE);
       self.emit_get_builtin_name("iteratorToArray");
-      self.emit(Op::Exchange, LINE);
-      self.emit(Op::Call, LINE);
+      self.emit(LoweringOpcode::Exchange, LINE);
+      self.emit(LoweringOpcode::Call, LINE);
       self.emit_byte(1, LINE);
       if let Some(prepared) = &prepared {
         self.store_prepared_assignment_target(prepared)?;
@@ -923,7 +930,7 @@ impl super::Compiler {
       iterator_slot,
       iterator_active_slot,
       thrown_slot,
-      push_handler_ip,
+      push_handler_pc,
       handler_jump,
       a.rest.is_none(),
     )?;
@@ -935,8 +942,8 @@ impl super::Compiler {
     o: &oast::ObjectAssignmentTarget<'_>,
   ) -> Result<(), crate::errors::CompilerError> {
     self.emit_get_builtin_name("requireObjectCoercible");
-    self.emit(Op::Exchange, LINE);
-    self.emit(Op::Call, LINE);
+    self.emit(LoweringOpcode::Exchange, LINE);
+    self.emit(LoweringOpcode::Call, LINE);
     self.emit_byte(1, LINE);
     let mut excluded = Vec::with_capacity(o.properties.len());
     for prop in &o.properties {
@@ -944,44 +951,44 @@ impl super::Compiler {
         oast::AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(p) => {
           let key = Value::String(p.binding.name.to_string().into());
           excluded.push(PreparedPropertyKey::Constant(key.clone()));
-          self.emit(Op::Copy, LINE);
+          self.emit(LoweringOpcode::Copy, LINE);
           self.emit_constant(key, LINE);
-          self.emit(Op::GetProperty, LINE);
+          self.emit(LoweringOpcode::GetProperty, LINE);
           if let Some(init) = &p.init {
             let temp_slot = self.alloc_temp_local("assign_prop_default");
-            self.emit(Op::StoreLocal, LINE);
+            self.emit(LoweringOpcode::StoreLocal, LINE);
             self.emit_slot(temp_slot, LINE);
-            self.emit(Op::LoadLocal, LINE);
+            self.emit(LoweringOpcode::LoadLocal, LINE);
             self.emit_slot(temp_slot, LINE);
-            self.emit(Op::Undefined, LINE);
-            self.emit_with_payload(Op::CompareJump, 6, LINE);
-            let skip_default = self.current_ip();
+            self.emit(LoweringOpcode::Undefined, LINE);
+            self.emit_with_payload(LoweringOpcode::CompareJump, 6, LINE);
+            let skip_default = self.current_pc();
             self.emit_byte(0, LINE);
             self.emit_byte(0, LINE);
             self.compile_expr_oast(init)?;
-            self.emit(Op::StoreLocal, LINE);
+            self.emit(LoweringOpcode::StoreLocal, LINE);
             self.emit_slot(temp_slot, LINE);
             if Self::is_anonymous_function_definition(init) {
               self.emit_get_builtin_name("setFunctionNameIfAnonymous");
-              self.emit(Op::LoadLocal, LINE);
+              self.emit(LoweringOpcode::LoadLocal, LINE);
               self.emit_slot(temp_slot, LINE);
               self.emit_constant(Value::String(p.binding.name.to_string().into()), LINE);
-              self.emit(Op::Call, LINE);
+              self.emit(LoweringOpcode::Call, LINE);
               self.emit_byte(2, LINE);
-              self.emit(Op::StoreLocal, LINE);
+              self.emit(LoweringOpcode::StoreLocal, LINE);
               self.emit_slot(temp_slot, LINE);
             }
             self.patch_jump(skip_default);
-            self.emit(Op::LoadLocal, LINE);
+            self.emit(LoweringOpcode::LoadLocal, LINE);
             self.emit_slot(temp_slot, LINE);
           }
           self.store_assignment_identifier(p.binding.name.as_str())?;
         }
         oast::AssignmentTargetProperty::AssignmentTargetPropertyProperty(p) => {
-          self.emit(Op::Copy, LINE);
+          self.emit(LoweringOpcode::Copy, LINE);
           let key = self.compile_destructuring_property_key(&p.name, p.computed)?;
           let prepared = self.prepare_assignment_target_maybe_default(&p.binding)?;
-          self.emit(Op::GetProperty, LINE);
+          self.emit(LoweringOpcode::GetProperty, LINE);
           self.compile_assignment_target_maybe_default_prepared(&p.binding, prepared.as_ref())?;
           excluded.push(key);
         }
@@ -991,7 +998,7 @@ impl super::Compiler {
       self.compile_object_rest_value(&excluded)?;
       self.compile_assignment_target_oast(&rest.target)?;
     } else {
-      self.emit(Op::Discard, LINE);
+      self.emit(LoweringOpcode::Discard, LINE);
     }
     Ok(())
   }
@@ -1036,44 +1043,44 @@ impl super::Compiler {
       oast::BindingPattern::BindingIdentifier(i) => {
         if let Some((reference_slot, name)) = resolved_identifier {
           self.emit_set_resolved_identifier(reference_slot, &name)?;
-          self.emit(Op::Discard, LINE);
+          self.emit(LoweringOpcode::Discard, LINE);
         } else {
           self.store_binding_identifier(i.name.as_str(), kind)?;
         }
       }
       oast::BindingPattern::AssignmentPattern(a) => {
         let temp_slot = self.alloc_temp_local("binding_default");
-        self.emit(Op::StoreLocal, LINE);
+        self.emit(LoweringOpcode::StoreLocal, LINE);
         self.emit_slot(temp_slot, LINE);
-        self.emit(Op::LoadLocal, LINE);
+        self.emit(LoweringOpcode::LoadLocal, LINE);
         self.emit_slot(temp_slot, LINE);
-        self.emit(Op::Undefined, LINE);
-        self.emit_with_payload(Op::CompareJump, 6, LINE);
-        let skip_default = self.current_ip();
+        self.emit(LoweringOpcode::Undefined, LINE);
+        self.emit_with_payload(LoweringOpcode::CompareJump, 6, LINE);
+        let skip_default = self.current_pc();
         self.emit_byte(0, LINE);
         self.emit_byte(0, LINE);
         self.compile_expr_oast(&a.right)?;
-        self.emit(Op::StoreLocal, LINE);
+        self.emit(LoweringOpcode::StoreLocal, LINE);
         self.emit_slot(temp_slot, LINE);
         if let Some(name) = Self::binding_identifier_name(&a.left)
           && Self::is_anonymous_function_definition(&a.right)
         {
           self.emit_get_builtin_name("setFunctionNameIfAnonymous");
-          self.emit(Op::LoadLocal, LINE);
+          self.emit(LoweringOpcode::LoadLocal, LINE);
           self.emit_slot(temp_slot, LINE);
           self.emit_constant(Value::String(name.into()), LINE);
-          self.emit(Op::Call, LINE);
+          self.emit(LoweringOpcode::Call, LINE);
           self.emit_byte(2, LINE);
-          self.emit(Op::StoreLocal, LINE);
+          self.emit(LoweringOpcode::StoreLocal, LINE);
           self.emit_slot(temp_slot, LINE);
         }
         self.patch_jump(skip_default);
-        self.emit(Op::LoadLocal, LINE);
+        self.emit(LoweringOpcode::LoadLocal, LINE);
         self.emit_slot(temp_slot, LINE);
         self.compile_binding_pattern_assignment_prepared(&a.left, kind, resolved_identifier)?;
       }
       oast::BindingPattern::ArrayPattern(a) => {
-        let (iterator_slot, iterator_active_slot, thrown_slot, push_handler_ip, handler_jump) =
+        let (iterator_slot, iterator_active_slot, thrown_slot, push_handler_pc, handler_jump) =
           self.begin_array_destructuring_iterator("array_binding_iterator")?;
 
         for el in &a.elements {
@@ -1082,17 +1089,17 @@ impl super::Compiler {
           if let Some(el) = el {
             self.compile_binding_pattern_assignment_oast(el, kind)?;
           } else {
-            self.emit(Op::Discard, LINE);
+            self.emit(LoweringOpcode::Discard, LINE);
           }
         }
 
         if let Some(rest) = &a.rest {
           self.set_array_destructuring_iterator_active(iterator_active_slot, false)?;
-          self.emit(Op::LoadLocal, LINE);
+          self.emit(LoweringOpcode::LoadLocal, LINE);
           self.emit_slot(iterator_slot, LINE);
           self.emit_get_builtin_name("iteratorToArray");
-          self.emit(Op::Exchange, LINE);
-          self.emit(Op::Call, LINE);
+          self.emit(LoweringOpcode::Exchange, LINE);
+          self.emit(LoweringOpcode::Call, LINE);
           self.emit_byte(1, LINE);
           self.compile_binding_pattern_assignment_oast(&rest.argument, kind)?;
         }
@@ -1100,19 +1107,19 @@ impl super::Compiler {
           iterator_slot,
           iterator_active_slot,
           thrown_slot,
-          push_handler_ip,
+          push_handler_pc,
           handler_jump,
           a.rest.is_none(),
         )?;
       }
       oast::BindingPattern::ObjectPattern(o) => {
         self.emit_get_builtin_name("requireObjectCoercible");
-        self.emit(Op::Exchange, LINE);
-        self.emit(Op::Call, LINE);
+        self.emit(LoweringOpcode::Exchange, LINE);
+        self.emit(LoweringOpcode::Call, LINE);
         self.emit_byte(1, LINE);
         let mut excluded = Vec::with_capacity(o.properties.len());
         for prop in &o.properties {
-          self.emit(Op::Copy, LINE);
+          self.emit(LoweringOpcode::Copy, LINE);
           let key = self.compile_destructuring_property_key(&prop.key, prop.computed)?;
           let resolved_identifier = if matches!(kind, oast::VariableDeclarationKind::Var)
             && (self.with_depth > 0 || self.may_capture_with)
@@ -1127,7 +1134,7 @@ impl super::Compiler {
           } else {
             None
           };
-          self.emit(Op::GetProperty, LINE);
+          self.emit(LoweringOpcode::GetProperty, LINE);
           self.compile_binding_pattern_assignment_prepared(
             &prop.value,
             kind,
@@ -1139,7 +1146,7 @@ impl super::Compiler {
           self.compile_object_rest_value(&excluded)?;
           self.compile_binding_pattern_assignment_oast(&rest.argument, kind)?;
         } else {
-          self.emit(Op::Discard, LINE);
+          self.emit(LoweringOpcode::Discard, LINE);
         }
       }
     }

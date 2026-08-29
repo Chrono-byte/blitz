@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use super::*;
-use crate::bytecode::{Chunk, FunctionProto};
+use crate::bytecode::{Chunk, Function};
 use oxc_span::{GetSpan, SourceType};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -31,7 +31,7 @@ impl Compiler {
       slot
     };
     self.emit_class_from_oast(c, Some(&name))?;
-    self.emit(Op::StoreLocal, LINE);
+    self.emit(LoweringOpcode::StoreLocal, LINE);
     self.emit_slot(slot, LINE);
     Ok(())
   }
@@ -72,24 +72,24 @@ impl Compiler {
         .copied()
         .ok_or_else(|| crate::errors::CompilerError::from("missing parameter slot"))?;
 
-      self.emit(Op::LoadLocal, LINE);
+      self.emit(LoweringOpcode::LoadLocal, LINE);
       self.emit_slot(raw_slot, LINE);
 
       if let Some(init) = &param.initializer {
-        self.emit(Op::StoreLocal, LINE);
+        self.emit(LoweringOpcode::StoreLocal, LINE);
         self.emit_slot(temp_slot, LINE);
-        self.emit(Op::LoadLocal, LINE);
+        self.emit(LoweringOpcode::LoadLocal, LINE);
         self.emit_slot(temp_slot, LINE);
-        self.emit(Op::Undefined, LINE);
-        self.emit_with_payload(Op::CompareJump, 6, LINE);
-        let skip_jump = self.current_ip();
+        self.emit(LoweringOpcode::Undefined, LINE);
+        self.emit_with_payload(LoweringOpcode::CompareJump, 6, LINE);
+        let skip_jump = self.current_pc();
         self.emit_byte(0, LINE);
         self.emit_byte(0, LINE);
         self.compile_expr_oast(init)?;
-        self.emit(Op::StoreLocal, LINE);
+        self.emit(LoweringOpcode::StoreLocal, LINE);
         self.emit_slot(temp_slot, LINE);
         self.patch_jump(skip_jump);
-        self.emit(Op::LoadLocal, LINE);
+        self.emit(LoweringOpcode::LoadLocal, LINE);
         self.emit_slot(temp_slot, LINE);
       }
 
@@ -104,7 +104,7 @@ impl Compiler {
         .get(params.items.len())
         .copied()
         .ok_or_else(|| crate::errors::CompilerError::from("missing rest parameter slot"))?;
-      self.emit(Op::LoadLocal, LINE);
+      self.emit(LoweringOpcode::LoadLocal, LINE);
       self.emit_slot(raw_slot, LINE);
       self.compile_binding_pattern_assignment_oast(
         &rest.rest.argument,
@@ -125,15 +125,15 @@ impl Compiler {
       let Some(init) = &param.initializer else {
         continue;
       };
-      self.emit(Op::LoadLocal, LINE);
+      self.emit(LoweringOpcode::LoadLocal, LINE);
       self.emit_slot(idx, LINE);
-      self.emit(Op::Undefined, LINE);
-      self.emit_with_payload(Op::CompareJump, 6, LINE);
-      let skip_jump = self.current_ip();
+      self.emit(LoweringOpcode::Undefined, LINE);
+      self.emit_with_payload(LoweringOpcode::CompareJump, 6, LINE);
+      let skip_jump = self.current_pc();
       self.emit_byte(0, LINE);
       self.emit_byte(0, LINE);
       self.compile_expr_oast(init)?;
-      self.emit(Op::StoreLocal, LINE);
+      self.emit(LoweringOpcode::StoreLocal, LINE);
       self.emit_slot(idx, LINE);
       self.patch_jump(skip_jump);
     }
@@ -180,22 +180,22 @@ impl Compiler {
     initializer: Option<&oast::Expression<'_>>,
   ) -> Result<(), crate::errors::CompilerError> {
     self.emit_get_builtin_name("objectDefineProperty");
-    self.emit(Op::LoadLocal, LINE);
+    self.emit(LoweringOpcode::LoadLocal, LINE);
     self.emit_slot(target_slot, LINE);
     self.emit_prepared_class_field_key(&field.key);
     self.emit_constant(Value::String("value".to_string().into()), LINE);
     if let Some(initializer) = initializer {
       let proto = self.compile_static_field_initializer(initializer)?;
-      let function_index = self.chunk.add_function(proto);
-      self.emit(Op::LoadLocal, LINE);
+      let function_index = self.code.add_function(proto);
+      self.emit(LoweringOpcode::LoadLocal, LINE);
       self.emit_slot(target_slot, LINE);
-      self.emit(Op::MakeClosure, LINE);
+      self.emit(LoweringOpcode::MakeClosure, LINE);
       self.emit_function_index(function_index, LINE);
       self.emit_set_method_home_object(target_slot)?;
-      self.emit(Op::CallBuiltin, LINE);
+      self.emit(LoweringOpcode::CallMethod, LINE);
       self.emit_byte(0, LINE);
     } else {
-      self.emit(Op::Undefined, LINE);
+      self.emit(LoweringOpcode::Undefined, LINE);
     }
     self.emit_constant(Value::String("writable".to_string().into()), LINE);
     self.emit_constant(Value::Bool(true), LINE);
@@ -203,11 +203,11 @@ impl Compiler {
     self.emit_constant(Value::Bool(true), LINE);
     self.emit_constant(Value::String("configurable".to_string().into()), LINE);
     self.emit_constant(Value::Bool(true), LINE);
-    self.emit(Op::BuildObject, LINE);
+    self.emit(LoweringOpcode::BuildObject, LINE);
     self.emit_byte(4, LINE);
-    self.emit(Op::Call, LINE);
+    self.emit(LoweringOpcode::Call, LINE);
     self.emit_byte(3, LINE);
-    self.emit(Op::Discard, LINE);
+    self.emit(LoweringOpcode::Discard, LINE);
     Ok(())
   }
 
@@ -217,13 +217,13 @@ impl Compiler {
     let fields = self.pending_instance_fields.clone();
     for field in fields.iter().filter(|field| !field.is_static) {
       self.emit_get_builtin_name("objectDefineProperty");
-      self.emit(Op::GetThis, LINE);
+      self.emit(LoweringOpcode::GetThis, LINE);
       self.emit_prepared_class_field_key(&field.key);
       self.emit_constant(Value::String("value".to_string().into()), LINE);
       if let Some(source) = &field.initializer_source {
         self.compile_class_initializer_source(source)?;
       } else {
-        self.emit(Op::Undefined, LINE);
+        self.emit(LoweringOpcode::Undefined, LINE);
       }
       self.emit_constant(Value::String("writable".to_string().into()), LINE);
       self.emit_constant(Value::Bool(true), LINE);
@@ -231,11 +231,11 @@ impl Compiler {
       self.emit_constant(Value::Bool(true), LINE);
       self.emit_constant(Value::String("configurable".to_string().into()), LINE);
       self.emit_constant(Value::Bool(true), LINE);
-      self.emit(Op::BuildObject, LINE);
+      self.emit(LoweringOpcode::BuildObject, LINE);
       self.emit_byte(4, LINE);
-      self.emit(Op::Call, LINE);
+      self.emit(LoweringOpcode::Call, LINE);
       self.emit_byte(3, LINE);
-      self.emit(Op::Discard, LINE);
+      self.emit(LoweringOpcode::Discard, LINE);
     }
     Ok(())
   }
@@ -279,18 +279,18 @@ impl Compiler {
     proto.is_strict = true;
     proto.has_prototype_property = proto.is_generator;
     proto.is_constructor = false;
-    let fidx = self.chunk.add_function(proto);
+    let fidx = self.code.add_function(proto);
     let computed_key_slot = if md.computed {
       Some(self.alloc_temp_local("class_computed_method_key"))
     } else {
       None
     };
 
-    self.emit(Op::LoadLocal, LINE);
+    self.emit(LoweringOpcode::LoadLocal, LINE);
     self.emit_slot(target_slot, LINE);
-    self.emit(Op::Copy, LINE);
+    self.emit(LoweringOpcode::Copy, LINE);
     self.emit_get_builtin_name("objectDefineProperty");
-    self.emit(Op::Exchange, LINE);
+    self.emit(LoweringOpcode::Exchange, LINE);
 
     if let Some(ref key_name) = method_name {
       if matches!(md.key, oast::PropertyKey::PrivateIdentifier(_)) {
@@ -305,8 +305,8 @@ impl Compiler {
         .as_expression()
         .expect("computed class member key must be an expression");
       self.compile_expr_oast(key_expr)?;
-      self.emit(Op::Copy, LINE);
-      self.emit(Op::StoreLocal, LINE);
+      self.emit(LoweringOpcode::Copy, LINE);
+      self.emit(LoweringOpcode::StoreLocal, LINE);
       self.emit_slot(
         computed_key_slot.expect("computed method has key slot"),
         LINE,
@@ -324,30 +324,30 @@ impl Compiler {
       }
     };
     self.emit_constant(Value::String(first_descriptor_key.to_string().into()), LINE);
-    self.emit(Op::MakeClosure, LINE);
+    self.emit(LoweringOpcode::MakeClosure, LINE);
     self.emit_function_index(fidx, LINE);
     if let Some(key_slot) = computed_key_slot {
       let closure_slot = self.alloc_temp_local("class_computed_method_closure");
-      self.emit(Op::StoreLocal, LINE);
+      self.emit(LoweringOpcode::StoreLocal, LINE);
       self.emit_slot(closure_slot, LINE);
       self.emit_get_builtin_name("setFunctionNameIfAnonymous");
-      self.emit(Op::LoadLocal, LINE);
+      self.emit(LoweringOpcode::LoadLocal, LINE);
       self.emit_slot(closure_slot, LINE);
-      self.emit(Op::LoadLocal, LINE);
+      self.emit(LoweringOpcode::LoadLocal, LINE);
       self.emit_slot(key_slot, LINE);
       match md.kind {
         oast::MethodDefinitionKind::Get => {
           self.emit_constant(Value::String("get".into()), LINE);
-          self.emit(Op::Call, LINE);
+          self.emit(LoweringOpcode::Call, LINE);
           self.emit_byte(3, LINE);
         }
         oast::MethodDefinitionKind::Set => {
           self.emit_constant(Value::String("set".into()), LINE);
-          self.emit(Op::Call, LINE);
+          self.emit(LoweringOpcode::Call, LINE);
           self.emit_byte(3, LINE);
         }
         _ => {
-          self.emit(Op::Call, LINE);
+          self.emit(LoweringOpcode::Call, LINE);
           self.emit_byte(2, LINE);
         }
       }
@@ -380,23 +380,23 @@ impl Compiler {
       }
       oast::MethodDefinitionKind::Constructor => unreachable!(),
     };
-    self.emit(Op::BuildObject, LINE);
+    self.emit(LoweringOpcode::BuildObject, LINE);
     self.emit_byte(prop_count, LINE);
-    self.emit(Op::Call, LINE);
+    self.emit(LoweringOpcode::Call, LINE);
     self.emit_byte(3, LINE);
-    self.emit(Op::Discard, LINE);
-    self.emit(Op::Discard, LINE);
+    self.emit(LoweringOpcode::Discard, LINE);
+    self.emit(LoweringOpcode::Discard, LINE);
     Ok(())
   }
 
   pub(super) fn compile_static_field_initializer(
     &mut self,
     initializer: &oast::Expression<'_>,
-  ) -> Result<FunctionProto, crate::errors::CompilerError> {
+  ) -> Result<Function, crate::errors::CompilerError> {
     let outer_bindings = self.visible_bindings_snapshot();
     let mut inner = Compiler {
-      chunk: Chunk::new(Arc::clone(&self.source_text)),
-      risc: super::risc::RiscBuilder::new(),
+      code: Chunk::new(Arc::clone(&self.source_text)),
+      risc: super::bytecode::Lowering::new(),
       source_text: Arc::clone(&self.source_text),
       locals: Vec::new(),
       local_types: Vec::new(),
@@ -436,20 +436,20 @@ impl Compiler {
       pending_instance_fields: Vec::new(),
       emission_error: None,
     };
-    inner.chunk.allow_super = true;
+    inner.code.allow_super = true;
     inner.compile_expr_oast(initializer)?;
-    inner.emit(Op::Return, LINE);
-    let chunk = super::risc::RiscBuilder::finish(
-      std::mem::take(&mut inner.chunk),
+    inner.emit(LoweringOpcode::Return, LINE);
+    let code = super::bytecode::Lowering::finish(
+      std::mem::take(&mut inner.code),
       std::mem::take(&mut inner.risc),
     )?;
     let slot_names = inner.environment_slot_names();
-    Ok(FunctionProto {
+    Ok(Function {
       name: "<static field>".to_string(),
       span: initializer.span(),
       arity: 0,
       length: 0,
-      chunk: Arc::new(chunk),
+      code: Arc::new(code),
       slot_types: inner.local_types,
       slot_names,
       lexical_tdz: inner.local_tdz,
@@ -475,11 +475,11 @@ impl Compiler {
   pub(super) fn compile_static_block_function(
     &mut self,
     block: &oast::StaticBlock<'_>,
-  ) -> Result<FunctionProto, crate::errors::CompilerError> {
+  ) -> Result<Function, crate::errors::CompilerError> {
     let outer_bindings = self.visible_bindings_snapshot();
     let mut inner = Compiler {
-      chunk: Chunk::new(Arc::clone(&self.source_text)),
-      risc: super::risc::RiscBuilder::new(),
+      code: Chunk::new(Arc::clone(&self.source_text)),
+      risc: super::bytecode::Lowering::new(),
       source_text: Arc::clone(&self.source_text),
       locals: Vec::new(),
       local_types: Vec::new(),
@@ -519,7 +519,7 @@ impl Compiler {
       pending_instance_fields: Vec::new(),
       emission_error: None,
     };
-    inner.chunk.allow_super = true;
+    inner.code.allow_super = true;
     inner.pre_declare_variables_oast_stmts(&block.body);
     inner.pre_declare_functions_oast_stmts(&block.body);
     inner.emit_hoisted_function_decls_oast_stmts(&block.body)?;
@@ -529,17 +529,17 @@ impl Compiler {
       }
     }
     inner.emit_fallthrough_return(LINE);
-    let chunk = super::risc::RiscBuilder::finish(
-      std::mem::take(&mut inner.chunk),
+    let code = super::bytecode::Lowering::finish(
+      std::mem::take(&mut inner.code),
       std::mem::take(&mut inner.risc),
     )?;
     let slot_names = inner.environment_slot_names();
-    Ok(FunctionProto {
+    Ok(Function {
       name: "<static block>".to_string(),
       span: block.span,
       arity: 0,
       length: 0,
-      chunk: Arc::new(chunk),
+      code: Arc::new(code),
       slot_types: inner.local_types,
       slot_names,
       lexical_tdz: inner.local_tdz,
@@ -675,8 +675,8 @@ impl Compiler {
         ctor_chunk.allow_new_target = true;
         ctor_chunk.allow_super = true;
         let mut inner = Compiler {
-          chunk: ctor_chunk,
-          risc: super::risc::RiscBuilder::new(),
+          code: ctor_chunk,
+          risc: super::bytecode::Lowering::new(),
           source_text: Arc::clone(&self.source_text),
           locals: Vec::new(),
           local_types: Vec::new(),
@@ -717,29 +717,29 @@ impl Compiler {
           emission_error: None,
         };
         inner.add_local_with_mirror("arguments".to_string(), None, false);
-        inner.emit(Op::GetGlobal, LINE);
+        inner.emit(LoweringOpcode::GetGlobal, LINE);
         let global_idx = inner.global_name_index("Array");
         inner.emit_u16(inner.global_index_to_u16(global_idx)?, LINE);
         inner.emit_constant(Value::String("from".to_string().into()), LINE);
-        inner.emit(Op::GetProperty, LINE);
-        inner.emit(Op::LoadLocal, LINE);
+        inner.emit(LoweringOpcode::GetProperty, LINE);
+        inner.emit(LoweringOpcode::LoadLocal, LINE);
         inner.emit_byte(0, LINE);
-        inner.emit(Op::SuperConstruct, LINE);
+        inner.emit(LoweringOpcode::SuperConstruct, LINE);
         inner.emit_byte(1, LINE);
         inner.emit_pending_instance_field_initializers()?;
-        inner.emit(Op::Discard, LINE);
-        inner.emit(Op::GetThis, LINE);
-        inner.emit(Op::Return, LINE);
-        ctor_chunk = super::risc::RiscBuilder::finish(
-          std::mem::take(&mut inner.chunk),
+        inner.emit(LoweringOpcode::Discard, LINE);
+        inner.emit(LoweringOpcode::GetThis, LINE);
+        inner.emit(LoweringOpcode::Return, LINE);
+        ctor_chunk = super::bytecode::Lowering::finish(
+          std::mem::take(&mut inner.code),
           std::mem::take(&mut inner.risc),
         )?;
-        FunctionProto {
+        Function {
           name: class_name.clone(),
           span: c.span,
           arity: 0,
           length: 0,
-          chunk: Arc::new(ctor_chunk),
+          code: Arc::new(ctor_chunk),
           slot_types: inner.local_types,
           slot_names: inner.locals.into_iter().map(Some).collect(),
           lexical_tdz: inner.local_tdz,
@@ -769,18 +769,18 @@ impl Compiler {
         inner.private_names = self.private_names.clone();
         inner.pending_instance_fields = prepared_fields.clone();
         inner.emit_pending_instance_field_initializers()?;
-        inner.emit(Op::GetThis, LINE);
-        inner.emit(Op::Return, LINE);
-        let ctor_chunk = super::risc::RiscBuilder::finish(
-          std::mem::take(&mut inner.chunk),
+        inner.emit(LoweringOpcode::GetThis, LINE);
+        inner.emit(LoweringOpcode::Return, LINE);
+        let ctor_chunk = super::bytecode::Lowering::finish(
+          std::mem::take(&mut inner.code),
           std::mem::take(&mut inner.risc),
         )?;
-        FunctionProto {
+        Function {
           name: class_name.clone(),
           span: c.span,
           arity: 0,
           length: 0,
-          chunk: Arc::new(ctor_chunk),
+          code: Arc::new(ctor_chunk),
           slot_types: inner.local_types,
           slot_names: inner.locals.into_iter().map(Some).collect(),
           lexical_tdz: inner.local_tdz,
@@ -804,19 +804,19 @@ impl Compiler {
       }
     };
 
-    let idx = self.chunk.add_function(proto);
-    self.emit(Op::MakeClosure, LINE);
+    let idx = self.code.add_function(proto);
+    self.emit(LoweringOpcode::MakeClosure, LINE);
     self.emit_function_index(idx, LINE);
     if let Some(super_class) = &c.super_class {
       self.emit_get_builtin_name("classInitExtends");
-      self.emit(Op::Exchange, LINE);
+      self.emit(LoweringOpcode::Exchange, LINE);
       self.compile_expr_oast(super_class)?;
-      self.emit(Op::Call, LINE);
+      self.emit(LoweringOpcode::Call, LINE);
       self.emit_byte(2, LINE);
     }
 
     let ctor_slot = self.alloc_temp_local("class_ctor_tmp");
-    self.emit(Op::StoreLocal, LINE);
+    self.emit(LoweringOpcode::StoreLocal, LINE);
     self.emit_slot(ctor_slot, LINE);
 
     let instance_home_slot = if c
@@ -825,22 +825,22 @@ impl Compiler {
       .iter()
       .any(|element| matches!(element, oast::ClassElement::MethodDefinition(md) if !md.r#static))
     {
-      self.emit(Op::LoadLocal, LINE);
+      self.emit(LoweringOpcode::LoadLocal, LINE);
       self.emit_slot(ctor_slot, LINE);
       self.emit_constant(Value::String("prototype".to_string().into()), LINE);
-      self.emit(Op::GetProperty, LINE);
+      self.emit(LoweringOpcode::GetProperty, LINE);
       let home_slot = self.alloc_temp_local("class_home");
-      self.emit(Op::StoreLocal, LINE);
+      self.emit(LoweringOpcode::StoreLocal, LINE);
       self.emit_slot(home_slot, LINE);
       Some(home_slot)
     } else {
       None
     };
     if let Some(home_slot) = instance_home_slot {
-      self.emit(Op::LoadLocal, LINE);
+      self.emit(LoweringOpcode::LoadLocal, LINE);
       self.emit_slot(ctor_slot, LINE);
       self.emit_set_method_home_object(home_slot)?;
-      self.emit(Op::Discard, LINE);
+      self.emit(LoweringOpcode::Discard, LINE);
     }
 
     let mut prepared_field_iter = prepared_fields.iter();
@@ -870,7 +870,7 @@ impl Compiler {
             let slot = self
               .resolve_local(binding)
               .expect("computed class field key binding must be local");
-            self.emit(Op::StoreLocal, LINE);
+            self.emit(LoweringOpcode::StoreLocal, LINE);
             self.emit_slot(slot, LINE);
           }
           if field.is_static {
@@ -879,21 +879,21 @@ impl Compiler {
         }
         oast::ClassElement::StaticBlock(block) => {
           let proto = self.compile_static_block_function(block)?;
-          let function_index = self.chunk.add_function(proto);
-          self.emit(Op::LoadLocal, LINE);
+          let function_index = self.code.add_function(proto);
+          self.emit(LoweringOpcode::LoadLocal, LINE);
           self.emit_slot(ctor_slot, LINE);
-          self.emit(Op::MakeClosure, LINE);
+          self.emit(LoweringOpcode::MakeClosure, LINE);
           self.emit_function_index(function_index, LINE);
           self.emit_set_method_home_object(ctor_slot)?;
-          self.emit(Op::CallBuiltin, LINE);
+          self.emit(LoweringOpcode::CallMethod, LINE);
           self.emit_byte(0, LINE);
-          self.emit(Op::Discard, LINE);
+          self.emit(LoweringOpcode::Discard, LINE);
         }
         _ => {}
       }
     }
 
-    self.emit(Op::LoadLocal, LINE);
+    self.emit(LoweringOpcode::LoadLocal, LINE);
     self.emit_slot(ctor_slot, LINE);
     self.private_names = enclosing_private_names;
     Ok(())

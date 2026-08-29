@@ -699,7 +699,7 @@ mod tests {
 
   fn run(source: &str) -> crate::Vm {
     let session = Parser::parse_source(source).expect("parse numeric primitive test");
-    let chunk = compiler::compile_session(&session).expect("compile numeric primitive test");
+    let code = compiler::compile_session(&session).expect("compile numeric primitive test");
     let globals = Rc::new(RefCell::new(ObjectData::new()));
     globals.borrow_mut().properties.insert(
       PropertyKey::String("globalThis".into()),
@@ -707,7 +707,7 @@ mod tests {
     );
     runtime_utils::install_minimal_kernel_constructors(&globals);
     let mut vm = crate::Vm::new(globals);
-    vm.run(chunk).expect("run numeric primitive test");
+    vm.run(code).expect("run numeric primitive test");
     vm
   }
 

@@ -14,7 +14,7 @@
 //! 1. Pre-declare function names for hoisting support
 //! 2. Compile statements sequentially
 //! 3. Emit compiler-owned virtual instructions
-//! 4. Finalize the virtual instructions into RISC v2 words in a [`Chunk`]
+//! 4. Finalize the virtual instructions into bytecode v2 words in a [`Chunk`]
 //! 5. Track local variables and their types for metadata and tooling
 //!
 //! # Future Work
@@ -27,7 +27,7 @@
 use crate::bytecode::Chunk;
 use crate::parser::ParserSession;
 use crate::value::Value;
-use emit::FrontendOp as Op;
+use emit::LoweringOpcode;
 use oxc_ast::ast as oast;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -38,6 +38,7 @@ pub(crate) use core::{
   ScopeKind, with_compile_context_override,
 };
 mod binding;
+mod bytecode;
 mod class;
 mod early_errors;
 mod emit;
@@ -47,7 +48,6 @@ mod optimize;
 mod optional_chain;
 mod pre_declare;
 mod reference;
-mod risc;
 mod statement;
 mod tail;
 
@@ -176,8 +176,8 @@ impl Compiler {
         .directives
         .iter()
         .any(|directive| directive.directive.as_str() == "use strict");
-    self.chunk.allow_new_target = self.allow_new_target;
-    self.chunk.allow_super = self.allow_super;
+    self.code.allow_new_target = self.allow_new_target;
+    self.code.allow_super = self.allow_super;
 
     self.validate_early_errors_in_program(&program.body, program.source_type.is_module())?;
 
@@ -200,9 +200,9 @@ impl Compiler {
           LINE,
         );
       } else {
-        self.emit(Op::Undefined, LINE);
+        self.emit(LoweringOpcode::Undefined, LINE);
       }
-      self.emit(Op::StoreLocal, LINE);
+      self.emit(LoweringOpcode::StoreLocal, LINE);
       self.emit_slot(slot, LINE);
       Some(slot)
     } else {
@@ -214,7 +214,7 @@ impl Compiler {
     }
 
     if let Some(slot) = completion_slot {
-      self.emit(Op::LoadLocal, LINE);
+      self.emit(LoweringOpcode::LoadLocal, LINE);
       self.emit_slot(slot, LINE);
     }
 
@@ -222,13 +222,13 @@ impl Compiler {
       return Err(error);
     }
 
-    self.emit(Op::Return, LINE);
+    self.emit(LoweringOpcode::Return, LINE);
     if self.is_root {
-      self.chunk.root_slot_types = self.local_types.clone();
-      self.chunk.root_slot_names = self.environment_slot_names();
-      self.chunk.root_lexical_tdz = self.local_tdz.clone();
-      self.chunk.root_slot_immutable = self.local_immutable.clone();
-      self.chunk.root_function_declarations = program
+      self.code.root_slot_types = self.local_types.clone();
+      self.code.root_slot_names = self.environment_slot_names();
+      self.code.root_lexical_tdz = self.local_tdz.clone();
+      self.code.root_slot_immutable = self.local_immutable.clone();
+      self.code.root_function_declarations = program
         .body
         .iter()
         .filter_map(|statement| match statement {
@@ -239,11 +239,11 @@ impl Compiler {
           _ => None,
         })
         .collect();
-      self.chunk.root_strict = self.strict_context;
+      self.code.root_strict = self.strict_context;
     }
-    let chunk = std::mem::take(&mut self.chunk);
+    let code = std::mem::take(&mut self.code);
     let builder = std::mem::take(&mut self.risc);
-    risc::RiscBuilder::finish(chunk, builder)
+    bytecode::Lowering::finish(code, builder)
   }
 }
 

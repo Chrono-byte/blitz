@@ -983,7 +983,7 @@ mod tests {
 
   fn run(source: &str) -> Vm {
     let session = Parser::parse_source(source).expect("parse Date test");
-    let chunk = compiler::compile_session(&session).expect("compile Date test");
+    let code = compiler::compile_session(&session).expect("compile Date test");
     let globals = Rc::new(RefCell::new(ObjectData::new()));
     globals.borrow_mut().properties.insert(
       PropertyKey::String("globalThis".into()),
@@ -991,7 +991,7 @@ mod tests {
     );
     runtime_utils::install_minimal_kernel_constructors(&globals);
     let mut vm = Vm::new(globals);
-    vm.run(chunk).expect("run Date test");
+    vm.run(code).expect("run Date test");
     vm
   }
 

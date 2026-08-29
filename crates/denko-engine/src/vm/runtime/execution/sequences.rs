@@ -7,14 +7,14 @@ impl Vm {
     &mut self,
     registers: &mut [Value; 16],
   ) -> Result<bool, RuntimeError> {
-    let ip = self.execution.active.ip;
-    let words = &self.execution.active.chunk.code[ip..ip + 3];
+    let pc = self.execution.active.pc;
+    let words = &self.execution.active.code.words[pc..pc + 3];
     let left_register = decode_rd(words[0]) as usize;
     let right_register = decode_rd(words[1]) as usize;
     let (condition, _, _, offset) = decode_compare_jump(words[2]);
 
     let left = {
-      let slot = decode_risc_aux16(words[0]) as usize;
+      let slot = decode_aux16(words[0]) as usize;
       let Some(cell) = self.execution.active.locals.get(slot) else {
         return Ok(false);
       };
@@ -29,9 +29,9 @@ impl Vm {
     let Some(crate::bytecode::Constant::Number(right)) = self
       .execution
       .active
-      .chunk
+      .code
       .constants
-      .get(decode_risc_aux16(words[1]) as usize)
+      .get(decode_aux16(words[1]) as usize)
     else {
       return Ok(false);
     };
@@ -49,11 +49,11 @@ impl Vm {
 
     registers[left_register] = Value::Number(left);
     registers[right_register] = Value::Number(right);
-    self.execution.active.ip = if result {
-      ip + 3
+    self.execution.active.pc = if result {
+      pc + 3
     } else {
-      usize::try_from(ip as i64 + 3 + offset as i64)
-        .map_err(|_| RuntimeError::from("negative RISC compare target"))?
+      usize::try_from(pc as i64 + 3 + offset as i64)
+        .map_err(|_| RuntimeError::from("negative compare target"))?
     };
     Ok(true)
   }
@@ -63,16 +63,16 @@ impl Vm {
     &mut self,
     registers: &mut [Value; 16],
   ) -> Result<bool, RuntimeError> {
-    let ip = self.execution.active.ip;
-    let words = &self.execution.active.chunk.code[ip..ip + 12];
+    let pc = self.execution.active.pc;
+    let words = &self.execution.active.code.words[pc..pc + 12];
     let receiver_register = decode_rd(words[0]) as usize;
     let callee_register = decode_rd(words[3]) as usize;
     let argument_register = decode_rd(words[6]) as usize;
     let key_register = decode_rd(words[4]) as usize;
 
-    let receiver_slot = decode_risc_aux16(words[0]) as usize;
-    let temporary_slot = decode_risc_aux16(words[1]) as usize;
-    let argument_slot = decode_risc_aux16(words[6]) as usize;
+    let receiver_slot = decode_aux16(words[0]) as usize;
+    let temporary_slot = decode_aux16(words[1]) as usize;
+    let argument_slot = decode_aux16(words[6]) as usize;
     if self.execution.active.arguments.object.is_some()
       || self
         .execution
@@ -113,9 +113,9 @@ impl Vm {
     let Some(crate::bytecode::Constant::String(key)) = self
       .execution
       .active
-      .chunk
+      .code
       .constants
-      .get(decode_risc_aux16(words[4]) as usize)
+      .get(decode_aux16(words[4]) as usize)
     else {
       return Ok(false);
     };
@@ -123,7 +123,7 @@ impl Vm {
 
     ensure_slot(&mut self.execution.active.locals, temporary_slot);
     self.execution.active.locals[temporary_slot].set(receiver.clone());
-    let callee = self.get_property_value_cached(ip + 5, &receiver, &key)?;
+    let callee = self.get_property_value_cached(pc + 5, &receiver, &key)?;
     let canonical_push = matches!(
       &callee,
       Value::BuiltinObject(_, properties)
@@ -176,7 +176,7 @@ impl Vm {
     registers[0] = result;
     registers[1] = receiver;
     registers[2] = argument;
-    self.execution.active.ip += 12;
+    self.execution.active.pc += 12;
     Ok(true)
   }
 
@@ -185,14 +185,14 @@ impl Vm {
     &mut self,
     registers: &mut [Value; 16],
   ) -> Result<bool, RuntimeError> {
-    let ip = self.execution.active.ip;
-    let words = &self.execution.active.chunk.code[ip..ip + 9];
+    let pc = self.execution.active.pc;
+    let words = &self.execution.active.code.words[pc..pc + 9];
     let accumulator_register = decode_rd(words[0]) as usize;
     let property_register = decode_rd(words[1]) as usize;
     let key_register = decode_rd(words[2]) as usize;
-    let accumulator_slot = decode_risc_aux16(words[0]) as usize;
-    let object_slot = decode_risc_aux16(words[1]) as usize;
-    let temporary_slot = decode_risc_aux16(words[5]) as usize;
+    let accumulator_slot = decode_aux16(words[0]) as usize;
+    let object_slot = decode_aux16(words[1]) as usize;
+    let temporary_slot = decode_aux16(words[5]) as usize;
     if self.execution.active.arguments.object.is_some()
       || self
         .execution
@@ -243,9 +243,9 @@ impl Vm {
     let Some(crate::bytecode::Constant::String(key)) = self
       .execution
       .active
-      .chunk
+      .code
       .constants
-      .get(decode_risc_aux16(words[2]) as usize)
+      .get(decode_aux16(words[2]) as usize)
     else {
       return Ok(false);
     };
@@ -274,7 +274,7 @@ impl Vm {
     });
     self.execution.active.locals[temporary_slot].set(Value::Number(result));
     self.execution.active.locals[accumulator_slot].set(Value::Number(result));
-    self.execution.active.ip += 9;
+    self.execution.active.pc += 9;
     Ok(true)
   }
 
@@ -283,13 +283,13 @@ impl Vm {
     &mut self,
     registers: &mut [Value; 16],
   ) -> Result<bool, RuntimeError> {
-    let ip = self.execution.active.ip;
-    let words = &self.execution.active.chunk.code[ip..ip + 10];
+    let pc = self.execution.active.pc;
+    let words = &self.execution.active.code.words[pc..pc + 10];
     let source_register = decode_rd(words[0]) as usize;
     let constant_register = decode_rd(words[3]) as usize;
     let result_register = decode_rd(words[4]) as usize;
-    let target_slot = decode_risc_aux16(words[0]) as usize;
-    let temporary_slot = decode_risc_aux16(words[6]) as usize;
+    let target_slot = decode_aux16(words[0]) as usize;
+    let temporary_slot = decode_aux16(words[6]) as usize;
     if self.execution.active.arguments.object.is_some()
       || self
         .execution
@@ -328,9 +328,9 @@ impl Vm {
     let Some(crate::bytecode::Constant::Number(constant)) = self
       .execution
       .active
-      .chunk
+      .code
       .constants
-      .get(decode_risc_aux16(words[3]) as usize)
+      .get(decode_aux16(words[3]) as usize)
     else {
       return Ok(false);
     };
@@ -343,7 +343,7 @@ impl Vm {
     registers[result_register] = Value::Number(result);
     self.execution.active.locals[temporary_slot].set(Value::Number(result));
     self.execution.active.locals[target_slot].set(Value::Number(result));
-    self.execution.active.ip += 10;
+    self.execution.active.pc += 10;
     Ok(true)
   }
 
@@ -353,14 +353,14 @@ impl Vm {
     &mut self,
     registers: &mut [Value; 16],
   ) -> Result<bool, RuntimeError> {
-    let ip = self.execution.active.ip;
-    let words = &self.execution.active.chunk.code[ip..ip + 4];
+    let pc = self.execution.active.pc;
+    let words = &self.execution.active.code.words[pc..pc + 4];
     let left_register = decode_rd(words[0]) as usize;
     let right_register = decode_rd(words[1]) as usize;
 
-    let left_slot = decode_risc_aux16(words[0]) as usize;
-    let right_slot = decode_risc_aux16(words[1]) as usize;
-    let destination_slot = decode_risc_aux16(words[3]) as usize;
+    let left_slot = decode_aux16(words[0]) as usize;
+    let right_slot = decode_aux16(words[1]) as usize;
+    let destination_slot = decode_aux16(words[3]) as usize;
     if self.execution.active.arguments.object.is_some()
       || self
         .execution
@@ -402,7 +402,7 @@ impl Vm {
     registers[right_register] = Value::Number(right);
     self.execution.active.locals[destination_slot].set(Value::Number(result));
     registers[left_register] = Value::Number(result);
-    self.execution.active.ip += 4;
+    self.execution.active.pc += 4;
     Ok(true)
   }
 }

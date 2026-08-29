@@ -9,18 +9,18 @@ use std::rc::Rc;
 use crate::bytecode::{decode_compare_jump, decode_rd, decode_rs};
 use crate::compiler::compile;
 use crate::runtime_utils;
-use crate::{Chunk, ModuleContext, ObjectData, Op, Value, Vm, compile_oxc_with_ctx};
+use crate::{Chunk, ModuleContext, ObjectData, Opcode, Value, Vm, compile_oxc_with_ctx};
 
 #[cfg(test)]
-fn walk_chunk_ops(chunk: &Chunk) -> Vec<(usize, Op)> {
+fn walk_chunk_ops(code: &Chunk) -> Vec<(usize, Opcode)> {
   let mut ops = Vec::new();
-  let mut ip = 0usize;
-  while ip < chunk.code.len() {
-    if let Some(op) = Op::from_byte((chunk.code[ip] & 0xFF) as u8) {
-      ops.push((ip, op));
-      ip += 1;
+  let mut pc = 0usize;
+  while pc < code.words.len() {
+    if let Some(op) = Opcode::from_byte((code.words[pc] & 0xFF) as u8) {
+      ops.push((pc, op));
+      pc += 1;
     } else {
-      ip += 1;
+      pc += 1;
     }
   }
   ops
@@ -31,9 +31,9 @@ fn compile_session_uses_its_own_source_text() {
   let source = crate::js!("let answer = 42;");
   let session = crate::parser::Parser::parse_source(source).expect("parse");
 
-  let chunk = super::compile_session(&session).expect("compile session");
+  let code = super::compile_session(&session).expect("compile session");
 
-  assert_eq!(chunk.source_text.as_str(), source);
+  assert_eq!(code.source_text.as_str(), source);
 }
 
 #[test]
@@ -64,10 +64,10 @@ fn anonymous_default_class_compiles_as_a_named_default_export() {
     namespace_exports: HashMap::new(),
   };
 
-  let chunk = super::compile_session_with_context(&session, &context)
+  let code = super::compile_session_with_context(&session, &context)
     .expect("compile anonymous default class");
 
-  assert!(!chunk.code.is_empty());
+  assert!(!code.words.is_empty());
 }
 
 #[test]
@@ -85,14 +85,14 @@ fn compile_simple_for_loop() {
   let src = crate::js!("for (var i = 0; i < 3; i = i + 1) { console.log(i); }");
   let session = crate::parser::Parser::parse_source(src).expect("parse ok");
   let program = session.program();
-  let chunk = compile(program, session.source()).expect("compile ok");
+  let code = compile(program, session.source()).expect("compile ok");
 
   let mut saw_conditional_branch = false;
   let mut saw_jump = false;
-  for (_, op) in walk_chunk_ops(&chunk) {
+  for (_, op) in walk_chunk_ops(&code) {
     match op {
-      Op::JumpIfFalse | Op::CompareJump => saw_conditional_branch = true,
-      Op::Jump => saw_jump = true,
+      Opcode::JumpIfFalse | Opcode::CompareJump => saw_conditional_branch = true,
+      Opcode::Jump => saw_jump = true,
       _ => {}
     }
   }
@@ -110,14 +110,14 @@ fn compile_for_with_continue() {
     crate::js!("for (var i = 0; i < 3; i = i + 1) { if (i == 1) { continue; } console.log(i); }");
   let session = crate::parser::Parser::parse_source(src).expect("parse ok");
   let program = session.program();
-  let chunk = compile(program, session.source()).expect("compile ok");
+  let code = compile(program, session.source()).expect("compile ok");
 
   let mut conditional_branch = 0usize;
   let mut jump = 0usize;
-  for (_, op) in walk_chunk_ops(&chunk) {
+  for (_, op) in walk_chunk_ops(&code) {
     match op {
-      Op::JumpIfFalse | Op::CompareJump => conditional_branch += 1,
-      Op::Jump => jump += 1,
+      Opcode::JumpIfFalse | Opcode::CompareJump => conditional_branch += 1,
+      Opcode::Jump => jump += 1,
       _ => {}
     }
   }
@@ -133,24 +133,24 @@ fn compile_for_with_continue() {
 }
 
 #[cfg(test)]
-fn opcode_width(op: Op) -> usize {
+fn opcode_width(op: Opcode) -> usize {
   let _ = op;
   1
 }
 
 #[test]
-fn static_member_cache_sites_have_distinct_risc_instructions() {
+fn static_member_cache_sites_have_distinct_instructions() {
   let src = crate::js!("a.x; a.y; a.x;");
   let session = crate::parser::Parser::parse_source(src).expect("parse ok");
   let program = session.program();
-  let chunk = compile(program, session.source()).expect("compile ok");
+  let code = compile(program, session.source()).expect("compile ok");
 
-  let sites = walk_chunk_ops(&chunk)
+  let sites = walk_chunk_ops(&code)
     .into_iter()
-    .filter(|(_, op)| *op == Op::GetProperty)
-    .map(|(ip, _)| {
-      let word = chunk.code[ip];
-      (ip, decode_rd(word), decode_rs(word))
+    .filter(|(_, op)| *op == Opcode::GetProperty)
+    .map(|(pc, _)| {
+      let word = code.words[pc];
+      (pc, decode_rd(word), decode_rs(word))
     })
     .collect::<Vec<_>>();
 
@@ -161,7 +161,7 @@ fn static_member_cache_sites_have_distinct_risc_instructions() {
   );
   assert!(
     sites.windows(2).all(|pair| pair[0].0 < pair[1].0),
-    "inline caches are keyed by distinct RISC instruction addresses"
+    "inline caches are keyed by distinct instruction addresses"
   );
   assert!(
     sites.iter().all(|(_, object, key)| object != key),
@@ -175,10 +175,10 @@ fn property_sites_are_not_limited_by_unused_u8_cache_slots() {
     .map(|index| format!("value.property{index};"))
     .collect::<String>();
   let session = crate::parser::Parser::parse_source(&source).expect("parse ok");
-  let chunk = compile(session.program(), session.source()).expect("compile ok");
-  let property_sites = walk_chunk_ops(&chunk)
+  let code = compile(session.program(), session.source()).expect("compile ok");
+  let property_sites = walk_chunk_ops(&code)
     .into_iter()
-    .filter(|(_, op)| *op == Op::GetProperty)
+    .filter(|(_, op)| *op == Opcode::GetProperty)
     .count();
   assert_eq!(property_sites, 300);
 }
@@ -188,18 +188,18 @@ fn compile_for_loop_back_jump_targets_loop_start() {
   let src = crate::js!("for (var i = 0; i < 3; i = i + 1) {}");
   let session = crate::parser::Parser::parse_source(src).expect("parse ok");
   let program = session.program();
-  let chunk = compile(program, session.source()).expect("compile ok");
+  let code = compile(program, session.source()).expect("compile ok");
 
   let mut loop_start = None;
   let mut back_target = None;
-  for (ip, op) in walk_chunk_ops(&chunk) {
+  for (pc, op) in walk_chunk_ops(&code) {
     match op {
-      Op::GetGlobal if loop_start.is_none() => {
-        loop_start = Some(ip);
+      Opcode::GetGlobal if loop_start.is_none() => {
+        loop_start = Some(pc);
       }
-      Op::Jump => {
-        let target = chunk
-          .jump_target_from_ip(ip)
+      Opcode::Jump => {
+        let target = code
+          .jump_target_from_pc(pc)
           .map(|target| target as isize);
         if target == loop_start.map(|v| v as isize) {
           back_target = target;
@@ -217,13 +217,13 @@ fn compile_new_expression_lowers_to_construct() {
   let src = crate::js!("new Array(1, 2, 3);");
   let session = crate::parser::Parser::parse_source(src).expect("parse ok");
   let program = session.program();
-  let chunk = compile(program, session.source()).expect("compile ok");
+  let code = compile(program, session.source()).expect("compile ok");
 
-  let saw_construct = chunk
-    .code
+  let saw_construct = code
+    .words
     .iter()
-    .filter_map(|b| Op::from_byte((*b & 0xFF) as u8))
-    .any(|op| matches!(op, Op::Construct));
+    .filter_map(|b| Opcode::from_byte((*b & 0xFF) as u8))
+    .any(|op| matches!(op, Opcode::Construct));
 
   assert!(
     saw_construct,
@@ -236,18 +236,18 @@ fn compile_update_expression_emits_store() {
   let src = crate::js!("for (var i = 0; i < 3; i++) {}");
   let session = crate::parser::Parser::parse_source(src).expect("parse ok");
   let program = session.program();
-  let chunk = compile(program, session.source()).expect("compile ok");
+  let code = compile(program, session.source()).expect("compile ok");
 
-  let saw_add = chunk
-    .code
+  let saw_add = code
+    .words
     .iter()
-    .filter_map(|b| Op::from_byte((*b & 0xFF) as u8))
-    .any(|op| matches!(op, Op::Increment));
-  let saw_set_local = chunk
-    .code
+    .filter_map(|b| Opcode::from_byte((*b & 0xFF) as u8))
+    .any(|op| matches!(op, Opcode::Increment));
+  let saw_set_local = code
+    .words
     .iter()
-    .filter_map(|b| Op::from_byte((*b & 0xFF) as u8))
-    .any(|op| matches!(op, Op::StoreLocal));
+    .filter_map(|b| Opcode::from_byte((*b & 0xFF) as u8))
+    .any(|op| matches!(op, Opcode::StoreLocal));
 
   assert!(saw_add, "expected i++ to emit Increment");
   assert!(saw_set_local, "expected i++ to emit StoreLocal");
@@ -258,13 +258,13 @@ fn compile_member_call_uses_call_method() {
   let src = crate::js!("obj.method(1);");
   let session = crate::parser::Parser::parse_source(src).expect("parse ok");
   let program = session.program();
-  let chunk = compile(program, session.source()).expect("compile ok");
+  let code = compile(program, session.source()).expect("compile ok");
 
-  let saw_call_method = chunk
-    .code
+  let saw_call_method = code
+    .words
     .iter()
-    .filter_map(|b| Op::from_byte((*b & 0xFF) as u8))
-    .any(|op| matches!(op, Op::Call | Op::CallBuiltin));
+    .filter_map(|b| Opcode::from_byte((*b & 0xFF) as u8))
+    .any(|op| matches!(op, Opcode::Call | Opcode::CallMethod));
 
   assert!(saw_call_method, "expected member call to emit CallMethod");
 }
@@ -274,13 +274,13 @@ fn compile_for_in_uses_get_builtin() {
   let src = crate::js!("for (var k in obj) {}");
   let session = crate::parser::Parser::parse_source(src).expect("parse ok");
   let program = session.program();
-  let chunk = compile(program, session.source()).expect("compile ok");
+  let code = compile(program, session.source()).expect("compile ok");
 
-  let saw_get_builtin = chunk
-    .code
+  let saw_get_builtin = code
+    .words
     .iter()
-    .filter_map(|b| Op::from_byte((*b & 0xFF) as u8))
-    .any(|op| matches!(op, Op::GetGlobal));
+    .filter_map(|b| Opcode::from_byte((*b & 0xFF) as u8))
+    .any(|op| matches!(op, Opcode::GetGlobal));
 
   assert!(
     saw_get_builtin,
@@ -312,9 +312,9 @@ fn compile_generator_non_simple_params_keep_later_params_tdz() {
   let src = crate::js!("function* f(x = y, y) {}");
   let session = crate::parser::Parser::parse_source(src).expect("parse ok");
   let program = session.program();
-  let chunk = compile(program, session.source()).expect("compile ok");
+  let code = compile(program, session.source()).expect("compile ok");
 
-  let proto = chunk
+  let proto = code
     .functions
     .iter()
     .find(|p| p.name == "f")
@@ -342,17 +342,20 @@ fn compile_generator_non_simple_params_keep_later_params_tdz() {
   );
 
   let mut ops = Vec::new();
-  let mut ip = 0usize;
-  while ip < proto.chunk.code.len() && ops.len() < 16 {
-    let op = Op::from_byte((proto.chunk.code[ip] & 0xFF) as u8).expect("valid opcode");
+  let mut pc = 0usize;
+  while pc < proto.code.words.len() && ops.len() < 16 {
+    let op = Opcode::from_byte((proto.code.words[pc] & 0xFF) as u8).expect("valid opcode");
     let width = opcode_width(op);
-    let operand = if matches!(op, Op::LoadLocal | Op::StoreLocal | Op::CloneLocalCell) {
-      proto.chunk.code.get(ip + 1).copied()
+    let operand = if matches!(
+      op,
+      Opcode::LoadLocal | Opcode::StoreLocal | Opcode::CloneLocalCell
+    ) {
+      proto.code.words.get(pc + 1).copied()
     } else {
       None
     };
     ops.push((op.name(), operand));
-    ip += width;
+    pc += width;
   }
   eprintln!("generator proto ops: {:?}", ops);
 }
@@ -362,17 +365,17 @@ fn compile_object_generator_method_emits_body() {
   let src = crate::js!("var o = { *m() { let x; eval(\"var x;\"); } };");
   let session = crate::parser::Parser::parse_source(src).expect("parse ok");
   let program = session.program();
-  let chunk = compile(program, session.source()).expect("compile ok");
+  let code = compile(program, session.source()).expect("compile ok");
 
   eprintln!(
     "object generator function names: {:?}",
-    chunk
+    code
       .functions
       .iter()
-      .map(|p| (p.name.clone(), p.chunk.code.len(), p.is_generator))
+      .map(|p| (p.name.clone(), p.code.words.len(), p.is_generator))
       .collect::<Vec<_>>()
   );
-  let proto = chunk
+  let proto = code
     .functions
     .iter()
     .find(|p| p.is_generator)
@@ -380,23 +383,23 @@ fn compile_object_generator_method_emits_body() {
 
   eprintln!(
     "object generator proto: code_len={} consts={} slots={} tdz={:?}",
-    proto.chunk.code.len(),
-    proto.chunk.constants.len(),
+    proto.code.words.len(),
+    proto.code.constants.len(),
     proto.slot_names.len(),
     proto.lexical_tdz
   );
   let mut ops = Vec::new();
-  let mut ip = 0usize;
-  while ip < proto.chunk.code.len() && ops.len() < 24 {
-    let op = Op::from_byte((proto.chunk.code[ip] & 0xFF) as u8).expect("valid opcode");
+  let mut pc = 0usize;
+  while pc < proto.code.words.len() && ops.len() < 24 {
+    let op = Opcode::from_byte((proto.code.words[pc] & 0xFF) as u8).expect("valid opcode");
     let width = opcode_width(op);
     ops.push(op.name());
-    ip += width;
+    pc += width;
   }
   eprintln!("object generator proto ops: {:?}", ops);
 
   assert!(
-    !proto.chunk.code.is_empty(),
+    !proto.code.words.is_empty(),
     "object generator method should emit bytecode"
   );
 }
@@ -405,27 +408,35 @@ fn compile_object_generator_method_emits_body() {
 fn explicit_terminal_return_omits_unreachable_implicit_return() {
   let src = crate::js!("const object = { read() { return this.value; } };");
   let session = crate::parser::Parser::parse_source(src).expect("parse ok");
-  let chunk = compile(session.program(), session.source()).expect("compile ok");
-  let proto = chunk
+  let code = compile(session.program(), session.source()).expect("compile ok");
+  let proto = code
     .functions
     .iter()
     .find(|proto| proto.name == "read")
     .expect("read method proto");
   let ops = proto
-    .chunk
     .code
+    .words
     .iter()
-    .map(|word| Op::from_byte((word & 0xff) as u8).expect("valid opcode"))
+    .map(|word| Opcode::from_byte((word & 0xff) as u8).expect("valid opcode"))
     .collect::<Vec<_>>();
-  assert_eq!(ops, [Op::GetThis, Op::Const, Op::GetProperty, Op::Return]);
+  assert_eq!(
+    ops,
+    [
+      Opcode::GetThis,
+      Opcode::Const,
+      Opcode::GetProperty,
+      Opcode::Return
+    ]
+  );
 }
 
 #[test]
 fn strict_direct_return_calls_emit_tail_call() {
   let src = crate::js!(r#""use strict"; function recurse(value) { return recurse(value - 1); }"#);
   let session = crate::parser::Parser::parse_source(src).expect("parse ok");
-  let chunk = compile(session.program(), session.source()).expect("compile ok");
-  let proto = chunk
+  let code = compile(session.program(), session.source()).expect("compile ok");
+  let proto = code
     .functions
     .iter()
     .find(|proto| proto.name == "recurse")
@@ -433,10 +444,10 @@ fn strict_direct_return_calls_emit_tail_call() {
 
   assert!(
     proto
-      .chunk
       .code
+      .words
       .iter()
-      .any(|word| { Op::from_byte((word & 0xFF) as u8) == Some(Op::TailCall) })
+      .any(|word| { Opcode::from_byte((word & 0xFF) as u8) == Some(Opcode::TailCall) })
   );
 }
 
@@ -445,13 +456,13 @@ fn compile_dynamic_import_uses_get_builtin() {
   let src = crate::js!("import('./dep.js');");
   let session = crate::parser::Parser::parse_source(src).expect("parse ok");
   let program = session.program();
-  let chunk = compile(program, session.source()).expect("compile ok");
+  let code = compile(program, session.source()).expect("compile ok");
 
-  let saw_get_builtin = chunk
-    .code
+  let saw_get_builtin = code
+    .words
     .iter()
-    .filter_map(|b| Op::from_byte((*b & 0xFF) as u8))
-    .any(|op| matches!(op, Op::GetBuiltin));
+    .filter_map(|b| Opcode::from_byte((*b & 0xFF) as u8))
+    .any(|op| matches!(op, Opcode::GetBuiltin));
 
   assert!(
     saw_get_builtin,
@@ -464,11 +475,11 @@ fn compile_sequence_expression_keeps_last_value() {
   let src = crate::js!("var x = (a = 1, 2);");
   let session = crate::parser::Parser::parse_source(src).expect("parse_source failed");
   let program = session.program();
-  let chunk = compile(program, session.source()).expect("compile ok");
+  let code = compile(program, session.source()).expect("compile ok");
 
-  chunk
+  code
     .verify()
-    .expect("sequence expression emits valid RISC");
+    .expect("sequence expression emits valid bytecode");
 }
 
 #[test]
@@ -508,24 +519,24 @@ fn module_export_updates_follow_binding_identity() {
   );
   let session = crate::parser::Parser::parse_source_with_type(source, oxc_span::SourceType::mjs())
     .expect("parse module");
-  let chunk = compile_oxc_with_ctx(session.program(), Some(&context), session.source())
+  let code = compile_oxc_with_ctx(session.program(), Some(&context), session.source())
     .expect("compile module");
-  let shadow = chunk
+  let shadow = code
     .functions
     .iter()
     .find(|function| function.name == "shadow")
     .unwrap();
-  let capture = chunk
+  let capture = code
     .functions
     .iter()
     .find(|function| function.name == "capture")
     .unwrap();
-  let count_export_writes = |function: &crate::bytecode::FunctionProto| {
+  let count_export_writes = |function: &crate::bytecode::Function| {
     function
-      .chunk
       .code
+      .words
       .iter()
-      .filter(|word| Op::from_byte((*word & 0xff) as u8) == Some(Op::SetModuleExport))
+      .filter(|word| Opcode::from_byte((*word & 0xff) as u8) == Some(Opcode::SetModuleExport))
       .count()
   };
   assert_eq!(count_export_writes(shadow), 0);
@@ -560,12 +571,12 @@ fn nullish_coalescing_is_supported() {
   let session = crate::parser::Parser::parse_source(src).expect("parse ok");
   let program = session.program();
 
-  let chunk = compile(program, session.source()).expect("compile ok");
-  let saw_coalesce = chunk
-    .code
+  let code = compile(program, session.source()).expect("compile ok");
+  let saw_coalesce = code
+    .words
     .iter()
-    .filter_map(|b| Op::from_byte((*b & 0xFF) as u8))
-    .any(|op| matches!(op, Op::JumpIfNullish));
+    .filter_map(|b| Opcode::from_byte((*b & 0xFF) as u8))
+    .any(|op| matches!(op, Opcode::JumpIfNullish));
   assert!(
     saw_coalesce,
     "expected nullish coalescing lowering to emit JumpIfNullish"
@@ -578,12 +589,12 @@ fn comparison_branches_use_compare_jump() {
   let session = crate::parser::Parser::parse_source(src).expect("parse ok");
   let program = session.program();
 
-  let chunk = compile(program, session.source()).expect("compile ok");
-  let saw_compare_jump = chunk
-    .code
+  let code = compile(program, session.source()).expect("compile ok");
+  let saw_compare_jump = code
+    .words
     .iter()
-    .filter_map(|b| Op::from_byte((*b & 0xFF) as u8))
-    .any(|op| matches!(op, Op::CompareJump));
+    .filter_map(|b| Opcode::from_byte((*b & 0xFF) as u8))
+    .any(|op| matches!(op, Opcode::CompareJump));
   assert!(
     saw_compare_jump,
     "expected comparison branching to emit CompareJump"
@@ -596,12 +607,12 @@ fn while_compare_jump_preserves_compare_opcode_payload() {
   let session = crate::parser::Parser::parse_source(src).expect("parse ok");
   let program = session.program();
 
-  let chunk = compile(program, session.source()).expect("compile ok");
-  let (condition, left, right, offset) = chunk
-    .code
+  let code = compile(program, session.source()).expect("compile ok");
+  let (condition, left, right, offset) = code
+    .words
     .iter()
     .find_map(|word| {
-      (Op::from_byte((*word & 0xFF) as u8) == Some(Op::CompareJump))
+      (Opcode::from_byte((*word & 0xFF) as u8) == Some(Opcode::CompareJump))
         .then(|| decode_compare_jump(*word))
     })
     .expect("expected CompareJump in while loop");
@@ -618,19 +629,23 @@ fn compile_for_of_emits_iterator_ops() {
   let src = crate::js!("for (var x of [1, 2, 3]) {}");
   let session = crate::parser::Parser::parse_source(src).expect("parse ok");
   let program = session.program();
-  let chunk = compile(program, session.source()).expect("compile ok");
+  let code = compile(program, session.source()).expect("compile ok");
 
-  let ops: Vec<_> = chunk
-    .code
+  let ops: Vec<_> = code
+    .words
     .iter()
-    .filter_map(|b| Op::from_byte((*b & 0xFF) as u8))
+    .filter_map(|b| Opcode::from_byte((*b & 0xFF) as u8))
     .collect();
   assert!(
     ops
       .iter()
-      .any(|op| matches!(op, Op::IteratorNext))
+      .any(|op| matches!(op, Opcode::IteratorNext))
   );
-  assert!(ops.iter().any(|op| matches!(op, Op::GetProperty)));
+  assert!(
+    ops
+      .iter()
+      .any(|op| matches!(op, Opcode::GetProperty))
+  );
 }
 
 #[test]
@@ -638,18 +653,18 @@ fn compile_for_await_uses_async_iterator_acquisition() {
   let src = crate::js!("async function f(xs) { for await (const x of xs) {} }");
   let session = crate::parser::Parser::parse_source(src).expect("parse ok");
   let program = session.program();
-  let chunk = compile(program, session.source()).expect("compile ok");
+  let code = compile(program, session.source()).expect("compile ok");
 
-  let ops: Vec<_> = chunk
+  let ops: Vec<_> = code
     .functions
     .iter()
-    .flat_map(|function| function.chunk.code.iter())
-    .filter_map(|word| Op::from_byte((*word & 0xFF) as u8))
+    .flat_map(|function| function.code.words.iter())
+    .filter_map(|word| Opcode::from_byte((*word & 0xFF) as u8))
     .collect();
   assert!(
     ops
       .iter()
-      .any(|op| matches!(op, Op::GetAsyncIterator)),
+      .any(|op| matches!(op, Opcode::GetAsyncIterator)),
     "for-await must acquire an async iterator record"
   );
 }
@@ -659,7 +674,7 @@ fn for_of_over_array_executes() {
   let src = crate::js!("var sum = 0; for (var x of [1, 2, 3]) { sum = sum + x; } sum;");
   let session = crate::parser::Parser::parse_source(src).expect("parse ok");
   let program = session.program();
-  let chunk = compile(program, session.source()).expect("compile ok");
+  let code = compile(program, session.source()).expect("compile ok");
 
   let globals = Rc::new(RefCell::new(ObjectData::new()));
   globals.borrow_mut().properties.insert(
@@ -667,7 +682,7 @@ fn for_of_over_array_executes() {
     crate::value::PropertyDescriptor::ordinary_data(Value::Object(Rc::clone(&globals))),
   );
   let mut vm = Vm::new(globals);
-  drop(vm.run(chunk).expect("run ok"));
+  drop(vm.run(code).expect("run ok"));
 
   assert!(matches!(vm.get_global("sum"), Some(Value::Number(n)) if (n - 6.0).abs() < f64::EPSILON));
 }
@@ -684,7 +699,7 @@ fn computed_member_compound_assignment_evaluates_reference_once() {
   );
   let session = crate::parser::Parser::parse_source(src).expect("parse ok");
   let program = session.program();
-  let chunk = compile(program, session.source()).expect("compile ok");
+  let code = compile(program, session.source()).expect("compile ok");
 
   let globals = Rc::new(RefCell::new(ObjectData::new()));
   globals.borrow_mut().properties.insert(
@@ -692,7 +707,7 @@ fn computed_member_compound_assignment_evaluates_reference_once() {
     crate::value::PropertyDescriptor::ordinary_data(Value::Object(Rc::clone(&globals))),
   );
   let mut vm = Vm::new(globals);
-  drop(vm.run(chunk).expect("run ok"));
+  drop(vm.run(code).expect("run ok"));
 
   assert!(
     matches!(vm.get_global("hits"), Some(Value::Number(n)) if (n - 1.0).abs() < f64::EPSILON),
@@ -703,7 +718,7 @@ fn computed_member_compound_assignment_evaluates_reference_once() {
 
 fn run_compiled(src: &str) -> Vm {
   let session = crate::parser::Parser::parse_source(src).expect("parse ok");
-  let chunk = compile(session.program(), session.source()).expect("compile ok");
+  let code = compile(session.program(), session.source()).expect("compile ok");
   let globals = Rc::new(RefCell::new(ObjectData::new()));
   globals.borrow_mut().properties.insert(
     crate::value::PropertyKey::String("globalThis".to_string().into()),
@@ -711,7 +726,7 @@ fn run_compiled(src: &str) -> Vm {
   );
   runtime_utils::install_minimal_kernel_constructors(&globals);
   let mut vm = Vm::new(globals);
-  vm.run(chunk).expect("run ok");
+  vm.run(code).expect("run ok");
   vm
 }
 
@@ -1026,7 +1041,7 @@ fn member_postfix_update_returns_old_value_and_stores_new_value() {
   );
   let session = crate::parser::Parser::parse_source(src).expect("parse ok");
   let program = session.program();
-  let chunk = compile(program, session.source()).expect("compile ok");
+  let code = compile(program, session.source()).expect("compile ok");
 
   let globals = Rc::new(RefCell::new(ObjectData::new()));
   globals.borrow_mut().properties.insert(
@@ -1034,7 +1049,7 @@ fn member_postfix_update_returns_old_value_and_stores_new_value() {
     crate::value::PropertyDescriptor::ordinary_data(Value::Object(Rc::clone(&globals))),
   );
   let mut vm = Vm::new(globals);
-  drop(vm.run(chunk).expect("run ok"));
+  drop(vm.run(code).expect("run ok"));
 
   assert!(matches!(vm.get_global("old"), Some(Value::Number(n)) if (n - 1.0).abs() < f64::EPSILON));
 }
@@ -1044,11 +1059,11 @@ fn block_scoped_let_does_not_escape_block() {
   let src = crate::js!("{ let x = 1; } x = 2;");
   let session = crate::parser::Parser::parse_source(src).expect("parse ok");
   let program = session.program();
-  let chunk = compile(program, session.source()).expect("compile ok");
+  let code = compile(program, session.source()).expect("compile ok");
 
   let globals = Rc::new(RefCell::new(ObjectData::new()));
   let mut vm = Vm::new(globals);
-  vm.run(chunk).expect("run ok");
+  vm.run(code).expect("run ok");
 
   assert!(
     matches!(vm.get_global("x"), Some(Value::Number(n)) if (n - 2.0).abs() < f64::EPSILON),

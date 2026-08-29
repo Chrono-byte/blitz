@@ -29,18 +29,56 @@ fn run_script_with_optimizations(
   enabled: bool,
 ) -> (Vm, Rc<RefCell<ObjectData>>) {
   let session = Parser::parse_source(src).expect("parse ok");
-  let chunk = compiler::compile_session(&session).expect("compile ok");
+  let code = compiler::compile_session(&session).expect("compile ok");
 
   let globals = test_globals();
   let mut vm = Vm::new(Clone::clone(&globals));
   vm.caches.optimized_execution_enabled = enabled;
-  vm.run(chunk).expect("run ok");
+  vm.run(code).expect("run ok");
   (vm, globals)
 }
 
 mod test {
   #![allow(clippy::panic)]
   use super::*;
+
+  #[test]
+  fn call_abi_preserves_call_semantics() {
+    let source = r#"
+      function argc() { return arguments.length; }
+      function encode(a, b, c, d, e, f, g) {
+        return a + b * 10 + c * 100 + d * 1000 + e * 10000 + f * 100000 + g * 1000000;
+      }
+      const receiver = { value: 41, read(delta) { return this.value + delta; } };
+      function nested(value) { function add(delta) { return value + delta; } return add(2); }
+      function recurse(value) { return value === 0 ? 0 : 1 + recurse(value - 1); }
+      function makeClosure(value) { return () => value; }
+      class Box { constructor(value) { this.value = value; } }
+      function throws() { throw 17; }
+      let caught = 0;
+      try { throws(); } catch (error) { caught = error; }
+      globalThis.riscCallAbiOk =
+        argc() === 0 &&
+        argc(1) === 1 &&
+        argc(1, 2) === 2 &&
+        argc(1, 2, 3) === 3 &&
+        argc(1, 2, 3, 4) === 4 &&
+        argc(1, 2, 3, 4, 5) === 5 &&
+        argc(1, 2, 3, 4, 5, 6) === 6 &&
+        argc(1, 2, 3, 4, 5, 6, 7) === 7 &&
+        encode(1, 2, 3, 4, 5, 6, 7) === 7654321 &&
+        receiver.read(1) === 42 &&
+        nested(40) === 42 &&
+        recurse(20) === 20 &&
+        makeClosure(42)() === 42 &&
+        new Box(42).value === 42 &&
+        eval("40 + 2") === 42 &&
+        caught === 17;
+    "#;
+
+    let (vm, _) = run_script(source);
+    assert_eq!(vm.get_global("riscCallAbiOk"), Some(Value::Bool(true)));
+  }
 
   #[test]
   fn closures_capture_local_slots_above_u8_range() {
@@ -137,7 +175,7 @@ mod test {
       "globalThis.interrupt_caught = false; try { globalThis.interrupt_started = true; } catch (_) { globalThis.interrupt_caught = true; }",
     )
     .expect("parse ok");
-    let chunk = compiler::compile_session(&session).expect("compile ok");
+    let code = compiler::compile_session(&session).expect("compile ok");
     let globals = test_globals();
     let mut vm = Vm::new(globals);
     vm.interrupt_handle()
@@ -145,7 +183,7 @@ mod test {
       .expect("live VM");
 
     let error = vm
-      .run(chunk)
+      .run(code)
       .expect_err("interrupt should terminate execution");
     assert!(error.is_execution_interrupted());
     assert_eq!(vm.get_global("interrupt_started"), None);
@@ -158,7 +196,7 @@ mod test {
       "let interrupt_total = 0; for (let i = 0; i < 10000000; i += 1) interrupt_total += i; globalThis.interrupt_completed = true;",
     )
     .expect("parse ok");
-    let chunk = compiler::compile_session(&session).expect("compile ok");
+    let code = compiler::compile_session(&session).expect("compile ok");
     let globals = test_globals();
     let mut vm = Vm::new(globals);
     vm.caches.optimized_execution_enabled = false;
@@ -169,7 +207,7 @@ mod test {
     });
 
     let error = vm
-      .run(chunk)
+      .run(code)
       .expect_err("interrupt should terminate execution");
     requester.join().expect("interrupt requester");
     assert!(error.is_execution_interrupted());
@@ -183,7 +221,7 @@ mod test {
       "function add(left, right) { return left + right; } let total = 0; for (let i = 0; i < 100000000; i += 1) total = add(total, 1); globalThis.native_interrupt_completed = true;",
     )
     .expect("parse ok");
-    let chunk = compiler::compile_session(&session).expect("compile ok");
+    let code = compiler::compile_session(&session).expect("compile ok");
     let globals = test_globals();
     let mut vm = Vm::new(globals);
     let interrupt = vm.interrupt_handle();
@@ -193,7 +231,7 @@ mod test {
     });
 
     let error = vm
-      .run(chunk)
+      .run(code)
       .expect_err("interrupt should terminate native execution");
     requester.join().expect("interrupt requester");
     assert!(error.is_execution_interrupted());
@@ -665,7 +703,7 @@ mod test {
       proto.has_rest,
       proto.captures_this,
       proto.upvalues.len(),
-      proto.chunk.code
+      proto.code.words
     );
     assert!(optimized.caches.quickened.values().any(|plan| {
       plan.regions.iter().any(|region| {
@@ -1038,7 +1076,7 @@ mod test {
   }
 
   #[test]
-  fn risc_registers_keep_new_closure_environments_alive_during_gc() {
+  fn registers_keep_new_closure_environments_alive_during_gc() {
     let (vm, _) = run_script(crate::js!(
       r#"
         const closures = [];
@@ -2305,7 +2343,7 @@ mod test {
   }
 
   #[test]
-  fn labeled_loop_breaks_complete_through_risc_cleanup() {
+  fn labeled_loop_breaks_complete_through_cleanup() {
     for source in [
       crate::js!(
         r#"
@@ -2422,7 +2460,7 @@ mod test {
   }
 
   #[test]
-  fn risc_core_execution_handles_control_flow() {
+  fn core_execution_handles_control_flow() {
     let source = crate::js!(
       r#"
       var x = 1;
@@ -2431,14 +2469,14 @@ mod test {
     "#
     );
     let session = Parser::parse_source(source).expect("parse");
-    let chunk = compiler::compile(session.program(), session.source()).expect("compile");
+    let code = compiler::compile(session.program(), session.source()).expect("compile");
 
-    let risc_globals = test_globals();
-    let mut risc_vm = Vm::new(Rc::clone(&risc_globals));
-    risc_vm.run(chunk).expect("risc run");
+    let globals = test_globals();
+    let mut vm = Vm::new(Rc::clone(&globals));
+    vm.run(code).expect("risc run");
 
     assert!(matches!(
-      risc_vm.get_global("result"),
+      vm.get_global("result"),
       Some(Value::Number(10.0_f64))
     ));
   }
@@ -2469,7 +2507,7 @@ mod test {
   }
 
   #[test]
-  fn risc_functions_literals_and_overflow_arguments_are_stable() {
+  fn functions_literals_and_overflow_arguments_are_stable() {
     let source = crate::js!(
       r#"
       function sum(a, b, c, d, e, f, g, h) {
@@ -2487,24 +2525,18 @@ mod test {
     "#
     );
     let session = Parser::parse_source(source).expect("parse");
-    let chunk = compiler::compile(session.program(), session.source()).expect("compile");
+    let code = compiler::compile(session.program(), session.source()).expect("compile");
 
-    let risc_globals = test_globals();
-    let mut risc_vm = Vm::new(Rc::clone(&risc_globals));
-    risc_vm.run(chunk).expect("risc run");
+    let globals = test_globals();
+    let mut vm = Vm::new(Rc::clone(&globals));
+    vm.run(code).expect("risc run");
 
     assert!(matches!(
-      risc_vm.get_global("result"),
+      vm.get_global("result"),
       Some(Value::Number(36.0_f64))
     ));
-    assert_eq!(
-      risc_vm.get_global("methodResult"),
-      Some(Value::Number(36.0))
-    );
-    assert_eq!(
-      risc_vm.get_global("constructResult"),
-      Some(Value::Number(36.0))
-    );
+    assert_eq!(vm.get_global("methodResult"), Some(Value::Number(36.0)));
+    assert_eq!(vm.get_global("constructResult"), Some(Value::Number(36.0)));
   }
 
   #[test]
@@ -2568,18 +2600,18 @@ mod test {
     "#
     );
     let session = Parser::parse_source(source).expect("parse");
-    let chunk = compiler::compile(session.program(), session.source()).expect("compile");
+    let code = compiler::compile(session.program(), session.source()).expect("compile");
     let globals = test_globals();
     let mut vm = Vm::new(globals);
-    vm.run(chunk).expect("run");
+    vm.run(code).expect("run");
     assert_eq!(vm.get_global("relational_result"), Some(Value::Bool(true)));
   }
 
   #[test]
-  fn risc_ordinary_builtin_call_does_not_prepend_receiver() {
+  fn ordinary_builtin_call_does_not_prepend_receiver() {
     let source = crate::js!("var builtin_argument = capture(\"expected\");");
     let session = Parser::parse_source(source).expect("parse");
-    let chunk = compiler::compile(session.program(), session.source()).expect("compile");
+    let code = compiler::compile(session.program(), session.source()).expect("compile");
     let globals = test_globals();
     globals.borrow_mut().properties.insert(
       PropertyKey::String("capture".to_string().into()),
@@ -2588,7 +2620,7 @@ mod test {
       }))),
     );
     let mut vm = Vm::new(globals);
-    vm.run(chunk).expect("run");
+    vm.run(code).expect("run");
 
     assert_eq!(
       vm.get_global("builtin_argument"),
@@ -2804,15 +2836,15 @@ mod test {
       "#
     );
     let session = Parser::parse_source(first).expect("parse generator setup");
-    let chunk = compiler::compile_session(&session).expect("compile setup");
-    vm.run(chunk).expect("start generator");
+    let code = compiler::compile_session(&session).expect("compile setup");
+    vm.run(code).expect("start generator");
 
     assert_eq!(vm.collect_garbage_prototype().swept_objects, 0);
 
     let second = crate::js!("globalThis.generatorAnswer = iterator.next().value;");
     let session = Parser::parse_source(second).expect("parse generator resume");
-    let chunk = compiler::compile_session(&session).expect("compile resume");
-    vm.run(chunk).expect("resume generator");
+    let code = compiler::compile_session(&session).expect("compile resume");
+    vm.run(code).expect("resume generator");
     assert_eq!(vm.get_global("generatorAnswer"), Some(Value::Number(42.0)));
   }
 
@@ -2824,9 +2856,9 @@ mod test {
 
     let source = crate::js!("throw 42;");
     let session = Parser::parse_source(source).expect("parse nested throw");
-    let chunk = compiler::compile_repl_session(&session).expect("compile nested");
+    let code = compiler::compile_repl_session(&session).expect("compile nested");
     let failure = vm
-      .run_nested(chunk, true)
+      .run_nested(code, true)
       .expect_err("nested run throws");
 
     assert_eq!(failure.thrown, Some(Value::Number(42.0)));
@@ -2914,8 +2946,8 @@ mod test {
     poison_state(&mut vm);
     let source = crate::js!("undefined;");
     let session = Parser::parse_source(source).expect("parse root");
-    let chunk = compiler::compile_session(&session).expect("compile root");
-    vm.run(chunk).expect("run root");
+    let code = compiler::compile_session(&session).expect("compile root");
+    vm.run(code).expect("run root");
     assert_cleared(&vm);
 
     poison_state(&mut vm);
@@ -5201,8 +5233,8 @@ mod test {
 
     let source = crate::js!("globalThis.weak_map_key_for_gc = null;");
     let session = Parser::parse_source(source).expect("parse WeakMap key release");
-    let chunk = compiler::compile_session(&session).expect("compile WeakMap release");
-    vm.run(chunk).expect("release WeakMap key");
+    let code = compiler::compile_session(&session).expect("compile WeakMap release");
+    vm.run(code).expect("release WeakMap key");
     vm.collect_garbage_prototype();
 
     assert!(
@@ -5242,8 +5274,8 @@ mod test {
 
     let source = crate::js!("globalThis.weak_set_key_for_gc = null;");
     let session = Parser::parse_source(source).expect("parse WeakSet key release");
-    let chunk = compiler::compile_session(&session).expect("compile WeakSet release");
-    vm.run(chunk).expect("release WeakSet key");
+    let code = compiler::compile_session(&session).expect("compile WeakSet release");
+    vm.run(code).expect("release WeakSet key");
     vm.collect_garbage_prototype();
 
     assert!(
@@ -5304,8 +5336,8 @@ mod test {
 
     let source = crate::js!("globalThis.weak_ref_target = null;");
     let session = Parser::parse_source(source).expect("parse WeakRef target release");
-    let chunk = compiler::compile_session(&session).expect("compile WeakRef target release");
-    vm.run(chunk).expect("release WeakRef target");
+    let code = compiler::compile_session(&session).expect("compile WeakRef target release");
+    vm.run(code).expect("release WeakRef target");
     vm.collect_garbage_prototype();
 
     let reference = vm
@@ -5438,11 +5470,11 @@ mod test {
   fn top_level_assignment_updates_global_binding() {
     let session = Parser::parse_source(crate::js!("var x; x = 5;")).expect("parse ok");
     let program = session.program();
-    let chunk = compiler::compile(program, session.source()).expect("compile ok");
+    let code = compiler::compile(program, session.source()).expect("compile ok");
 
     let globals = test_globals();
     let mut vm = Vm::new(globals);
-    let result = vm.run(chunk).expect("run ok");
+    let result = vm.run(code).expect("run ok");
 
     assert!(matches!(result, Value::Undefined));
     assert!(matches!(vm.get_global("x"), Some(Value::Number(n)) if (n - 5.0).abs() < f64::EPSILON));
@@ -5459,11 +5491,11 @@ mod test {
     );
     let session = Parser::parse_source(src).expect("parse ok");
     let program = session.program();
-    let chunk = compiler::compile(program, session.source()).expect("compile ok");
+    let code = compiler::compile(program, session.source()).expect("compile ok");
 
     let globals = test_globals();
     let mut vm = Vm::new(globals);
-    let result = vm.run(chunk).expect("run ok");
+    let result = vm.run(code).expect("run ok");
 
     assert!(matches!(result, Value::Undefined));
     assert!(
@@ -5480,11 +5512,11 @@ mod test {
     let src = crate::js!(r#"var evaluated = eval('[...[1, 2, 3], 4, 5]');"#);
     let session = Parser::parse_source(src).expect("parse ok");
     let program = session.program();
-    let chunk = compiler::compile(program, session.source()).expect("compile ok");
+    let code = compiler::compile(program, session.source()).expect("compile ok");
 
     let globals = test_globals();
     let mut vm = Vm::new(globals);
-    let result = vm.run(chunk).expect("run ok");
+    let result = vm.run(code).expect("run ok");
 
     assert!(matches!(result, Value::Undefined));
     match vm.get_global("evaluated") {
@@ -5510,12 +5542,12 @@ mod test {
     let session =
       Parser::parse_source(crate::js!("with (undefined) { x = 1; }")).expect("parse ok");
     let program = session.program();
-    let chunk = compiler::compile(program, session.source()).expect("compile ok");
+    let code = compiler::compile(program, session.source()).expect("compile ok");
 
     let globals = test_globals();
     let mut vm = Vm::new(globals);
     let err = vm
-      .run(chunk)
+      .run(code)
       .expect_err("with(undefined) should throw");
 
     assert!(
@@ -5540,11 +5572,11 @@ mod test {
     ))
     .expect("parse ok");
     let program = session.program();
-    let chunk = compiler::compile(program, session.source()).expect("compile ok");
+    let code = compiler::compile(program, session.source()).expect("compile ok");
 
     let globals = test_globals();
     let mut vm = Vm::new(globals);
-    vm.run(chunk).expect("run ok");
+    vm.run(code).expect("run ok");
 
     assert_eq!(
       vm.get_global("result"),
@@ -5571,11 +5603,11 @@ mod test {
     ))
     .expect("parse ok");
     let program = session.program();
-    let chunk = compiler::compile(program, session.source()).expect("compile ok");
+    let code = compiler::compile(program, session.source()).expect("compile ok");
 
     let globals = test_globals();
     let mut vm = Vm::new(globals);
-    vm.run(chunk).expect("run ok");
+    vm.run(code).expect("run ok");
 
     assert_eq!(
       vm.get_global("st_NaN"),
@@ -5630,11 +5662,11 @@ mod test {
     ))
     .expect("parse ok");
     let program = session.program();
-    let chunk = compiler::compile(program, session.source()).expect("compile ok");
+    let code = compiler::compile(program, session.source()).expect("compile ok");
 
     let globals = test_globals();
     let mut vm = Vm::new(globals);
-    vm.run(chunk).expect("run ok");
+    vm.run(code).expect("run ok");
 
     assert_eq!(
       vm.get_global("st_NaN"),
@@ -5700,11 +5732,11 @@ mod test {
     ))
     .expect("parse ok");
     let program = session.program();
-    let chunk = compiler::compile(program, session.source()).expect("compile ok");
+    let code = compiler::compile(program, session.source()).expect("compile ok");
 
     let globals = test_globals();
     let mut vm = Vm::new(globals);
-    vm.run(chunk).expect("run ok");
+    vm.run(code).expect("run ok");
 
     assert_eq!(
       vm.get_global("st_NaN"),
@@ -5790,11 +5822,11 @@ mod test {
     ))
     .expect("parse ok");
     let program = session.program();
-    let chunk = compiler::compile(program, session.source()).expect("compile ok");
+    let code = compiler::compile(program, session.source()).expect("compile ok");
 
     let globals = test_globals();
     let mut vm = Vm::new(globals);
-    vm.run(chunk).expect("run ok");
+    vm.run(code).expect("run ok");
 
     assert_eq!(
       vm.get_global("st_NaN"),
@@ -5816,11 +5848,11 @@ mod test {
     ))
     .expect("parse ok");
     let program = session.program();
-    let chunk = compiler::compile(program, session.source()).expect("compile ok");
+    let code = compiler::compile(program, session.source()).expect("compile ok");
 
     let globals = test_globals();
     let mut vm = Vm::new(globals);
-    vm.run(chunk).expect("run ok");
+    vm.run(code).expect("run ok");
 
     assert_eq!(vm.get_global("result"), Some(Value::Undefined));
     match vm.get_global("myObj") {
@@ -5853,12 +5885,12 @@ mod test {
     );
     let session = Parser::parse_source(src).expect("parse ok");
     let program = session.program();
-    let chunk = compiler::compile(program, session.source()).expect("compile ok");
+    let code = compiler::compile(program, session.source()).expect("compile ok");
 
     let globals = test_globals();
     let mut vm = Vm::new(globals);
     let err = vm
-      .run(chunk)
+      .run(code)
       .expect_err("strict assignment should throw");
 
     assert!(
@@ -5884,11 +5916,11 @@ mod test {
         "#
     ))
     .expect("parse ok");
-    let chunk = compiler::compile(session.program(), session.source()).expect("compile ok");
+    let code = compiler::compile(session.program(), session.source()).expect("compile ok");
 
     let globals = test_globals();
     let mut vm = Vm::new(globals);
-    vm.run(chunk).expect("run ok");
+    vm.run(code).expect("run ok");
     assert!(matches!(vm.get_global("result"), Some(Value::Bool(true))));
   }
 
@@ -5988,12 +6020,12 @@ mod test {
         "#
     ))
     .expect("parse ok");
-    let chunk = compiler::compile(session.program(), session.source()).expect("compile ok");
+    let code = compiler::compile(session.program(), session.source()).expect("compile ok");
 
     let globals = test_globals();
     let mut vm = Vm::new(globals);
     let err = vm
-      .run(chunk)
+      .run(code)
       .expect_err("strict callee access should throw");
     assert!(
       err
@@ -6018,11 +6050,11 @@ mod test {
         "#
     ))
     .expect("parse ok");
-    let chunk = compiler::compile(session.program(), session.source()).expect("compile ok");
+    let code = compiler::compile(session.program(), session.source()).expect("compile ok");
 
     let globals = test_globals();
     let mut vm = Vm::new(globals);
-    vm.run(chunk).expect("run ok");
+    vm.run(code).expect("run ok");
     assert!(matches!(vm.get_global("result"), Some(Value::Bool(true))));
   }
 
@@ -6043,11 +6075,11 @@ mod test {
         "#
     ))
     .expect("parse ok");
-    let chunk = compiler::compile(session.program(), session.source()).expect("compile ok");
+    let code = compiler::compile(session.program(), session.source()).expect("compile ok");
 
     let globals = test_globals();
     let mut vm = Vm::new(globals);
-    vm.run(chunk).expect("run ok");
+    vm.run(code).expect("run ok");
 
     assert!(matches!(
         vm.get_global("mapped_result"),
@@ -6063,11 +6095,11 @@ mod test {
   fn void_operator_evaluates_to_undefined() {
     let session = Parser::parse_source(crate::js!("var x = void 0;")).expect("parse ok");
     let program = session.program();
-    let chunk = compiler::compile(program, session.source()).expect("compile ok");
+    let code = compiler::compile(program, session.source()).expect("compile ok");
 
     let globals = test_globals();
     let mut vm = Vm::new(globals);
-    let result = vm.run(chunk).expect("run ok");
+    let result = vm.run(code).expect("run ok");
 
     assert!(matches!(result, Value::Undefined));
     assert!(matches!(vm.get_global("x"), Some(Value::Undefined)));
@@ -6077,7 +6109,7 @@ mod test {
   fn logical_and_short_circuits_and_preserves_left_operand() {
     let session = Parser::parse_source(crate::js!("var x = 0 && bump();")).expect("parse ok");
     let program = session.program();
-    let chunk = compiler::compile(program, session.source()).expect("compile ok");
+    let code = compiler::compile(program, session.source()).expect("compile ok");
 
     let calls = Rc::new(RefCell::new(0usize));
     let globals = test_globals();
@@ -6093,7 +6125,7 @@ mod test {
     );
 
     let mut vm = Vm::new(globals);
-    let result = vm.run(chunk).expect("run ok");
+    let result = vm.run(code).expect("run ok");
 
     assert_eq!(*calls.borrow(), 0);
     assert!(matches!(result, Value::Undefined));
@@ -6104,7 +6136,7 @@ mod test {
   fn logical_or_short_circuits_and_preserves_left_operand() {
     let session = Parser::parse_source(crate::js!("var x = 1 || bump();")).expect("parse ok");
     let program = session.program();
-    let chunk = compiler::compile(program, session.source()).expect("compile ok");
+    let code = compiler::compile(program, session.source()).expect("compile ok");
 
     let calls = Rc::new(RefCell::new(0usize));
     let globals = test_globals();
@@ -6120,7 +6152,7 @@ mod test {
     );
 
     let mut vm = Vm::new(globals);
-    let result = vm.run(chunk).expect("run ok");
+    let result = vm.run(code).expect("run ok");
 
     assert_eq!(*calls.borrow(), 0);
     assert!(matches!(result, Value::Undefined));
@@ -6158,11 +6190,11 @@ mod test {
     let session =
       Parser::parse_source(crate::js!("function f(){ x; let x = 1; } f();")).expect("parse ok");
     let program = session.program();
-    let chunk = compiler::compile(program, session.source()).expect("compile ok");
+    let code = compiler::compile(program, session.source()).expect("compile ok");
     let globals = test_globals();
     let mut vm = Vm::new(globals);
     let err = vm
-      .run(chunk)
+      .run(code)
       .expect_err("run should fail for TDZ read");
     let msg = err.to_string();
     assert!(
@@ -6178,11 +6210,11 @@ mod test {
     ))
     .expect("parse ok");
     let program = session.program();
-    let chunk = compiler::compile(program, session.source()).expect("compile ok");
+    let code = compiler::compile(program, session.source()).expect("compile ok");
     let globals = test_globals();
     let mut vm = Vm::new(globals);
     let err = vm
-      .run(chunk)
+      .run(code)
       .expect_err("run should fail for captured TDZ read");
     let msg = err.to_string();
     assert!(
@@ -6198,10 +6230,10 @@ mod test {
         )
         .expect("parse ok");
     let program = session.program();
-    let chunk = compiler::compile(program, session.source()).expect("compile ok");
+    let code = compiler::compile(program, session.source()).expect("compile ok");
     let globals = test_globals();
     let mut vm = Vm::new(globals);
-    vm.run(chunk).expect("run ok");
+    vm.run(code).expect("run ok");
     assert!(matches!(vm.get_global("out"), Some(Value::String(s)) if s == "outer"));
   }
 
@@ -6222,10 +6254,10 @@ mod test {
     ))
     .expect("parse ok");
     let program = session.program();
-    let chunk = compiler::compile(program, session.source()).expect("compile ok");
+    let code = compiler::compile(program, session.source()).expect("compile ok");
     let globals = test_globals();
     let mut vm = Vm::new(globals);
-    vm.run(chunk).expect("run ok");
+    vm.run(code).expect("run ok");
     assert!(matches!(vm.get_global("out"), Some(Value::Undefined)));
   }
 
@@ -6248,10 +6280,10 @@ mod test {
     );
     let session = Parser::parse_source(src).expect("parse ok");
     let program = session.program();
-    let chunk = compiler::compile(program, session.source()).expect("compile ok");
+    let code = compiler::compile(program, session.source()).expect("compile ok");
     let globals = test_globals();
     let mut vm = Vm::new(globals);
-    vm.run(chunk).expect("run ok");
+    vm.run(code).expect("run ok");
 
     let a = vm.get_global("a").expect("a exists");
     let b = vm.get_global("b").expect("b exists");
@@ -6362,10 +6394,10 @@ mod test {
     );
     let session = Parser::parse_source(src).expect("parse ok");
     let program = session.program();
-    let chunk = compiler::compile(program, session.source()).expect("compile ok");
+    let code = compiler::compile(program, session.source()).expect("compile ok");
     let globals = test_globals();
     let mut vm = Vm::new(globals);
-    vm.run(chunk).expect("run ok");
+    vm.run(code).expect("run ok");
 
     let initial_argument_count = vm.get_global("observedInitialArgumentCount");
     assert!(
@@ -6518,10 +6550,10 @@ mod test {
         "#
     );
     let session = Parser::parse_source(src).expect("parse ok");
-    let chunk = compiler::compile(session.program(), session.source()).expect("compile ok");
+    let code = compiler::compile(session.program(), session.source()).expect("compile ok");
     let globals = test_globals();
     let mut vm = Vm::new(globals);
-    vm.run(chunk).expect("run ok");
+    vm.run(code).expect("run ok");
     assert_eq!(
       vm.get_global("classBindingIsFunction"),
       Some(Value::Bool(true))
@@ -6576,11 +6608,11 @@ mod test {
     "#
     );
     let session = Parser::parse_source(src).expect("parse class fields");
-    let chunk =
+    let code =
       compiler::compile(session.program(), session.source()).expect("compile class fields");
     let globals = test_globals();
     let mut vm = Vm::new(globals);
-    vm.run(chunk).expect("run class fields");
+    vm.run(code).expect("run class fields");
     assert_eq!(vm.get_global("fieldsOk"), Some(Value::Bool(true)));
   }
 
@@ -6610,11 +6642,11 @@ mod test {
     "#
     );
     let session = Parser::parse_source(src).expect("parse runtime patterns");
-    let chunk =
+    let code =
       compiler::compile(session.program(), session.source()).expect("compile runtime patterns");
     let globals = test_globals();
     let mut vm = Vm::new(globals);
-    vm.run(chunk).expect("run runtime patterns");
+    vm.run(code).expect("run runtime patterns");
     assert_eq!(vm.get_global("runtimePatternsOk"), Some(Value::Bool(true)));
   }
 
@@ -6636,11 +6668,11 @@ mod test {
     "#
     );
     let session = Parser::parse_source(src).expect("parse derived constructor");
-    let chunk =
+    let code =
       compiler::compile(session.program(), session.source()).expect("compile derived constructor");
     let globals = test_globals();
     let mut vm = Vm::new(globals);
-    vm.run(chunk).expect("run derived constructor");
+    vm.run(code).expect("run derived constructor");
     assert_eq!(vm.get_global("derivedThisOk"), Some(Value::Bool(true)));
   }
 
@@ -6664,10 +6696,10 @@ mod test {
         "#
     );
     let session = Parser::parse_source(src).expect("parse ok");
-    let chunk = compiler::compile(session.program(), session.source()).expect("compile ok");
+    let code = compiler::compile(session.program(), session.source()).expect("compile ok");
     let globals = test_globals();
     let mut vm = Vm::new(globals);
-    vm.run(chunk).expect("run ok");
+    vm.run(code).expect("run ok");
 
     let method_result = vm.get_global("method_result");
     let method_this = vm.get_global("method_this");
@@ -6717,11 +6749,11 @@ mod test {
       "#
     );
     let session = Parser::parse_source(src).expect("parse cross-realm function");
-    let chunk =
+    let code =
       compiler::compile(session.program(), session.source()).expect("compile cross-realm function");
     let globals = crate::test262_support::make_test262_globals();
     let mut vm = Vm::new(globals);
-    vm.run(chunk).expect("run cross-realm function");
+    vm.run(code).expect("run cross-realm function");
 
     assert_eq!(
       vm.get_global("implicitThisUsesOtherRealm"),
@@ -6739,7 +6771,7 @@ mod test {
   }
 
   #[test]
-  fn risc_super_construct_initializes_derived_this() {
+  fn super_construct_initializes_derived_this() {
     let source = crate::js!(
       r#"
       class Base { constructor(value) { this.value = value; } }
@@ -6748,10 +6780,10 @@ mod test {
     "#
     );
     let session = Parser::parse_source(source).expect("parse ok");
-    let chunk = compiler::compile(session.program(), session.source()).expect("compile ok");
+    let code = compiler::compile(session.program(), session.source()).expect("compile ok");
     let globals = test_globals();
     let mut vm = Vm::new(globals);
-    vm.run(chunk).expect("run ok");
+    vm.run(code).expect("run ok");
     assert!(matches!(
       vm.get_global("derived_value"),
       Some(Value::Number(value)) if (value - 5.0).abs() < f64::EPSILON
@@ -6775,11 +6807,11 @@ mod test {
       "#
     );
     let session = Parser::parse_source(source).expect("parse repeated super call");
-    let chunk =
+    let code =
       compiler::compile(session.program(), session.source()).expect("compile repeated super call");
     let globals = test_globals();
     let mut vm = Vm::new(globals);
-    vm.run(chunk).expect("run repeated super call");
+    vm.run(code).expect("run repeated super call");
     assert_eq!(
       vm.get_global("secondSuperIsReferenceError"),
       Some(Value::Bool(true))
@@ -6833,10 +6865,10 @@ mod test {
   fn array_reduce_without_initial_value_throws_on_empty_array() {
     let src = crate::js!(r#"[].reduce(function(acc, value) { return acc + value; });"#);
     let session = Parser::parse_source(src).expect("parse ok");
-    let chunk = compiler::compile(session.program(), session.source()).expect("compile ok");
+    let code = compiler::compile(session.program(), session.source()).expect("compile ok");
     let globals = test_globals();
     let mut vm = Vm::new(globals);
-    let err = vm.run(chunk).expect_err("reduce should throw");
+    let err = vm.run(code).expect_err("reduce should throw");
     assert!(
       err
         .to_string()
@@ -6857,10 +6889,10 @@ mod test {
         "#
     );
     let session = Parser::parse_source(src).expect("parse ok");
-    let chunk = compiler::compile(session.program(), session.source()).expect("compile ok");
+    let code = compiler::compile(session.program(), session.source()).expect("compile ok");
     let globals = test_globals();
     let mut vm = Vm::new(globals);
-    vm.run(chunk).expect("run ok");
+    vm.run(code).expect("run ok");
     match vm.get_global("keys") {
       Some(Value::Array(arr, _)) => {
         let values: Vec<String> = arr
@@ -7020,10 +7052,10 @@ mod test {
         "#
     );
     let session = Parser::parse_source(src).expect("parse ok");
-    let chunk = compiler::compile(session.program(), session.source()).expect("compile ok");
+    let code = compiler::compile(session.program(), session.source()).expect("compile ok");
     let globals = test_globals();
     let mut vm = Vm::new(globals);
-    vm.run(chunk).expect("run ok");
+    vm.run(code).expect("run ok");
 
     match vm.get_global("keys") {
       Some(Value::String(s)) => {

@@ -5,11 +5,11 @@ use super::*;
 impl Vm {
   pub(crate) fn try_host_baseline_call(
     &mut self,
-    proto: &Rc<crate::bytecode::FunctionProto>,
+    proto: &Rc<crate::bytecode::Function>,
     this_value: &Value,
     arguments: &[Value],
   ) -> Result<Option<Value>, RuntimeError> {
-    let function = self.function_id_for_chunk(&proto.chunk);
+    let function = self.function_id_for_chunk(&proto.code);
     if !self
       .profiling
       .functions
@@ -18,8 +18,7 @@ impl Vm {
     {
       return Ok(None);
     }
-    let mut registers: [Value; 16] = std::array::from_fn(|_| Value::Undefined);
-    registers[1] = this_value.clone();
+    let mut registers = RegisterState::call_registers(this_value.clone(), arguments);
     let mut locals = [];
     let vm = self as *mut Vm;
     let outcome = self
@@ -55,7 +54,7 @@ impl Vm {
   pub(super) fn try_direct_baseline_call(
     &mut self,
     call_site: usize,
-    proto: &Rc<crate::bytecode::FunctionProto>,
+    proto: &Rc<crate::bytecode::Function>,
     this_value: &Value,
     arguments: &[Value],
   ) -> Result<Option<Value>, RuntimeError> {
@@ -96,16 +95,16 @@ impl Vm {
         return Ok(Some(result));
       }
     }
-    let chunk = &proto.chunk;
+    let code = &proto.code;
     let parameter_count = proto.arity;
-    let function = self.function_id_for_chunk(chunk);
+    let function = self.function_id_for_chunk(code);
     if arguments.len() >= 2
       && matches!(arguments[0], Value::Number(_))
       && matches!(arguments[1], Value::Number(_))
       && let Some(target) = self
         .profiling
         .jit
-        .optimizing_numeric_binary_target(function, chunk, parameter_count)
+        .optimizing_numeric_binary_target(function, code, parameter_count)
         .map_err(RuntimeError::from)?
     {
       if let Some(slot) = self
@@ -187,8 +186,7 @@ impl Vm {
         .saturating_add(1);
       return Ok(Some(result));
     }
-    let mut registers: [Value; 16] = std::array::from_fn(|_| Value::Undefined);
-    registers[1] = this_value.clone();
+    let mut registers = RegisterState::call_registers(this_value.clone(), arguments);
     let mut locals = [];
     let vm = self as *mut Vm;
     let outcome = self
@@ -293,7 +291,7 @@ impl Vm {
         function,
         crate::vm::jit::BaselineInvocation {
           vm,
-          start_pc: self.execution.active.ip,
+          start_pc: self.execution.active.pc,
           registers,
           arguments: &[],
           locals: &mut self.execution.active.locals,
@@ -324,7 +322,7 @@ impl Vm {
           .jit_stats
           .interpreter_resumes
           .saturating_add(1);
-        self.execution.active.ip = resume_pc;
+        self.execution.active.pc = resume_pc;
         Ok(None)
       }
       crate::vm::jit::BaselineOutcome::Unavailable => Ok(None),
@@ -349,9 +347,9 @@ impl Vm {
       .entry(function)
       .or_default()
       .baseline = crate::vm::jit::BaselineState::Compiling;
-    let chunk = self
+    let code = self
       .profiling
-      .chunk_ids
+      .code_ids
       .iter()
       .find_map(|(identity, id)| {
         (*id == function)
@@ -363,13 +361,13 @@ impl Vm {
       .functions
       .get(&function)
       .map_or(0, |profile| profile.parameter_count);
-    let state = chunk
+    let state = code
       .as_deref()
-      .and_then(|chunk| {
+      .and_then(|code| {
         self
           .profiling
           .jit
-          .install_const_prefix(function, chunk, parameter_count)
+          .install_const_prefix(function, code, parameter_count)
           .ok()
       })
       .map_or(
@@ -400,8 +398,8 @@ impl Vm {
 
   pub(super) fn try_run_baseline(
     &mut self,
-    state: &mut RiscExecutionState,
-  ) -> Result<Option<RiscRunOutcome>, RuntimeError> {
+    state: &mut RegisterState,
+  ) -> Result<Option<RunOutcome>, RuntimeError> {
     let function = self.active_function_id();
     let baseline_ready = self
       .profiling
@@ -419,7 +417,7 @@ impl Vm {
         function,
         crate::vm::jit::BaselineInvocation {
           vm,
-          start_pc: self.execution.active.ip,
+          start_pc: self.execution.active.pc,
           registers: &mut state.registers,
           arguments: &[],
           locals: &mut self.execution.active.locals,
@@ -441,7 +439,7 @@ impl Vm {
           .jit_stats
           .baseline_returns
           .saturating_add(1);
-        Ok(Some(RiscRunOutcome::Return(result)))
+        Ok(Some(RunOutcome::Return(result)))
       }
       crate::vm::jit::BaselineOutcome::Interpret { resume_pc } => {
         self.profiling.jit_stats.interpreter_resumes = self
@@ -449,11 +447,11 @@ impl Vm {
           .jit_stats
           .interpreter_resumes
           .saturating_add(1);
-        self.execution.active.ip = resume_pc;
+        self.execution.active.pc = resume_pc;
         Ok(None)
       }
       crate::vm::jit::BaselineOutcome::Invalidated { resume_pc } => {
-        self.execution.active.ip = resume_pc;
+        self.execution.active.pc = resume_pc;
         Ok(None)
       }
       crate::vm::jit::BaselineOutcome::Unavailable => Ok(None),
@@ -462,13 +460,13 @@ impl Vm {
 
   fn function_id_for_chunk(
     &mut self,
-    chunk: &std::sync::Arc<crate::bytecode::Chunk>,
+    code: &std::sync::Arc<crate::bytecode::Chunk>,
   ) -> crate::vm::jit::FunctionId {
-    let chunk_identity = std::sync::Arc::as_ptr(chunk) as usize;
+    let code_identity = std::sync::Arc::as_ptr(code) as usize;
     if let Some(id) = self
       .profiling
-      .chunk_ids
-      .get(&chunk_identity)
+      .code_ids
+      .get(&code_identity)
       .copied()
     {
       return id;
@@ -478,24 +476,21 @@ impl Vm {
     self
       .profiling
       .chunk_refs
-      .insert(chunk_identity, std::sync::Arc::clone(chunk));
-    self
-      .profiling
-      .chunk_ids
-      .insert(chunk_identity, id);
+      .insert(code_identity, std::sync::Arc::clone(code));
+    self.profiling.code_ids.insert(code_identity, id);
     id
   }
 
   pub(super) fn active_function_id(&mut self) -> crate::vm::jit::FunctionId {
-    let identity = Arc::as_ptr(&self.execution.active.chunk) as usize;
-    if self.profiling.active_function_chunk == identity
+    let identity = Arc::as_ptr(&self.execution.active.code) as usize;
+    if self.profiling.active_function_identity == identity
       && let Some(function) = self.profiling.active_function_id
     {
       return function;
     }
-    let chunk = std::sync::Arc::clone(&self.execution.active.chunk);
-    let function = self.function_id_for_chunk(&chunk);
-    self.profiling.active_function_chunk = identity;
+    let code = std::sync::Arc::clone(&self.execution.active.code);
+    let function = self.function_id_for_chunk(&code);
+    self.profiling.active_function_identity = identity;
     self.profiling.active_function_id = Some(function);
     function
   }
@@ -504,14 +499,14 @@ impl Vm {
     &mut self,
     pc: usize,
   ) {
-    let chunk_identity = Arc::as_ptr(&self.execution.active.chunk) as usize;
-    if self.profiling.last_hot_chunk == chunk_identity
+    let code_identity = Arc::as_ptr(&self.execution.active.code) as usize;
+    if self.profiling.last_hot_function == code_identity
       || self
         .profiling
-        .hot_chunks
-        .contains(&chunk_identity)
+        .hot_functions
+        .contains(&code_identity)
     {
-      self.profiling.last_hot_chunk = chunk_identity;
+      self.profiling.last_hot_function = code_identity;
       return;
     }
     let function_id = self.active_function_id();
@@ -522,28 +517,28 @@ impl Vm {
       .or_default();
     profile.record_backedge(pc);
     if matches!(profile.baseline, crate::vm::jit::BaselineState::Requested) {
-      self.profiling.hot_chunks.insert(chunk_identity);
-      self.profiling.last_hot_chunk = chunk_identity;
+      self.profiling.hot_functions.insert(code_identity);
+      self.profiling.last_hot_function = code_identity;
     }
   }
 
   pub(super) fn site_action(&mut self) -> SiteAction {
-    let identity = Arc::as_ptr(&self.execution.active.chunk) as usize;
+    let identity = Arc::as_ptr(&self.execution.active.code) as usize;
     if self.caches.active_quickened_chunk != identity {
       let sites = if let Some(plan) = self.caches.quickened.get(&identity) {
         self.caches.active_direct_calls = Rc::clone(&plan.direct_calls);
         self.caches.active_regions = Arc::clone(&plan.regions);
         Arc::clone(&plan.sites)
       } else {
-        let chunk = Arc::clone(&self.execution.active.chunk);
-        let (sites, regions) = build_quickened_sites(&chunk, self.caches.native_regions_enabled);
+        let code = Arc::clone(&self.execution.active.code);
+        let (sites, regions) = build_quickened_sites(&code, self.caches.native_regions_enabled);
         let sites = Arc::<[SiteAction]>::from(sites);
         let regions = Arc::<[crate::vm::region::NativeRegion]>::from(regions);
-        let direct_calls = Rc::new(RefCell::new(vec![None; chunk.code.len()]));
+        let direct_calls = Rc::new(RefCell::new(vec![None; code.words.len()]));
         self.caches.quickened.insert(
           identity,
           QuickenedPlan {
-            _chunk: chunk,
+            _chunk: code,
             sites: Arc::clone(&sites),
             regions: Arc::clone(&regions),
             direct_calls: Rc::clone(&direct_calls),
@@ -559,7 +554,7 @@ impl Vm {
     self
       .caches
       .active_quickened_sites
-      .get(self.execution.active.ip)
+      .get(self.execution.active.pc)
       .copied()
       .unwrap_or(SiteAction::Interpret)
   }

@@ -10,7 +10,7 @@
 //! The declaration phase compiles all declaration-type statements into bytecode,
 //! managing function closures, parameter initialization, and class instantiation.
 
-use super::emit::FrontendOp as Op;
+use super::emit::LoweringOpcode;
 use crate::Compiler;
 use crate::value::Value;
 use oxc_ast::ast as oast;
@@ -21,7 +21,7 @@ const LINE: u32 = 1;
 impl Compiler {
   fn emit_with_env_pops(&mut self) {
     for _ in 0..self.with_depth {
-      self.emit(Op::PopEnv, LINE);
+      self.emit(LoweringOpcode::PopEnv, LINE);
     }
   }
 
@@ -30,7 +30,7 @@ impl Compiler {
     depth: usize,
   ) {
     for _ in depth..self.handler_depth {
-      self.emit(Op::PopHandler, LINE);
+      self.emit(LoweringOpcode::PopHandler, LINE);
     }
   }
 
@@ -57,8 +57,8 @@ impl Compiler {
     } else {
       "finally_break"
     });
-    self.emit(Op::True, LINE);
-    self.emit(Op::StoreLocal, LINE);
+    self.emit(LoweringOpcode::True, LINE);
+    self.emit(LoweringOpcode::StoreLocal, LINE);
     self.emit_slot(flag_slot, LINE);
     let target_depth = if label_index.is_some() {
       loop_index
@@ -68,8 +68,8 @@ impl Compiler {
     self.emit_iterator_closes_above(target_depth)?;
     self.emit_handler_pops_to(self.finally_patches[index].handler_depth);
     self.emit_with_env_pops();
-    self.emit(Op::Jump, LINE);
-    let patch_pos = self.current_ip();
+    self.emit(LoweringOpcode::Jump, LINE);
+    let patch_pos = self.current_pc();
     self.emit_byte(0, LINE);
     self.emit_byte(0, LINE);
     let crossed: Vec<usize> = self.finally_patches[..=index]
@@ -109,14 +109,14 @@ impl Compiler {
       .control_actions
       .clone();
     for action in actions {
-      self.emit(Op::LoadLocal, LINE);
+      self.emit(LoweringOpcode::LoadLocal, LINE);
       self.emit_slot(action.flag_slot, LINE);
-      self.emit(Op::JumpIfFalse, LINE);
-      let skip = self.current_ip();
+      self.emit(LoweringOpcode::JumpIfFalse, LINE);
+      let skip = self.current_pc();
       self.emit_byte(0, LINE);
       self.emit_byte(0, LINE);
-      self.emit(Op::Jump, LINE);
-      let patch_pos = self.current_ip();
+      self.emit(LoweringOpcode::Jump, LINE);
+      let patch_pos = self.current_pc();
       self.emit_byte(0, LINE);
       self.emit_byte(0, LINE);
       if let Some(next_finally) = action.next_finally {
@@ -156,10 +156,10 @@ impl Compiler {
       .map(|state| state.iterator_slot)
       .collect::<Vec<_>>();
     for slot in slots {
-      self.emit(Op::LoadLocal, LINE);
+      self.emit(LoweringOpcode::LoadLocal, LINE);
       self.emit_slot(slot, LINE);
-      self.emit(Op::IteratorClose, LINE);
-      self.emit(Op::Discard, LINE);
+      self.emit(LoweringOpcode::IteratorClose, LINE);
+      self.emit(LoweringOpcode::Discard, LINE);
     }
     Ok(())
   }
@@ -183,8 +183,8 @@ impl Compiler {
       }
 
       let (proto, _env_len) = self.compile_function(&fname, None, f, None, false)?;
-      let idx = self.chunk.add_function(proto);
-      self.emit(Op::MakeClosure, LINE);
+      let idx = self.code.add_function(proto);
+      self.emit(LoweringOpcode::MakeClosure, LINE);
       self.emit_function_index(idx, LINE);
       let slot = if let Some(s) = self.resolve_local(&fname) {
         s
@@ -197,9 +197,9 @@ impl Compiler {
       }
 
       if self.local_mirrors_global(slot) {
-        self.emit(Op::Copy, LINE);
+        self.emit(LoweringOpcode::Copy, LINE);
       }
-      self.emit(Op::StoreLocal, LINE);
+      self.emit(LoweringOpcode::StoreLocal, LINE);
       self.emit_slot(slot, LINE);
       if self.local_mirrors_global(slot) {
         self.emit_set_global_name(&fname);
@@ -209,7 +209,7 @@ impl Compiler {
         .as_ref()
         .is_some_and(|c| c.exports.contains(&fname));
       if is_exported {
-        self.emit(Op::LoadLocal, LINE);
+        self.emit(LoweringOpcode::LoadLocal, LINE);
         self.emit_slot(slot, LINE);
         self.emit_set_own_module_export(&fname)?;
       }
@@ -270,7 +270,7 @@ impl Compiler {
             )));
           };
           let descriptor = self.module_export_descriptor_index(module_index, "*")?;
-          self.emit(Op::GetModuleExport, LINE);
+          self.emit(LoweringOpcode::GetModuleExport, LINE);
           self.emit_byte(descriptor.to_le_bytes()[0], LINE);
           self.emit_byte(descriptor.to_le_bytes()[1], LINE);
           self.emit_set_own_module_export(&export_name)?;
@@ -313,8 +313,8 @@ impl Compiler {
             } else {
               let fname = "default".to_string();
               let (proto, _env_len) = self.compile_function(&fname, None, f, None, false)?;
-              let idx = self.chunk.add_function(proto);
-              self.emit(Op::MakeClosure, LINE);
+              let idx = self.code.add_function(proto);
+              self.emit(LoweringOpcode::MakeClosure, LINE);
               self.emit_function_index(idx, LINE);
             }
           }
@@ -337,7 +337,7 @@ impl Compiler {
                 self.emit_get_builtin_name("setFunctionNameIfAnonymous");
                 self.compile_expr_oast(expr)?;
                 self.emit_constant(Value::String("default".into()), LINE);
-                self.emit(Op::Call, LINE);
+                self.emit(LoweringOpcode::Call, LINE);
                 self.emit_byte(2, LINE);
               } else {
                 self.compile_expr_oast(expr)?;
@@ -357,10 +357,10 @@ impl Compiler {
       OStmt::ExpressionStatement(e) => {
         self.compile_expr_oast(&e.expression)?;
         if let Some(slot) = completion_slot {
-          self.emit(Op::StoreLocal, LINE);
+          self.emit(LoweringOpcode::StoreLocal, LINE);
           self.emit_slot(slot, LINE);
         } else if !skip_pop {
-          self.emit(Op::Discard, LINE);
+          self.emit(LoweringOpcode::Discard, LINE);
         }
       }
       OStmt::LabeledStatement(l) => {
@@ -396,7 +396,7 @@ impl Compiler {
           ));
         }
         if !label_state.break_patches.is_empty() {
-          let target = self.current_ip();
+          let target = self.current_pc();
           self.patch_jump_list(label_state.break_patches, target);
         }
       }
@@ -407,10 +407,10 @@ impl Compiler {
           ));
         }
         self.compile_expr_oast(&w.object)?;
-        self.emit(Op::PushWithEnv, LINE);
+        self.emit(LoweringOpcode::PushWithEnv, LINE);
         self.with_depth += 1;
-        self.emit(Op::PushHandler, LINE);
-        let handler_jump = self.current_ip();
+        self.emit(LoweringOpcode::PushHandler, LINE);
+        let handler_jump = self.current_pc();
         self.emit_byte(0, LINE);
         self.emit_byte(0, LINE);
 
@@ -422,20 +422,20 @@ impl Compiler {
         self.compile_statement_oast_with_mode(&w.body, false, completion_slot)?;
         self.exit_scope();
 
-        self.emit(Op::PopHandler, LINE);
-        self.emit(Op::PopEnv, LINE);
+        self.emit(LoweringOpcode::PopHandler, LINE);
+        self.emit(LoweringOpcode::PopEnv, LINE);
         self.with_depth = self.with_depth.saturating_sub(1);
-        self.emit(Op::Jump, LINE);
-        let skip_handler_jump = self.current_ip();
+        self.emit(LoweringOpcode::Jump, LINE);
+        let skip_handler_jump = self.current_pc();
         self.emit_byte(0, LINE);
         self.emit_byte(0, LINE);
 
-        let _handler_start = self.current_ip();
+        let _handler_start = self.current_pc();
         self.patch_jump(handler_jump);
 
-        self.emit(Op::PopEnv, LINE);
-        self.emit(Op::Throw, LINE);
-        let _after_handler = self.current_ip();
+        self.emit(LoweringOpcode::PopEnv, LINE);
+        self.emit(LoweringOpcode::Throw, LINE);
+        let _after_handler = self.current_pc();
 
         self.patch_jump(skip_handler_jump);
       }
@@ -450,8 +450,8 @@ impl Compiler {
         if let Some(jump_over) = self.try_emit_compare_jump_if_false(&i.test)? {
           self.compile_statement_oast_with_mode(&i.consequent, false, completion_slot)?;
           if let Some(alt) = &i.alternate {
-            self.emit(Op::Jump, LINE);
-            let jump_else = self.current_ip();
+            self.emit(LoweringOpcode::Jump, LINE);
+            let jump_else = self.current_pc();
             self.emit_byte(0, LINE);
             self.emit_byte(0, LINE);
             self.patch_jump(jump_over);
@@ -462,14 +462,14 @@ impl Compiler {
           }
         } else {
           self.compile_expr_oast(&i.test)?;
-          self.emit(Op::JumpIfFalse, LINE);
-          let jump_over = self.current_ip();
+          self.emit(LoweringOpcode::JumpIfFalse, LINE);
+          let jump_over = self.current_pc();
           self.emit_byte(0, LINE);
           self.emit_byte(0, LINE);
           self.compile_statement_oast_with_mode(&i.consequent, false, completion_slot)?;
           if let Some(alt) = &i.alternate {
-            self.emit(Op::Jump, LINE);
-            let jump_else = self.current_ip();
+            self.emit(LoweringOpcode::Jump, LINE);
+            let jump_else = self.current_pc();
             self.emit_byte(0, LINE);
             self.emit_byte(0, LINE);
             self.patch_jump(jump_over);
@@ -485,7 +485,7 @@ impl Compiler {
         let discr_name = format!("\0switch_discriminant_{}", self.locals.len());
         let discr_slot =
           self.add_local_in_scope(self.current_function_scope_index(), discr_name, None, false);
-        self.emit(Op::StoreLocal, LINE);
+        self.emit(LoweringOpcode::StoreLocal, LINE);
         self.emit_slot(discr_slot, LINE);
 
         self.enter_block_scope();
@@ -499,16 +499,16 @@ impl Compiler {
         let mut default_index: Option<usize> = None;
         for (case_idx, case) in s.cases.iter().enumerate() {
           if let Some(test) = &case.test {
-            self.emit(Op::LoadLocal, LINE);
+            self.emit(LoweringOpcode::LoadLocal, LINE);
             self.emit_slot(discr_slot, LINE);
             self.compile_expr_oast(test)?;
-            self.emit_with_payload(Op::CompareJump, 6, LINE);
-            let skip_jump = self.current_ip();
+            self.emit_with_payload(LoweringOpcode::CompareJump, 6, LINE);
+            let skip_jump = self.current_pc();
             self.emit_byte(0, LINE);
             self.emit_byte(0, LINE);
 
-            self.emit(Op::Jump, LINE);
-            let body_jump = self.current_ip();
+            self.emit(LoweringOpcode::Jump, LINE);
+            let body_jump = self.current_pc();
             self.emit_byte(0, LINE);
             self.emit_byte(0, LINE);
             case_body_jumps.push((case_idx, body_jump));
@@ -519,19 +519,19 @@ impl Compiler {
           }
         }
 
-        self.emit(Op::Jump, LINE);
-        let no_match_jump = self.current_ip();
+        self.emit(LoweringOpcode::Jump, LINE);
+        let no_match_jump = self.current_pc();
         self.emit_byte(0, LINE);
         self.emit_byte(0, LINE);
 
         let mut case_starts: Vec<usize> = vec![0; s.cases.len()];
         for (case_idx, case) in s.cases.iter().enumerate() {
-          case_starts[case_idx] = self.current_ip();
+          case_starts[case_idx] = self.current_pc();
           for stmt in &case.consequent {
             self.compile_statement_oast_with_mode(stmt, false, completion_slot)?;
           }
         }
-        let switch_end = self.current_ip();
+        let switch_end = self.current_pc();
 
         for (case_idx, jump_pos) in case_body_jumps {
           self.patch_jump_to_target(jump_pos, case_starts[case_idx]);
@@ -556,18 +556,18 @@ impl Compiler {
           slot
         } else {
           let slot = self.alloc_temp_local("loop_result");
-          self.emit(Op::Undefined, LINE);
-          self.emit(Op::StoreLocal, LINE);
+          self.emit(LoweringOpcode::Undefined, LINE);
+          self.emit(LoweringOpcode::StoreLocal, LINE);
           self.emit_slot(slot, LINE);
           slot
         };
-        let loop_start = self.current_ip();
+        let loop_start = self.current_pc();
         let exit_jump = if let Some(jump_over) = self.try_emit_compare_jump_if_false(&w.test)? {
           Some(jump_over)
         } else {
           self.compile_expr_oast(&w.test)?;
-          self.emit(Op::JumpIfFalse, LINE);
-          let exit_jump = self.current_ip();
+          self.emit(LoweringOpcode::JumpIfFalse, LINE);
+          let exit_jump = self.current_pc();
           self.emit_byte(0, LINE);
           self.emit_byte(0, LINE);
           Some(exit_jump)
@@ -575,21 +575,21 @@ impl Compiler {
         self.enter_block_scope();
         self.compile_statement_oast_with_mode(&w.body, false, Some(loop_completion_slot))?;
         self.exit_scope();
-        self.emit(Op::Jump, LINE);
-        let _back_jump_pos = self.current_ip();
-        let back_offset = loop_start as isize - (self.current_ip() as isize);
+        self.emit(LoweringOpcode::Jump, LINE);
+        let _back_jump_pos = self.current_pc();
+        let back_offset = loop_start as isize - (self.current_pc() as isize);
         self.emit_short_signed(back_offset, LINE);
         if let Some(patches) = self.continue_patches.pop() {
           for patch_pos in patches {
             self.patch_jump_to_target(patch_pos, loop_start);
           }
         }
-        let cleanup_start = self.current_ip();
+        let cleanup_start = self.current_pc();
         if owns_completion_slot {
           if let Some(exit_jump) = exit_jump {
             self.patch_jump_to_target(exit_jump, cleanup_start);
           }
-          self.emit(Op::LoadLocal, LINE);
+          self.emit(LoweringOpcode::LoadLocal, LINE);
           self.emit_slot(loop_completion_slot, LINE);
         } else if let Some(exit_jump) = exit_jump {
           self.patch_jump(exit_jump);
@@ -626,38 +626,38 @@ impl Compiler {
           slot
         } else {
           let slot = self.alloc_temp_local("loop_result");
-          self.emit(Op::Undefined, LINE);
-          self.emit(Op::StoreLocal, LINE);
+          self.emit(LoweringOpcode::Undefined, LINE);
+          self.emit(LoweringOpcode::StoreLocal, LINE);
           self.emit_slot(slot, LINE);
           slot
         };
-        let loop_start = self.current_ip();
+        let loop_start = self.current_pc();
         self.enter_block_scope();
         self.compile_statement_oast_with_mode(&d.body, false, Some(loop_completion_slot))?;
         self.exit_scope();
-        let test_start = self.current_ip();
+        let test_start = self.current_pc();
         let exit_jump = if let Some(jump_over) = self.try_emit_compare_jump_if_false(&d.test)? {
           Some(jump_over)
         } else {
           self.compile_expr_oast(&d.test)?;
-          self.emit(Op::JumpIfFalse, LINE);
-          let exit_jump = self.current_ip();
+          self.emit(LoweringOpcode::JumpIfFalse, LINE);
+          let exit_jump = self.current_pc();
           self.emit_byte(0, LINE);
           self.emit_byte(0, LINE);
           Some(exit_jump)
         };
-        self.emit(Op::Jump, LINE);
-        let _back_jump_pos = self.current_ip();
-        let back_offset = loop_start as isize - (self.current_ip() as isize);
+        self.emit(LoweringOpcode::Jump, LINE);
+        let _back_jump_pos = self.current_pc();
+        let back_offset = loop_start as isize - (self.current_pc() as isize);
         self.emit_short_signed(back_offset, LINE);
         if let Some(patches) = self.continue_patches.pop() {
           for patch_pos in patches {
             self.patch_jump_to_target(patch_pos, test_start);
           }
         }
-        let cleanup_start = self.current_ip();
+        let cleanup_start = self.current_pc();
         if owns_completion_slot {
-          self.emit(Op::LoadLocal, LINE);
+          self.emit(LoweringOpcode::LoadLocal, LINE);
           self.emit_slot(loop_completion_slot, LINE);
           if let Some(exit_jump) = exit_jump {
             self.patch_jump_to_target(exit_jump, cleanup_start);
@@ -750,7 +750,7 @@ impl Compiler {
                   if let Some(initializer) = &declaration.init {
                     self.compile_expr_oast(initializer)?;
                   } else {
-                    self.emit(Op::Undefined, LINE);
+                    self.emit(LoweringOpcode::Undefined, LINE);
                   }
                   if matches!(
                     v.kind,
@@ -760,9 +760,9 @@ impl Compiler {
                     per_iteration_slots.push(slot);
                   }
                   if mirror_global {
-                    self.emit(Op::Copy, LINE);
+                    self.emit(LoweringOpcode::Copy, LINE);
                   }
-                  self.emit(Op::StoreLocal, LINE);
+                  self.emit(LoweringOpcode::StoreLocal, LINE);
                   self.emit_slot(slot, LINE);
                   if mirror_global {
                     self.emit_set_global_name(&name);
@@ -794,24 +794,24 @@ impl Compiler {
                 crate::errors::CompilerError::from("unsupported for-loop initializer")
               })?;
               self.compile_expr_oast(expr)?;
-              self.emit(Op::Discard, LINE);
+              self.emit(LoweringOpcode::Discard, LINE);
             }
           }
         }
 
         for &slot in &per_iteration_slots {
-          self.emit(Op::CloneLocalCell, LINE);
+          self.emit(LoweringOpcode::CloneLocalCell, LINE);
           self.emit_slot(slot, LINE);
         }
 
-        let loop_start = self.current_ip();
+        let loop_start = self.current_pc();
         let exit_jump = if let Some(test) = &f.test {
           if let Some(jump_over) = self.try_emit_compare_jump_if_false(test)? {
             Some(jump_over)
           } else {
             self.compile_expr_oast(test)?;
-            self.emit(Op::JumpIfFalse, LINE);
-            let exit_jump = self.current_ip();
+            self.emit(LoweringOpcode::JumpIfFalse, LINE);
+            let exit_jump = self.current_pc();
             self.emit_byte(0, LINE);
             self.emit_byte(0, LINE);
             Some(exit_jump)
@@ -824,7 +824,7 @@ impl Compiler {
         self.compile_statement_oast_with_mode(&f.body, false, completion_slot)?;
         self.exit_scope();
 
-        let update_start = self.current_ip();
+        let update_start = self.current_pc();
         if let Some(patches) = self.continue_patches.pop() {
           for patch_pos in patches {
             self.patch_jump_to_target(patch_pos, update_start);
@@ -832,23 +832,23 @@ impl Compiler {
         }
 
         for &slot in &per_iteration_slots {
-          self.emit(Op::CloneLocalCell, LINE);
+          self.emit(LoweringOpcode::CloneLocalCell, LINE);
           self.emit_slot(slot, LINE);
         }
 
         if let Some(update) = &f.update {
           self.compile_expr_oast(update)?;
-          self.emit(Op::Discard, LINE);
+          self.emit(LoweringOpcode::Discard, LINE);
         }
 
-        self.emit(Op::Jump, LINE);
-        let back_offset = loop_start as isize - (self.current_ip() as isize);
+        self.emit(LoweringOpcode::Jump, LINE);
+        let back_offset = loop_start as isize - (self.current_pc() as isize);
         self.emit_short_signed(back_offset, LINE);
 
         if let Some(exit_jump) = exit_jump {
           self.patch_jump(exit_jump);
         }
-        let loop_end = self.current_ip();
+        let loop_end = self.current_pc();
         if let Some(patches) = self.break_patches.pop() {
           for patch_pos in patches {
             self.patch_jump_to_target(patch_pos, loop_end);
@@ -867,7 +867,7 @@ impl Compiler {
           None
         };
         if let Some((continue_patches, break_patches)) = label_patches {
-          let loop_end = self.current_ip();
+          let loop_end = self.current_pc();
           self.patch_jump_list(continue_patches, update_start);
           self.patch_jump_list(break_patches, loop_end);
         }
@@ -884,8 +884,8 @@ impl Compiler {
           slot
         } else {
           let slot = self.alloc_temp_local("loop_result");
-          self.emit(Op::Undefined, LINE);
-          self.emit(Op::StoreLocal, LINE);
+          self.emit(LoweringOpcode::Undefined, LINE);
+          self.emit(LoweringOpcode::StoreLocal, LINE);
           self.emit_slot(slot, LINE);
           slot
         };
@@ -913,7 +913,7 @@ impl Compiler {
             if matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Const) {
               self.mark_local_immutable(slot);
             }
-            self.emit(Op::ResetLocalCell, LINE);
+            self.emit(LoweringOpcode::ResetLocalCell, LINE);
             self.emit_slot(slot, LINE);
           }
         }
@@ -921,11 +921,11 @@ impl Compiler {
 
         self.compile_expr_oast(&f.right)?;
         if f.r#await {
-          self.emit(Op::GetAsyncIterator, LINE);
+          self.emit(LoweringOpcode::GetAsyncIterator, LINE);
         } else {
           self.emit_get_builtin_name("getIterator");
-          self.emit(Op::Exchange, LINE);
-          self.emit(Op::Call, LINE);
+          self.emit(LoweringOpcode::Exchange, LINE);
+          self.emit(LoweringOpcode::Call, LINE);
           self.emit_byte(1, LINE);
         }
 
@@ -935,38 +935,38 @@ impl Compiler {
           None,
           false,
         );
-        self.emit(Op::StoreLocal, LINE);
+        self.emit(LoweringOpcode::StoreLocal, LINE);
         self.emit_slot(iterator_slot, LINE);
 
         let thrown_slot = self.alloc_temp_local("forof_thrown");
         let iterator_close_active_slot = self.alloc_temp_local("forof_close_active");
-        self.emit(Op::False, LINE);
-        self.emit(Op::StoreLocal, LINE);
+        self.emit(LoweringOpcode::False, LINE);
+        self.emit(LoweringOpcode::StoreLocal, LINE);
         self.emit_slot(iterator_close_active_slot, LINE);
-        self.emit(Op::PushHandler, LINE);
-        let handler_jump = self.current_ip();
+        self.emit(LoweringOpcode::PushHandler, LINE);
+        let handler_jump = self.current_pc();
         self.emit_byte(0, LINE);
         self.emit_byte(0, LINE);
 
-        let loop_start = self.current_ip();
+        let loop_start = self.current_pc();
 
-        self.emit(Op::False, LINE);
-        self.emit(Op::StoreLocal, LINE);
+        self.emit(LoweringOpcode::False, LINE);
+        self.emit(LoweringOpcode::StoreLocal, LINE);
         self.emit_slot(iterator_close_active_slot, LINE);
-        self.emit(Op::LoadLocal, LINE);
+        self.emit(LoweringOpcode::LoadLocal, LINE);
         self.emit_slot(iterator_slot, LINE);
-        self.emit(Op::IteratorNext, LINE);
-        self.emit(Op::Copy, LINE);
+        self.emit(LoweringOpcode::IteratorNext, LINE);
+        self.emit(LoweringOpcode::Copy, LINE);
         self.emit_constant(Value::String("done".to_string().into()), LINE);
-        self.emit(Op::GetProperty, LINE);
-        self.emit(Op::JumpIfTrue, LINE);
-        let exit_jump = self.current_ip() - 1;
+        self.emit(LoweringOpcode::GetProperty, LINE);
+        self.emit(LoweringOpcode::JumpIfTrue, LINE);
+        let exit_jump = self.current_pc() - 1;
         self.emit_byte(0, LINE);
         self.emit_byte(0, LINE);
         self.emit_constant(Value::String("value".to_string().into()), LINE);
-        self.emit(Op::GetProperty, LINE);
-        self.emit(Op::True, LINE);
-        self.emit(Op::StoreLocal, LINE);
+        self.emit(LoweringOpcode::GetProperty, LINE);
+        self.emit(LoweringOpcode::True, LINE);
+        self.emit(LoweringOpcode::StoreLocal, LINE);
         self.emit_slot(iterator_close_active_slot, LINE);
 
         match &f.left {
@@ -987,7 +987,7 @@ impl Compiler {
               names.sort();
               for name in &names {
                 if let Some(slot) = self.resolve_local(name) {
-                  self.emit(Op::ResetLocalCell, LINE);
+                  self.emit(LoweringOpcode::ResetLocalCell, LINE);
                   self.emit_slot(slot, LINE);
                 }
               }
@@ -1034,19 +1034,19 @@ impl Compiler {
           }
         }
 
-        self.emit(Op::Jump, LINE);
-        let back_offset = loop_start as isize - (self.current_ip() as isize);
+        self.emit(LoweringOpcode::Jump, LINE);
+        let back_offset = loop_start as isize - (self.current_pc() as isize);
         self.emit_short_signed(back_offset, LINE);
 
         self.patch_jump(exit_jump);
-        self.emit(Op::Discard, LINE);
-        self.emit(Op::PopHandler, LINE);
-        self.emit(Op::Jump, LINE);
-        let done_end_jump = self.current_ip();
+        self.emit(LoweringOpcode::Discard, LINE);
+        self.emit(LoweringOpcode::PopHandler, LINE);
+        self.emit(LoweringOpcode::Jump, LINE);
+        let done_end_jump = self.current_pc();
         self.emit_byte(0, LINE);
         self.emit_byte(0, LINE);
 
-        let break_cleanup = self.current_ip();
+        let break_cleanup = self.current_pc();
         if let Some(patches) = self.break_patches.pop() {
           for patch_pos in patches {
             self.patch_jump_to_target(patch_pos, break_cleanup);
@@ -1068,48 +1068,48 @@ impl Compiler {
           self.patch_jump_list(continue_patches, update_start);
           self.patch_jump_list(break_patches, break_cleanup);
         }
-        self.emit(Op::LoadLocal, LINE);
+        self.emit(LoweringOpcode::LoadLocal, LINE);
         self.emit_slot(iterator_slot, LINE);
-        self.emit(Op::IteratorClose, LINE);
-        self.emit(Op::Discard, LINE);
-        self.emit(Op::Jump, LINE);
-        let end_jump = self.current_ip();
+        self.emit(LoweringOpcode::IteratorClose, LINE);
+        self.emit(LoweringOpcode::Discard, LINE);
+        self.emit(LoweringOpcode::Jump, LINE);
+        let end_jump = self.current_pc();
         self.emit_byte(0, LINE);
         self.emit_byte(0, LINE);
 
         self.patch_jump(handler_jump);
-        self.emit(Op::StoreLocal, LINE);
+        self.emit(LoweringOpcode::StoreLocal, LINE);
         self.emit_slot(thrown_slot, LINE);
-        self.emit(Op::PushHandler, LINE);
-        let close_handler_jump = self.current_ip();
+        self.emit(LoweringOpcode::PushHandler, LINE);
+        let close_handler_jump = self.current_pc();
         self.emit_byte(0, LINE);
         self.emit_byte(0, LINE);
-        self.emit(Op::LoadLocal, LINE);
+        self.emit(LoweringOpcode::LoadLocal, LINE);
         self.emit_slot(iterator_close_active_slot, LINE);
-        self.emit(Op::JumpIfFalse, LINE);
-        let skip_abrupt_close = self.current_ip();
+        self.emit(LoweringOpcode::JumpIfFalse, LINE);
+        let skip_abrupt_close = self.current_pc();
         self.emit_byte(0, LINE);
         self.emit_byte(0, LINE);
-        self.emit(Op::LoadLocal, LINE);
+        self.emit(LoweringOpcode::LoadLocal, LINE);
         self.emit_slot(iterator_slot, LINE);
-        self.emit(Op::IteratorClose, LINE);
-        self.emit(Op::Discard, LINE);
+        self.emit(LoweringOpcode::IteratorClose, LINE);
+        self.emit(LoweringOpcode::Discard, LINE);
         self.patch_jump(skip_abrupt_close);
-        self.emit(Op::PopHandler, LINE);
-        self.emit(Op::Jump, LINE);
-        let close_done_jump = self.current_ip();
+        self.emit(LoweringOpcode::PopHandler, LINE);
+        self.emit(LoweringOpcode::Jump, LINE);
+        let close_done_jump = self.current_pc();
         self.emit_byte(0, LINE);
         self.emit_byte(0, LINE);
         self.patch_jump(close_handler_jump);
-        self.emit(Op::Discard, LINE);
+        self.emit(LoweringOpcode::Discard, LINE);
         self.patch_jump(close_done_jump);
-        self.emit(Op::LoadLocal, LINE);
+        self.emit(LoweringOpcode::LoadLocal, LINE);
         self.emit_slot(thrown_slot, LINE);
-        self.emit(Op::Throw, LINE);
+        self.emit(LoweringOpcode::Throw, LINE);
         self.patch_jump(done_end_jump);
         self.patch_jump(end_jump);
         if owns_completion_slot {
-          self.emit(Op::LoadLocal, LINE);
+          self.emit(LoweringOpcode::LoadLocal, LINE);
           self.emit_slot(loop_completion_slot, LINE);
         }
         self.loop_depth = self.loop_depth.saturating_sub(1);
@@ -1168,7 +1168,7 @@ impl Compiler {
             if matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Const) {
               self.mark_local_immutable(slot);
             }
-            self.emit(Op::ResetLocalCell, LINE);
+            self.emit(LoweringOpcode::ResetLocalCell, LINE);
             self.emit_slot(slot, LINE);
           }
         }
@@ -1176,7 +1176,7 @@ impl Compiler {
 
         self.emit_get_builtin_name("forInKeys");
         self.compile_expr_oast(&f.right)?;
-        self.emit(Op::Call, LINE);
+        self.emit(LoweringOpcode::Call, LINE);
         self.emit_byte(1, LINE);
 
         let keys_slot = self.add_local_in_scope(
@@ -1185,7 +1185,7 @@ impl Compiler {
           None,
           false,
         );
-        self.emit(Op::StoreLocal, LINE);
+        self.emit(LoweringOpcode::StoreLocal, LINE);
         self.emit_slot(keys_slot, LINE);
 
         self.emit_constant(Value::Number(0.0), LINE);
@@ -1195,27 +1195,27 @@ impl Compiler {
           None,
           false,
         );
-        self.emit(Op::StoreLocal, LINE);
+        self.emit(LoweringOpcode::StoreLocal, LINE);
         self.emit_slot(index_slot, LINE);
 
-        let loop_start = self.current_ip();
+        let loop_start = self.current_pc();
 
-        self.emit(Op::LoadLocal, LINE);
+        self.emit(LoweringOpcode::LoadLocal, LINE);
         self.emit_slot(index_slot, LINE);
-        self.emit(Op::LoadLocal, LINE);
+        self.emit(LoweringOpcode::LoadLocal, LINE);
         self.emit_slot(keys_slot, LINE);
         self.emit_constant(Value::String("length".to_string().into()), LINE);
-        self.emit(Op::GetProperty, LINE);
-        self.emit_with_payload(Op::CompareJump, 2, LINE);
-        let exit_jump = self.current_ip();
+        self.emit(LoweringOpcode::GetProperty, LINE);
+        self.emit_with_payload(LoweringOpcode::CompareJump, 2, LINE);
+        let exit_jump = self.current_pc();
         self.emit_byte(0, LINE);
         self.emit_byte(0, LINE);
 
-        self.emit(Op::LoadLocal, LINE);
+        self.emit(LoweringOpcode::LoadLocal, LINE);
         self.emit_slot(keys_slot, LINE);
-        self.emit(Op::LoadLocal, LINE);
+        self.emit(LoweringOpcode::LoadLocal, LINE);
         self.emit_slot(index_slot, LINE);
-        self.emit(Op::GetProperty, LINE);
+        self.emit(LoweringOpcode::GetProperty, LINE);
 
         match &f.left {
           OForLeft::VariableDeclaration(v) => {
@@ -1235,7 +1235,7 @@ impl Compiler {
               names.sort();
               for name in &names {
                 if let Some(slot) = self.resolve_local(name) {
-                  self.emit(Op::ResetLocalCell, LINE);
+                  self.emit(LoweringOpcode::ResetLocalCell, LINE);
                   self.emit_slot(slot, LINE);
                 }
               }
@@ -1245,15 +1245,15 @@ impl Compiler {
           OForLeft::AssignmentTargetIdentifier(id) => {
             let name = id.name.as_str();
             if let Some(slot) = self.resolve_local(name) {
-              self.emit(Op::StoreLocal, LINE);
+              self.emit(LoweringOpcode::StoreLocal, LINE);
               self.emit_slot(slot, LINE);
               if self.local_mirrors_global(slot) {
-                self.emit(Op::LoadLocal, LINE);
+                self.emit(LoweringOpcode::LoadLocal, LINE);
                 self.emit_slot(slot, LINE);
                 self.emit_set_global_name(name);
               }
             } else if let Some(upvalue) = self.resolve_upvalue(name) {
-              self.emit(Op::SetUpvalue, LINE);
+              self.emit(LoweringOpcode::SetUpvalue, LINE);
               self.emit_u16(upvalue, LINE);
             } else {
               self.emit_set_global_name(name);
@@ -1270,26 +1270,26 @@ impl Compiler {
         self.compile_statement_oast_with_mode(&f.body, false, completion_slot)?;
         self.exit_scope();
 
-        let update_start = self.current_ip();
+        let update_start = self.current_pc();
         if let Some(patches) = self.continue_patches.pop() {
           for patch_pos in patches {
             self.patch_jump_to_target(patch_pos, update_start);
           }
         }
 
-        self.emit(Op::LoadLocal, LINE);
+        self.emit(LoweringOpcode::LoadLocal, LINE);
         self.emit_slot(index_slot, LINE);
         self.emit_constant(Value::Number(1.0), LINE);
-        self.emit(Op::Add, LINE);
-        self.emit(Op::StoreLocal, LINE);
+        self.emit(LoweringOpcode::Add, LINE);
+        self.emit(LoweringOpcode::StoreLocal, LINE);
         self.emit_slot(index_slot, LINE);
 
-        self.emit(Op::Jump, LINE);
-        let back_offset = loop_start as isize - (self.current_ip() as isize);
+        self.emit(LoweringOpcode::Jump, LINE);
+        let back_offset = loop_start as isize - (self.current_pc() as isize);
         self.emit_short_signed(back_offset, LINE);
 
         self.patch_jump(exit_jump);
-        let loop_end = self.current_ip();
+        let loop_end = self.current_pc();
         if let Some(patches) = self.break_patches.pop() {
           for patch_pos in patches {
             self.patch_jump_to_target(patch_pos, loop_end);
@@ -1308,7 +1308,7 @@ impl Compiler {
           None
         };
         if let Some((continue_patches, break_patches)) = label_patches {
-          let loop_end = self.current_ip();
+          let loop_end = self.current_pc();
           self.patch_jump_list(continue_patches, update_start);
           self.patch_jump_list(break_patches, loop_end);
         }
@@ -1327,17 +1327,17 @@ impl Compiler {
           if let Some(arg) = &r.argument {
             self.compile_expr_oast(arg)?;
           } else {
-            self.emit(Op::Undefined, LINE);
+            self.emit(LoweringOpcode::Undefined, LINE);
           }
-          self.emit(Op::StoreLocal, LINE);
+          self.emit(LoweringOpcode::StoreLocal, LINE);
           self.emit_slot(return_slot, LINE);
           self.emit_handler_pops_to(self.finally_patches[finally_index].handler_depth);
           self.emit_with_env_pops();
-          self.emit(Op::True, LINE);
-          self.emit(Op::StoreLocal, LINE);
+          self.emit(LoweringOpcode::True, LINE);
+          self.emit(LoweringOpcode::StoreLocal, LINE);
           self.emit_slot(did_return_slot, LINE);
-          self.emit(Op::Jump, LINE);
-          let patch_pos = self.current_ip();
+          self.emit(LoweringOpcode::Jump, LINE);
+          let patch_pos = self.current_pc();
           self.emit_byte(0, LINE);
           self.emit_byte(0, LINE);
           if let Some(index) = self.nearest_finally_index() {
@@ -1361,18 +1361,18 @@ impl Compiler {
             self.compile_expr_oast(arg)?;
           }
         } else {
-          self.emit(Op::Undefined, LINE);
+          self.emit(LoweringOpcode::Undefined, LINE);
         }
         if !self.iterator_close_stack.is_empty() {
           let return_slot = self.alloc_temp_local("return_value");
-          self.emit(Op::StoreLocal, LINE);
+          self.emit(LoweringOpcode::StoreLocal, LINE);
           self.emit_slot(return_slot, LINE);
           self.emit_iterator_closes_above(0)?;
-          self.emit(Op::LoadLocal, LINE);
+          self.emit(LoweringOpcode::LoadLocal, LINE);
           self.emit_slot(return_slot, LINE);
         }
         self.emit_with_env_pops();
-        self.emit(Op::Return, LINE);
+        self.emit(LoweringOpcode::Return, LINE);
       }
       OStmt::ContinueStatement(c) => {
         if let Some(label) = &c.label {
@@ -1398,8 +1398,8 @@ impl Compiler {
           }
           self.emit_iterator_closes_above(target_loop_depth)?;
           self.emit_with_env_pops();
-          self.emit(Op::Jump, LINE);
-          let patch_pos = self.current_ip();
+          self.emit(LoweringOpcode::Jump, LINE);
+          let patch_pos = self.current_pc();
           self.emit_byte(0, LINE);
           self.emit_byte(0, LINE);
           self.label_patches[idx]
@@ -1416,8 +1416,8 @@ impl Compiler {
             return Ok(());
           }
           self.emit_with_env_pops();
-          self.emit(Op::Jump, LINE);
-          let patch_pos = self.current_ip();
+          self.emit(LoweringOpcode::Jump, LINE);
+          let patch_pos = self.current_pc();
           self.emit_byte(0, LINE);
           self.emit_byte(0, LINE);
           if let Some(patches) = self.continue_patches.last_mut() {
@@ -1444,8 +1444,8 @@ impl Compiler {
           }
           self.emit_iterator_closes_above(target_loop_depth)?;
           self.emit_with_env_pops();
-          self.emit(Op::Jump, LINE);
-          let patch_pos = self.current_ip();
+          self.emit(LoweringOpcode::Jump, LINE);
+          let patch_pos = self.current_pc();
           self.emit_byte(0, LINE);
           self.emit_byte(0, LINE);
           self.label_patches[idx]
@@ -1462,8 +1462,8 @@ impl Compiler {
             return Ok(());
           }
           self.emit_with_env_pops();
-          self.emit(Op::Jump, LINE);
-          let patch_pos = self.current_ip();
+          self.emit(LoweringOpcode::Jump, LINE);
+          let patch_pos = self.current_pc();
           self.emit_byte(0, LINE);
           self.emit_byte(0, LINE);
           if let Some(patches) = self.break_patches.last_mut() {
@@ -1473,7 +1473,7 @@ impl Compiler {
       }
       OStmt::ThrowStatement(t) => {
         self.compile_expr_oast(&t.argument)?;
-        self.emit(Op::Throw, LINE);
+        self.emit(LoweringOpcode::Throw, LINE);
       }
       OStmt::TryStatement(t) => {
         let owns_completion_slot = completion_slot.is_none();
@@ -1481,8 +1481,8 @@ impl Compiler {
           slot
         } else {
           let slot = self.alloc_temp_local("try_result");
-          self.emit(Op::Undefined, LINE);
-          self.emit(Op::StoreLocal, LINE);
+          self.emit(LoweringOpcode::Undefined, LINE);
+          self.emit(LoweringOpcode::StoreLocal, LINE);
           self.emit_slot(slot, LINE);
           slot
         };
@@ -1499,11 +1499,11 @@ impl Compiler {
             None,
             false,
           );
-          self.emit(Op::Undefined, LINE);
-          self.emit(Op::StoreLocal, LINE);
+          self.emit(LoweringOpcode::Undefined, LINE);
+          self.emit(LoweringOpcode::StoreLocal, LINE);
           self.emit_slot(return_slot, LINE);
-          self.emit(Op::False, LINE);
-          self.emit(Op::StoreLocal, LINE);
+          self.emit(LoweringOpcode::False, LINE);
+          self.emit(LoweringOpcode::StoreLocal, LINE);
           self.emit_slot(did_return_slot, LINE);
           self
             .finally_patches
@@ -1524,9 +1524,9 @@ impl Compiler {
           .as_ref()
           .map(|_| self.finally_patches.len().saturating_sub(1));
 
-        let push_handler_ip = self.current_ip();
-        self.emit(Op::PushHandler, LINE);
-        let handler_jump = self.current_ip();
+        let push_handler_pc = self.current_pc();
+        self.emit(LoweringOpcode::PushHandler, LINE);
+        let handler_jump = self.current_pc();
         self.emit_byte(0, LINE);
         self.emit_byte(0, LINE);
 
@@ -1538,7 +1538,7 @@ impl Compiler {
         self.exit_scope();
         self.handler_depth = self.handler_depth.saturating_sub(1);
 
-        self.emit(Op::PopHandler, LINE);
+        self.emit(LoweringOpcode::PopHandler, LINE);
 
         if let Some(fin) = finalizer {
           let finally_idx = finally_idx
@@ -1550,7 +1550,7 @@ impl Compiler {
               .ok_or_else(|| crate::errors::CompilerError::from("finally state missing"))?;
             state.in_finalizer = true;
           }
-          let body_start = self.current_ip();
+          let body_start = self.current_pc();
           self.enter_block_scope_with_vars(&fin.body);
           for stmt in &fin.body {
             self.compile_statement_oast_with_mode(stmt, false, Some(try_completion_slot))?;
@@ -1576,56 +1576,56 @@ impl Compiler {
             self.patch_jump_to_target(patch_pos, body_start);
           }
           self
-            .chunk
+            .code
             .finally_handlers
             .push(crate::bytecode::FinallyHandler {
-              push_ip: push_handler_ip,
-              finalizer_ip: body_start,
+              push_pc: push_handler_pc,
+              finalizer_pc: body_start,
               return_slot,
               did_return_slot,
             });
-          self.emit(Op::LoadLocal, LINE);
+          self.emit(LoweringOpcode::LoadLocal, LINE);
           self.emit_slot(did_return_slot, LINE);
-          self.emit(Op::JumpIfFalse, LINE);
-          let skip_return = self.current_ip();
+          self.emit(LoweringOpcode::JumpIfFalse, LINE);
+          let skip_return = self.current_pc();
           self.emit_byte(0, LINE);
           self.emit_byte(0, LINE);
           if let Some(outer_idx) = outer_finally_idx {
             let outer_return_slot = self.finally_patches[outer_idx].return_slot;
             let outer_did_return_slot = self.finally_patches[outer_idx].did_return_slot;
-            self.emit(Op::LoadLocal, LINE);
+            self.emit(LoweringOpcode::LoadLocal, LINE);
             self.emit_slot(return_slot, LINE);
-            self.emit(Op::StoreLocal, LINE);
+            self.emit(LoweringOpcode::StoreLocal, LINE);
             self.emit_slot(outer_return_slot, LINE);
-            self.emit(Op::True, LINE);
-            self.emit(Op::StoreLocal, LINE);
+            self.emit(LoweringOpcode::True, LINE);
+            self.emit(LoweringOpcode::StoreLocal, LINE);
             self.emit_slot(outer_did_return_slot, LINE);
             self.emit_handler_pops_to(self.finally_patches[outer_idx].handler_depth);
-            self.emit(Op::Jump, LINE);
-            let outer_jump = self.current_ip();
+            self.emit(LoweringOpcode::Jump, LINE);
+            let outer_jump = self.current_pc();
             self.emit_byte(0, LINE);
             self.emit_byte(0, LINE);
             self.finally_patches[outer_idx]
               .entry_jumps
               .push(outer_jump);
           } else {
-            self.emit(Op::LoadLocal, LINE);
+            self.emit(LoweringOpcode::LoadLocal, LINE);
             self.emit_slot(return_slot, LINE);
             if !self.iterator_close_stack.is_empty() {
               let pending_return_slot = self.alloc_temp_local("finally_return_value");
-              self.emit(Op::StoreLocal, LINE);
+              self.emit(LoweringOpcode::StoreLocal, LINE);
               self.emit_slot(pending_return_slot, LINE);
               self.emit_iterator_closes_above(0)?;
-              self.emit(Op::LoadLocal, LINE);
+              self.emit(LoweringOpcode::LoadLocal, LINE);
               self.emit_slot(pending_return_slot, LINE);
             }
-            self.emit(Op::Return, LINE);
+            self.emit(LoweringOpcode::Return, LINE);
           }
           self.patch_jump(skip_return);
           self.emit_control_dispatch(finally_idx)?;
         }
-        self.emit(Op::Jump, LINE);
-        let end_jump = self.current_ip();
+        self.emit(LoweringOpcode::Jump, LINE);
+        let end_jump = self.current_pc();
         self.emit_byte(0, LINE);
         self.emit_byte(0, LINE);
 
@@ -1638,8 +1638,8 @@ impl Compiler {
               self.finally_patches[finally_idx].in_catch = true;
             }
             if finalizer.is_some() {
-              self.emit(Op::PushHandler, LINE);
-              catch_handler_jump = Some(self.current_ip());
+              self.emit(LoweringOpcode::PushHandler, LINE);
+              catch_handler_jump = Some(self.current_pc());
               self.emit_byte(0, LINE);
               self.emit_byte(0, LINE);
               self.handler_depth += 1;
@@ -1673,10 +1673,10 @@ impl Compiler {
                 self.add_lexical_binding(&binding_name);
               }
               self.activate_current_scope_lexical_bindings();
-              self.emit(Op::StoreLocal, LINE);
+              self.emit(LoweringOpcode::StoreLocal, LINE);
               self.emit_slot(slot, LINE);
               if !matches!(param.pattern, OPat::BindingIdentifier(_)) {
-                self.emit(Op::LoadLocal, LINE);
+                self.emit(LoweringOpcode::LoadLocal, LINE);
                 self.emit_slot(slot, LINE);
                 self.compile_binding_pattern_assignment_oast(
                   &param.pattern,
@@ -1690,7 +1690,7 @@ impl Compiler {
               self.exit_scope();
               self.exit_scope();
             } else {
-              self.emit(Op::Discard, LINE);
+              self.emit(LoweringOpcode::Discard, LINE);
               self.enter_block_scope_with_vars(&handler.body.body);
               for stmt in &handler.body.body {
                 self.compile_statement_oast_with_mode(stmt, false, Some(try_completion_slot))?;
@@ -1700,7 +1700,7 @@ impl Compiler {
 
             if finalizer.is_some() {
               self.handler_depth = self.handler_depth.saturating_sub(1);
-              self.emit(Op::PopHandler, LINE);
+              self.emit(LoweringOpcode::PopHandler, LINE);
             }
             if let Some(finally_idx) = finally_idx {
               self.finally_patches[finally_idx].in_catch = false;
@@ -1715,7 +1715,7 @@ impl Compiler {
                   .ok_or_else(|| crate::errors::CompilerError::from("finally state missing"))?;
                 state.in_finalizer = true;
               }
-              let catch_finalizer_start = self.current_ip();
+              let catch_finalizer_start = self.current_pc();
               self.enter_block_scope_with_vars(&fin.body);
               for stmt in &fin.body {
                 self.compile_statement_oast_with_mode(stmt, false, Some(try_completion_slot))?;
@@ -1736,10 +1736,10 @@ impl Compiler {
               for patch_pos in catch_return_jumps {
                 self.patch_jump_to_target(patch_pos, catch_finalizer_start);
               }
-              self.emit(Op::LoadLocal, LINE);
+              self.emit(LoweringOpcode::LoadLocal, LINE);
               self.emit_slot(did_return_slot, LINE);
-              self.emit(Op::JumpIfFalse, LINE);
-              let skip_return = self.current_ip();
+              self.emit(LoweringOpcode::JumpIfFalse, LINE);
+              let skip_return = self.current_pc();
               self.emit_byte(0, LINE);
               self.emit_byte(0, LINE);
               let outer_finally_idx = self.finally_patches[..finally_idx]
@@ -1748,25 +1748,25 @@ impl Compiler {
               if let Some(outer_idx) = outer_finally_idx {
                 let outer_return_slot = self.finally_patches[outer_idx].return_slot;
                 let outer_did_return_slot = self.finally_patches[outer_idx].did_return_slot;
-                self.emit(Op::LoadLocal, LINE);
+                self.emit(LoweringOpcode::LoadLocal, LINE);
                 self.emit_slot(return_slot, LINE);
-                self.emit(Op::StoreLocal, LINE);
+                self.emit(LoweringOpcode::StoreLocal, LINE);
                 self.emit_slot(outer_return_slot, LINE);
-                self.emit(Op::True, LINE);
-                self.emit(Op::StoreLocal, LINE);
+                self.emit(LoweringOpcode::True, LINE);
+                self.emit(LoweringOpcode::StoreLocal, LINE);
                 self.emit_slot(outer_did_return_slot, LINE);
                 self.emit_handler_pops_to(self.finally_patches[outer_idx].handler_depth);
-                self.emit(Op::Jump, LINE);
-                let outer_jump = self.current_ip();
+                self.emit(LoweringOpcode::Jump, LINE);
+                let outer_jump = self.current_pc();
                 self.emit_byte(0, LINE);
                 self.emit_byte(0, LINE);
                 self.finally_patches[outer_idx]
                   .entry_jumps
                   .push(outer_jump);
               } else {
-                self.emit(Op::LoadLocal, LINE);
+                self.emit(LoweringOpcode::LoadLocal, LINE);
                 self.emit_slot(return_slot, LINE);
-                self.emit(Op::Return, LINE);
+                self.emit(LoweringOpcode::Return, LINE);
               }
               self.patch_jump(skip_return);
               self.emit_control_dispatch(finally_idx)?;
@@ -1774,12 +1774,12 @@ impl Compiler {
               if let Some(catch_handler_jump) = catch_handler_jump {
                 let thrown_slot =
                   self.add_local_with_mirror("\0catch_finally_thrown".to_string(), None, false);
-                self.emit(Op::Jump, LINE);
-                let skip_abrupt_finalizer = self.current_ip();
+                self.emit(LoweringOpcode::Jump, LINE);
+                let skip_abrupt_finalizer = self.current_pc();
                 self.emit_byte(0, LINE);
                 self.emit_byte(0, LINE);
                 self.patch_jump(catch_handler_jump);
-                self.emit(Op::StoreLocal, LINE);
+                self.emit(LoweringOpcode::StoreLocal, LINE);
                 self.emit_slot(thrown_slot, LINE);
                 self.finally_patches[finally_idx].in_finalizer = true;
                 self.enter_block_scope_with_vars(&fin.body);
@@ -1788,9 +1788,9 @@ impl Compiler {
                 }
                 self.exit_scope();
                 self.finally_patches[finally_idx].in_finalizer = false;
-                self.emit(Op::LoadLocal, LINE);
+                self.emit(LoweringOpcode::LoadLocal, LINE);
                 self.emit_slot(thrown_slot, LINE);
-                self.emit(Op::Throw, LINE);
+                self.emit(LoweringOpcode::Throw, LINE);
                 self.patch_jump(skip_abrupt_finalizer);
               }
             }
@@ -1803,7 +1803,7 @@ impl Compiler {
             }
             self.enter_block_scope();
             let slot = self.add_local_with_mirror("\0finally_thrown".to_string(), None, false);
-            self.emit(Op::StoreLocal, LINE);
+            self.emit(LoweringOpcode::StoreLocal, LINE);
             self.emit_slot(slot, LINE);
             if let Some(fin) = finalizer {
               let finally_idx = finally_idx
@@ -1826,9 +1826,9 @@ impl Compiler {
                 .ok_or_else(|| crate::errors::CompilerError::from("finally state missing"))?;
               state.in_finalizer = false;
             }
-            self.emit(Op::LoadLocal, LINE);
+            self.emit(LoweringOpcode::LoadLocal, LINE);
             self.emit_slot(slot, LINE);
-            self.emit(Op::Throw, LINE);
+            self.emit(LoweringOpcode::Throw, LINE);
             self.exit_scope();
           }
         }
@@ -1838,7 +1838,7 @@ impl Compiler {
           self.finally_patches.pop();
         }
         if owns_completion_slot {
-          self.emit(Op::LoadLocal, LINE);
+          self.emit(LoweringOpcode::LoadLocal, LINE);
           self.emit_slot(try_completion_slot, LINE);
         }
       }

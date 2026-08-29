@@ -149,7 +149,7 @@ pub(crate) fn install_global_function_builtins(
         if source_is_whitespace_and_comments_only(src) {
           return Ok(Value::Undefined);
         }
-        let chunk = crate::typecheck::with_strict_override(None, || {
+        let code = crate::typecheck::with_strict_override(None, || {
           compiler::with_compile_context_override(Some((false, false)), || {
             let session = Parser::parse_source(src)
               .map_err(|e| syntax_error(vm, format!("eval parse: {}", e)))?;
@@ -157,20 +157,20 @@ pub(crate) fn install_global_function_builtins(
               .map_err(|e| syntax_error(vm, format!("eval compile: {}", e)))
           })
         })?;
-        if !chunk.root_strict
-          && let Some(name) = vm.global_eval_lexical_conflict_name(&chunk)
+        if !code.root_strict
+          && let Some(name) = vm.global_eval_lexical_conflict_name(&code)
         {
           return Err(syntax_error(
             vm,
             format!("redeclaration of global lexical binding `{}`", name),
           ));
         }
-        if !chunk.root_strict
-          && let Some(name) = vm.global_function_declaration_conflict_name(&chunk)
+        if !code.root_strict
+          && let Some(name) = vm.global_function_declaration_conflict_name(&code)
         {
           return Err(vm.throw_type_error(&format!("cannot declare global function `{}`", name,)));
         }
-        match vm.run_nested(chunk, false) {
+        match vm.run_nested(code, false) {
           Ok(value) => Ok(value),
           Err(failure) => {
             if let Some(thrown) = failure.thrown {

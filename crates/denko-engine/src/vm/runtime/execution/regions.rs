@@ -8,7 +8,7 @@ impl Vm {
     region: crate::vm::region::DenseArrayPushRegion,
     registers: &mut [Value; 16],
   ) -> Result<bool, RuntimeError> {
-    if self.execution.active.ip != region.entry_pc
+    if self.execution.active.pc != region.entry_pc
       || self.execution.active.arguments.object.is_some()
       || self
         .execution
@@ -58,7 +58,7 @@ impl Vm {
     if index.partial_cmp(&region.limit) != Some(std::cmp::Ordering::Less) {
       registers[region.index_register] = Value::Number(index);
       registers[region.limit_register] = Value::Number(region.limit);
-      self.execution.active.ip = region.completed_pc;
+      self.execution.active.pc = region.completed_pc;
       return Ok(true);
     }
     let receiver = self
@@ -172,7 +172,7 @@ impl Vm {
     registers[region.limit_register] = Value::Number(region.limit);
     registers[0] = Value::Number(usize_to_f64(new_length));
     registers[region.step_register] = Value::Number(region.step);
-    self.execution.active.ip = if prepared.index < region.limit {
+    self.execution.active.pc = if prepared.index < region.limit {
       region.entry_pc
     } else {
       region.completed_pc
@@ -195,7 +195,7 @@ impl Vm {
     region: crate::vm::region::DenseMaskedReadRegion,
     registers: &mut [Value; 16],
   ) -> Result<bool, RuntimeError> {
-    if self.execution.active.ip != region.entry_pc
+    if self.execution.active.pc != region.entry_pc
       || self.execution.active.arguments.object.is_some()
       || self
         .execution
@@ -248,7 +248,7 @@ impl Vm {
     if index.partial_cmp(&region.limit) != Some(std::cmp::Ordering::Less) {
       registers[region.index_register] = Value::Number(index);
       registers[region.limit_register] = Value::Number(region.limit);
-      self.execution.active.ip = region.completed_pc;
+      self.execution.active.pc = region.completed_pc;
       return Ok(true);
     }
     const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
@@ -325,7 +325,7 @@ impl Vm {
     registers[region.next_index_register] = Value::Number(prepared.index);
     registers[region.step_register] = Value::Number(1.0);
     registers[region.mask_register] = Value::Number(3.0);
-    self.execution.active.ip = if prepared.index < region.limit {
+    self.execution.active.pc = if prepared.index < region.limit {
       region.entry_pc
     } else {
       region.completed_pc
@@ -348,7 +348,7 @@ impl Vm {
     region: crate::vm::region::OwnMethodBinaryLoopRegion,
     registers: &mut [Value; 16],
   ) -> Result<bool, RuntimeError> {
-    if self.execution.active.ip != region.entry_pc
+    if self.execution.active.pc != region.entry_pc
       || self.execution.active.arguments.object.is_some()
       || self
         .execution
@@ -402,7 +402,7 @@ impl Vm {
     if index.partial_cmp(&region.limit) != Some(std::cmp::Ordering::Less) {
       registers[region.index_register] = Value::Number(index);
       registers[region.limit_register] = Value::Number(region.limit);
-      self.execution.active.ip = region.completed_pc;
+      self.execution.active.pc = region.completed_pc;
       return Ok(true);
     }
     const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
@@ -429,7 +429,7 @@ impl Vm {
     let Some(crate::bytecode::Constant::String(method_key)) = self
       .execution
       .active
-      .chunk
+      .code
       .constants
       .get(region.method_key_constant)
     else {
@@ -502,7 +502,7 @@ impl Vm {
     registers[region.previous_index_register] = Value::Number(prepared.index - region.step);
     registers[region.step_register] = Value::Number(region.step);
     registers[region.next_index_register] = Value::Number(prepared.index);
-    self.execution.active.ip = if prepared.index < region.limit {
+    self.execution.active.pc = if prepared.index < region.limit {
       region.entry_pc
     } else {
       region.completed_pc
@@ -525,7 +525,7 @@ impl Vm {
     region: crate::vm::region::OwnMethodReadLoopRegion,
     registers: &mut [Value; 16],
   ) -> Result<bool, RuntimeError> {
-    if self.execution.active.ip != region.entry_pc
+    if self.execution.active.pc != region.entry_pc
       || self.execution.active.arguments.object.is_some()
       || self
         .execution
@@ -579,7 +579,7 @@ impl Vm {
     if index.partial_cmp(&region.limit) != Some(std::cmp::Ordering::Less) {
       registers[region.index_register] = Value::Number(index);
       registers[region.limit_register] = Value::Number(region.limit);
-      self.execution.active.ip = region.completed_pc;
+      self.execution.active.pc = region.completed_pc;
       return Ok(true);
     }
     const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
@@ -606,7 +606,7 @@ impl Vm {
     let Some(crate::bytecode::Constant::String(method_key)) = self
       .execution
       .active
-      .chunk
+      .code
       .constants
       .get(region.method_key_constant)
     else {
@@ -632,7 +632,7 @@ impl Vm {
       return Ok(false);
     };
     let Some(crate::bytecode::Constant::String(property_key)) = proto
-      .chunk
+      .code
       .constants
       .get(read.property_key_constant)
     else {
@@ -691,7 +691,7 @@ impl Vm {
     registers[region.previous_index_register] = Value::Number(prepared.index - region.step);
     registers[region.step_register] = Value::Number(region.step);
     registers[region.next_index_register] = Value::Number(prepared.index);
-    self.execution.active.ip = if prepared.index < region.limit {
+    self.execution.active.pc = if prepared.index < region.limit {
       region.entry_pc
     } else {
       region.completed_pc
@@ -714,7 +714,7 @@ impl Vm {
     region: crate::vm::region::OwnMethodEffectLoopRegion,
     registers: &mut [Value; 16],
   ) -> Result<bool, RuntimeError> {
-    if self.execution.active.ip != region.entry_pc
+    if self.execution.active.pc != region.entry_pc
       || self.execution.active.arguments.object.is_some()
       || self
         .execution
@@ -762,7 +762,7 @@ impl Vm {
     if index.partial_cmp(&region.limit) != Some(std::cmp::Ordering::Less) {
       registers[region.index_register] = Value::Number(index);
       registers[region.limit_register] = Value::Number(region.limit);
-      self.execution.active.ip = region.completed_pc;
+      self.execution.active.pc = region.completed_pc;
       return Ok(true);
     }
     const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
@@ -789,7 +789,7 @@ impl Vm {
     let Some(crate::bytecode::Constant::String(method_key)) = self
       .execution
       .active
-      .chunk
+      .code
       .constants
       .get(region.method_key_constant)
     else {
@@ -820,7 +820,7 @@ impl Vm {
       return Ok(false);
     }
     let Some(crate::bytecode::Constant::String(property_key)) = proto
-      .chunk
+      .code
       .constants
       .get(effect.property_key_constant)
     else {
@@ -901,7 +901,7 @@ impl Vm {
     registers[region.previous_index_register] = Value::Number(prepared.index - region.step);
     registers[region.step_register] = Value::Number(region.step);
     registers[region.next_index_register] = Value::Number(prepared.index);
-    self.execution.active.ip = if prepared.index < region.limit {
+    self.execution.active.pc = if prepared.index < region.limit {
       region.entry_pc
     } else {
       region.completed_pc
@@ -924,7 +924,7 @@ impl Vm {
     region: crate::vm::region::OwnMethodNumericLoopRegion,
     registers: &mut [Value; 16],
   ) -> Result<bool, RuntimeError> {
-    if self.execution.active.ip != region.entry_pc
+    if self.execution.active.pc != region.entry_pc
       || self.execution.active.arguments.object.is_some()
       || self
         .execution
@@ -978,7 +978,7 @@ impl Vm {
     if index.partial_cmp(&region.limit) != Some(std::cmp::Ordering::Less) {
       registers[region.index_register] = Value::Number(index);
       registers[region.limit_register] = Value::Number(region.limit);
-      self.execution.active.ip = region.completed_pc;
+      self.execution.active.pc = region.completed_pc;
       return Ok(true);
     }
     const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
@@ -1005,7 +1005,7 @@ impl Vm {
     let Some(crate::bytecode::Constant::String(key)) = self
       .execution
       .active
-      .chunk
+      .code
       .constants
       .get(region.key_constant)
     else {
@@ -1090,7 +1090,7 @@ impl Vm {
     registers[region.previous_index_register] = Value::Number(prepared.index - region.step);
     registers[region.step_register] = Value::Number(region.step);
     registers[region.next_index_register] = Value::Number(prepared.index);
-    self.execution.active.ip = if prepared.index < region.limit {
+    self.execution.active.pc = if prepared.index < region.limit {
       region.entry_pc
     } else {
       region.completed_pc
@@ -1151,7 +1151,7 @@ impl Vm {
     region: crate::vm::region::NumericLoopRegion,
     registers: &mut [Value; 16],
   ) -> Result<bool, RuntimeError> {
-    if self.execution.active.ip != region.entry_pc
+    if self.execution.active.pc != region.entry_pc
       || self.execution.active.arguments.object.is_some()
       || self
         .execution
@@ -1223,7 +1223,7 @@ impl Vm {
         let Some(crate::bytecode::Constant::String(key)) = self
           .execution
           .active
-          .chunk
+          .code
           .constants
           .get(key_constant)
         else {
@@ -1365,7 +1365,7 @@ impl Vm {
     }
     registers[region.exits.index_register] = Value::Number(prepared.index);
     registers[region.exits.limit_register] = Value::Number(region.limit);
-    self.execution.active.ip = if prepared.index < prepared.limit {
+    self.execution.active.pc = if prepared.index < prepared.limit {
       region.entry_pc
     } else {
       region.completed_pc

@@ -22,7 +22,7 @@ impl Vm {
     }
   }
 
-  /// Check if any root-level slot names in a chunk conflict with the current lexical environment.
+  /// Check if any root-level slot names in a code conflict with the current lexical environment.
   ///
   /// Used during direct eval to detect whether any declarations in the code being evaluated
   /// would shadow existing lexical bindings, which is disallowed in strict mode.
@@ -32,13 +32,13 @@ impl Vm {
   /// Returns `None` if no conflicts are found, or `Some(name)` if a conflicting binding name is detected.
   pub(crate) fn direct_eval_lexical_conflict_name(
     &self,
-    chunk: &crate::bytecode::Chunk,
+    code: &crate::bytecode::Chunk,
   ) -> Option<String> {
-    for (index, maybe_name) in chunk.root_slot_names.iter().enumerate() {
+    for (index, maybe_name) in code.root_slot_names.iter().enumerate() {
       let Some(name) = maybe_name.as_deref() else {
         continue;
       };
-      if chunk
+      if code
         .root_lexical_tdz
         .get(index)
         .copied()
@@ -69,16 +69,16 @@ impl Vm {
 
   pub(crate) fn global_eval_lexical_conflict_name(
     &self,
-    chunk: &crate::bytecode::Chunk,
+    code: &crate::bytecode::Chunk,
   ) -> Option<String> {
     let global_env = self.realm_state.global_env.borrow();
-    chunk
+    code
       .root_slot_names
       .iter()
       .enumerate()
       .find_map(|(index, maybe_name)| {
         let name = maybe_name.as_deref()?;
-        if chunk
+        if code
           .root_lexical_tdz
           .get(index)
           .copied()
@@ -93,10 +93,10 @@ impl Vm {
 
   pub(crate) fn global_function_declaration_conflict_name(
     &self,
-    chunk: &crate::bytecode::Chunk,
+    code: &crate::bytecode::Chunk,
   ) -> Option<String> {
     let globals = self.realm_state.globals.borrow();
-    chunk
+    code
       .root_function_declarations
       .iter()
       .find_map(|name| {
@@ -312,11 +312,11 @@ impl Vm {
       env = outer;
     }
 
-    if let Some(frame) = self.execution.call_stack.last()
-      && let Value::Closure { proto, .. } = &frame.callee
+    if let Some(function) = &self.execution.active.active_function
+      && let Value::Closure { proto, .. } = function
       && proto.name == name
     {
-      return Ok(Some(frame.callee.clone()));
+      return Ok(Some(function.clone()));
     }
 
     Ok(None)
@@ -501,7 +501,7 @@ impl Vm {
       self
         .execution
         .active
-        .chunk
+        .code
         .root_slot_names
         .iter()
         .enumerate()
@@ -531,7 +531,7 @@ impl Vm {
       && self
         .execution
         .active
-        .chunk
+        .code
         .root_slot_names
         .get(slot)
         .and_then(Clone::clone)
@@ -579,7 +579,11 @@ impl Vm {
       .properties
       .insert(key, PropertyDescriptor::ordinary_data(value.clone()));
     for frame in self.execution.call_stack.iter_mut() {
-      let same_realm = Self::function_realm_globals(&frame.callee)
+      let same_realm = frame
+        .context
+        .active_function
+        .as_ref()
+        .and_then(Self::function_realm_globals)
         .and_then(|globals| match globals {
           Value::Object(globals) => Some(Rc::ptr_eq(&globals, &self.realm_state.globals)),
           _ => None,
@@ -620,9 +624,10 @@ impl Vm {
     }
     let realm_globals = self
       .execution
-      .call_stack
-      .last()
-      .and_then(|frame| Self::function_realm_globals(&frame.callee))
+      .active
+      .active_function
+      .as_ref()
+      .and_then(Self::function_realm_globals)
       .and_then(|value| match value {
         Value::Object(globals) => Some(globals),
         _ => None,
@@ -732,9 +737,10 @@ impl Vm {
     let key = PropertyKey::String(name.to_string().into());
     let realm_globals = self
       .execution
-      .call_stack
-      .last()
-      .and_then(|frame| Self::function_realm_globals(&frame.callee))
+      .active
+      .active_function
+      .as_ref()
+      .and_then(Self::function_realm_globals)
       .and_then(|value| match value {
         Value::Object(globals) => Some(globals),
         _ => None,

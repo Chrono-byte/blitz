@@ -3,13 +3,13 @@
 //! Private optimizing-compiler worker.
 
 use super::artifact::{ArtifactError, NativeArtifact, emit_numeric_binary};
-use super::ir::{CompilerChunk, IrError, SemanticFunction, VerifiedTypedFunction};
+use super::ir::{FunctionSnapshot, IrError, SemanticFunction, VerifiedTypedFunction};
 use super::{FunctionId, NumericBinaryOp};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::mpsc::{Receiver, Sender, SyncSender, TryRecvError};
 use std::thread::JoinHandle;
 
-/// Bump this whenever `abi.rs` encoding, `ir::CompilerChunk` layout, or
+/// Bump this whenever `abi.rs` encoding, `ir::FunctionSnapshot` layout, or
 /// `artifact::NATIVE_ARTIFACT_ABI` changes. It invalidates stale
 /// `SnapshotStamp`s so the worker does not reuse an artifact built with an
 /// incompatible ABI/hasher. Current value 2 reflects the ShortBranchCode
@@ -37,9 +37,9 @@ pub(super) struct SnapshotStamp {
 }
 
 impl SnapshotStamp {
-  pub(super) fn for_chunk(chunk: &CompilerChunk) -> Self {
+  pub(super) fn for_chunk(code: &FunctionSnapshot) -> Self {
     Self {
-      bytecode_revision: chunk.revision(),
+      bytecode_revision: code.revision(),
       capability_revision: CAPABILITY_REVISION,
     }
   }
@@ -59,17 +59,17 @@ pub(super) struct CompileRequest {
   pub(super) ticket: CompileTicket,
   pub(super) key: CompilationKey,
   pub(super) stamp: SnapshotStamp,
-  pub(super) chunk: CompilerChunk,
+  pub(super) code: FunctionSnapshot,
 }
 
 impl CompileRequest {
   pub(super) fn numeric_binary(
     ticket: CompileTicket,
     function: FunctionId,
-    chunk: CompilerChunk,
+    code: FunctionSnapshot,
     operation: NumericBinaryOp,
   ) -> Self {
-    let stamp = SnapshotStamp::for_chunk(&chunk);
+    let stamp = SnapshotStamp::for_chunk(&code);
     Self {
       ticket,
       key: CompilationKey {
@@ -77,7 +77,7 @@ impl CompileRequest {
         specialization: SpecializationKey::NumericBinary(operation),
       },
       stamp,
-      chunk,
+      code,
     }
   }
 }
@@ -191,7 +191,7 @@ fn worker_main(
 
 fn compile(request: CompileRequest) -> CompileCompletion {
   let SpecializationKey::NumericBinary(expected_operation) = request.key.specialization;
-  let result = SemanticFunction::decode(&request.chunk)
+  let result = SemanticFunction::decode(&request.code)
     .and_then(|semantic| VerifiedTypedFunction::specialize_numeric_binary(&semantic))
     .map_err(map_ir_error)
     .and_then(|typed| {
@@ -237,14 +237,14 @@ fn map_artifact_error(error: ArtifactError) -> RejectionReason {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::vm::jit::ir::CompilerChunk;
+  use crate::vm::jit::ir::FunctionSnapshot;
   use crate::{compiler, parser::Parser};
 
-  fn snapshot(source: &str) -> CompilerChunk {
+  fn snapshot(source: &str) -> FunctionSnapshot {
     let session = Parser::parse_source(source).expect("source parses");
-    let chunk = compiler::compile_session(&session).expect("source compiles");
-    let proto = &chunk.functions[0];
-    CompilerChunk::from_chunk(&proto.chunk, proto.arity).expect("snapshot")
+    let code = compiler::compile_session(&session).expect("source compiles");
+    let proto = &code.functions[0];
+    FunctionSnapshot::from_code(&proto.code, proto.arity).expect("snapshot")
   }
 
   #[test]

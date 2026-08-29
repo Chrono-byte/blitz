@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use crate::binding::BindingCell;
-use crate::bytecode::{Chunk, OP_COUNT, Op};
+use crate::bytecode::{Chunk, OP_COUNT, Opcode};
 use crate::errors::RuntimeError;
 use crate::gc;
 use crate::module::ModuleLoader;
@@ -61,8 +61,9 @@ impl Vm {
       },
       execution: ExecutionState {
         active: ExecutionContext {
-          chunk: Arc::new(Chunk::new(Arc::new(String::new()))),
-          ip: 0,
+          code: Arc::new(Chunk::new(Arc::new(String::new()))),
+          pc: 0,
+          active_function: None,
           locals: Vec::with_capacity(LOCALS_INITIAL_CAPACITY),
           this_value: Value::Object(globals),
           closure_env: None,
@@ -88,7 +89,7 @@ impl Vm {
         handlers: HandlerStack::with_capacity(32),
         pending: None,
         pending_frame_count: None,
-        unwound_risc_state: None,
+        unwound_register_state: None,
         last_uncaught: None,
       },
       construction: ConstructionState {
@@ -124,13 +125,13 @@ impl Vm {
         opcode_counts: [0; OP_COUNT],
         run_started_at: None,
         functions: HashMap::new(),
-        chunk_ids: HashMap::new(),
+        code_ids: HashMap::new(),
         chunk_refs: HashMap::new(),
         next_function_id: 0,
-        active_function_chunk: 0,
+        active_function_identity: 0,
         active_function_id: None,
-        last_hot_chunk: 0,
-        hot_chunks: std::collections::HashSet::new(),
+        last_hot_function: 0,
+        hot_functions: std::collections::HashSet::new(),
         jit: crate::vm::jit::JitRuntime::default(),
         jit_stats: crate::vm::jit::JitStats::default(),
       },
@@ -168,8 +169,9 @@ impl Vm {
       },
       execution: ExecutionState {
         active: ExecutionContext {
-          chunk: Arc::new(Chunk::new(Arc::new(String::new()))),
-          ip: 0,
+          code: Arc::new(Chunk::new(Arc::new(String::new()))),
+          pc: 0,
+          active_function: None,
           locals: Vec::with_capacity(LOCALS_INITIAL_CAPACITY),
           this_value,
           closure_env: None,
@@ -195,7 +197,7 @@ impl Vm {
         handlers: HandlerStack::with_capacity(32),
         pending: None,
         pending_frame_count: None,
-        unwound_risc_state: None,
+        unwound_register_state: None,
         last_uncaught: None,
       },
       construction: ConstructionState {
@@ -229,13 +231,13 @@ impl Vm {
         opcode_counts: [0; OP_COUNT],
         run_started_at: None,
         functions: HashMap::new(),
-        chunk_ids: HashMap::new(),
+        code_ids: HashMap::new(),
         chunk_refs: HashMap::new(),
         next_function_id: 0,
-        active_function_chunk: 0,
+        active_function_identity: 0,
         active_function_id: None,
-        last_hot_chunk: 0,
-        hot_chunks: std::collections::HashSet::new(),
+        last_hot_function: 0,
+        hot_functions: std::collections::HashSet::new(),
         jit: crate::vm::jit::JitRuntime::default(),
         jit_stats: crate::vm::jit::JitStats::default(),
       },
@@ -336,7 +338,7 @@ impl Vm {
       return;
     }
 
-    let mut ranked: Vec<(Op, u64)> = self
+    let mut ranked: Vec<(Opcode, u64)> = self
       .profiling
       .opcode_counts
       .iter()
@@ -346,7 +348,7 @@ impl Vm {
           None
         } else {
           let index = u8::try_from(index).expect("index from opcode_counts exceeds u8::MAX");
-          Op::from_byte(index).map(|op| (op, count))
+          Opcode::from_byte(index).map(|op| (op, count))
         }
       })
       .collect();
@@ -432,25 +434,23 @@ impl Vm {
     let allows_super_call = has_home_object
       && self
         .execution
-        .call_stack
-        .last()
-        .is_some_and(|frame| match &frame.callee {
+        .active
+        .active_function
+        .as_ref()
+        .is_some_and(|function| match function {
           Value::Closure { proto, .. } => proto.is_constructor,
           _ => false,
         });
     (
-      self.execution.active.chunk.allow_new_target,
+      self.execution.active.code.allow_new_target,
       has_home_object,
       allows_super_call,
     )
   }
 
   pub(super) fn get_new_target(&self) -> Value {
-    if let Some(crate::value::Value::Closure { proto, props, .. }) = self
-      .execution
-      .call_stack
-      .last()
-      .map(|frame| &frame.callee)
+    if let Some(crate::value::Value::Closure { proto, props, .. }) =
+      self.execution.active.active_function.as_ref()
       && proto.captures_this
       && let Some(value) = props
         .borrow()
@@ -478,8 +478,7 @@ impl Vm {
   }
 
   pub(super) fn current_method_home_object(&self) -> Option<Value> {
-    let frame = self.execution.call_stack.last()?;
-    match &frame.callee {
+    match self.execution.active.active_function.as_ref()? {
       Value::Closure { props, .. } | Value::BuiltinObject(_, props) => {
         let props = props.borrow();
         props
@@ -689,9 +688,9 @@ impl Vm {
     if let Some(value) = &self.exceptions.pending {
       roots.push(value.clone());
     }
-    if let Some(state) = &self.exceptions.unwound_risc_state {
+    if let Some(state) = &self.exceptions.unwound_register_state {
       roots.extend(state.registers.iter().cloned());
-      roots.extend(state.spills.iter().cloned());
+      roots.extend(state.spill_slots.iter().cloned());
     }
     if let Some(state) = &self.execution.active.yield_star {
       roots.push(state.iterator.clone());
@@ -735,10 +734,10 @@ impl Vm {
           .map(BindingCell::value),
       );
       roots.push(frame.context.this_value.clone());
-      roots.push(frame.callee.clone());
-      if let Some(state) = &frame.risc_state {
+      roots.extend(frame.context.active_function.iter().cloned());
+      if let Some(state) = &frame.register_state {
         roots.extend(state.registers.iter().cloned());
-        roots.extend(state.spills.iter().cloned());
+        roots.extend(state.spill_slots.iter().cloned());
       }
       if let Some(value) = &frame.new_target {
         roots.push(value.clone());
@@ -1127,11 +1126,11 @@ impl Vm {
   ) {
     self.execution.active.locals.clear();
     self.execution.call_stack.clear();
-    self.execution.active.strict = self.execution.active.chunk.root_strict;
+    self.execution.active.strict = self.execution.active.code.root_strict;
     self.exceptions.handlers.clear();
     self.exceptions.pending = None;
     self.exceptions.pending_frame_count = None;
-    self.exceptions.unwound_risc_state = None;
+    self.exceptions.unwound_register_state = None;
     self.execution.root_chunk = None;
     self.execution.active.slots = None;
     self.execution.direct_eval_outer = None;
@@ -1158,8 +1157,8 @@ impl Vm {
     self.exceptions.last_uncaught = None;
     self.execution.active.arguments.object = None;
     self.execution.active.arguments.mapped_count = 0;
-    self.execution.active.ip = 0;
-    self.execution.active.chunk = Arc::new(Chunk::new(Arc::new(String::new())));
+    self.execution.active.pc = 0;
+    self.execution.active.code = Arc::new(Chunk::new(Arc::new(String::new())));
     self.caches.property_get.clear();
     gc::reset_allocation_pressure();
     let mut g = self.realm_state.globals.borrow_mut();

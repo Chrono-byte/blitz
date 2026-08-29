@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 //! JIT-owned metadata. This module deliberately contains no native code yet.
 //!
-//! The interpreter and future JIT share these stable, VM-PC keyed identities and
+//! The interpreter and JIT share stable instruction-index keyed identities and
 //! feedback records. Generated machine code must never be the owner of feedback.
 use crate::value::Value;
 mod abi;
@@ -10,7 +10,7 @@ pub(crate) mod ir;
 pub(crate) mod native;
 mod worker;
 
-use crate::bytecode::{Chunk, Constant, Op};
+use crate::bytecode::{Chunk, Constant, Instruction, InstructionIndex, Opcode};
 use native::NativeCode;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -20,7 +20,7 @@ use worker::{
 };
 
 struct BaselineCompiler<'a> {
-  chunk: &'a Chunk,
+  code: &'a Chunk,
 }
 
 impl<'a> BaselineCompiler<'a> {
@@ -28,18 +28,18 @@ impl<'a> BaselineCompiler<'a> {
     &self,
     parameter_count: usize,
   ) -> Result<(NativeCode, DirectLeaf), String> {
-    let Some([load, return_word]) = self.chunk.code.get(..2) else {
+    let Some([load, return_word]) = self.code.words.get(..2) else {
       return Err("direct leaf requires a load and return".to_string());
     };
     let load_register = (load >> 8) & 0xf;
-    if (*return_word & 0xff) as u8 != Op::Return as u8
+    if (*return_word & 0xff) as u8 != Opcode::Return as u8
       || ((*return_word >> 8) & 0xf) != load_register
     {
       return Err("direct leaf must return its loaded register".to_string());
     }
-    if (*load & 0xff) as u8 == Op::Const as u8 {
+    if (*load & 0xff) as u8 == Opcode::Const as u8 {
       let Constant::Number(value) = self
-        .chunk
+        .code
         .constants
         .get(((load >> 16) & 0xffff) as usize)
         .ok_or_else(|| "constant index out of bounds".to_string())?
@@ -51,7 +51,7 @@ impl<'a> BaselineCompiler<'a> {
         DirectLeaf::Number(*value),
       ));
     }
-    if (*load & 0xff) as u8 == Op::LoadLocal as u8 {
+    if (*load & 0xff) as u8 == Opcode::LoadLocal as u8 {
       let slot = ((load >> 16) & 0xffff) as usize;
       if slot >= parameter_count {
         return Err("direct leaf local is not a parameter".to_string());
@@ -65,28 +65,28 @@ impl<'a> BaselineCompiler<'a> {
   }
 
   fn compile_const_prefix(self) -> Result<NativeCode, String> {
-    if self.chunk.code.is_empty() {
+    if self.code.words.is_empty() {
       return Err("baseline requires at least one instruction".to_string());
     }
     let mut registers = [None; 16];
-    let mut visited = vec![false; self.chunk.code.len()];
+    let mut visited = vec![false; self.code.words.len()];
     let mut pc = 0;
     loop {
-      if pc >= self.chunk.code.len() {
-        return Err("baseline control flow left the chunk".to_string());
+      if pc >= self.code.words.len() {
+        return Err("baseline control flow left the code".to_string());
       }
       if visited[pc] {
         return self.resume_materialized(&registers, pc);
       }
       visited[pc] = true;
-      let word = self.chunk.code[pc];
+      let word = self.code.words[pc];
       let op = (word & 0xff) as u8;
       let rd = ((word >> 8) & 0xf) as usize;
       let rs = ((word >> 12) & 0xf) as usize;
-      if op == Op::Const as u8 {
+      if op == Opcode::Const as u8 {
         let constant_index = ((word >> 16) & 0xffff) as usize;
         let Constant::Number(value) = self
-          .chunk
+          .code
           .constants
           .get(constant_index)
           .ok_or_else(|| "constant index out of bounds".to_string())?
@@ -95,10 +95,10 @@ impl<'a> BaselineCompiler<'a> {
         };
         registers[rd] = Some(*value);
         pc += 1;
-      } else if op == Op::Move as u8 {
+      } else if op == Opcode::Move as u8 {
         registers[rd] = registers[rs];
         pc += 1;
-      } else if op == Op::Jump as u8 {
+      } else if op == Opcode::Jump as u8 {
         let payload = ((word >> 8) & 0x00ff_ffff) as i32;
         let offset = if payload & 0x0080_0000 != 0 {
           payload | !0x00ff_ffff
@@ -108,27 +108,28 @@ impl<'a> BaselineCompiler<'a> {
         pc = usize::try_from(pc as i64 + 1 + offset as i64)
           .map_err(|_| "negative baseline jump target".to_string())?;
       } else if matches!(
-        Op::from_byte(op),
-        Some(Op::JumpIfFalse | Op::JumpIfTrue | Op::JumpIfNullish)
+        Opcode::from_byte(op),
+        Some(Opcode::JumpIfFalse | Opcode::JumpIfTrue | Opcode::JumpIfNullish)
       ) {
         let Some(value) = registers[rd] else {
           return self.resume_materialized(&registers, pc);
         };
         let truthy = value != 0.0 && !value.is_nan();
-        let take = match Op::from_byte(op) {
-          Some(Op::JumpIfFalse) => !truthy,
-          Some(Op::JumpIfTrue) => truthy,
-          Some(Op::JumpIfNullish) => false,
+        let take = match Opcode::from_byte(op) {
+          Some(Opcode::JumpIfFalse) => !truthy,
+          Some(Opcode::JumpIfTrue) => truthy,
+          Some(Opcode::JumpIfNullish) => false,
           _ => unreachable!(),
         };
         if take {
-          pc =
-            usize::try_from(pc as i64 + 1 + crate::bytecode::decode_risc_cond_offset(word) as i64)
-              .map_err(|_| "negative baseline conditional target".to_string())?;
+          pc = usize::try_from(
+            pc as i64 + 1 + crate::bytecode::decode_conditional_branch_offset(word) as i64,
+          )
+          .map_err(|_| "negative baseline conditional target".to_string())?;
         } else {
           pc += 1;
         }
-      } else if op == Op::Return as u8 {
+      } else if op == Opcode::Return as u8 {
         return registers[rd]
           .map(NativeCode::return_number)
           .unwrap_or_else(|| NativeCode::return_register(rd as u32));
@@ -146,13 +147,13 @@ impl<'a> BaselineCompiler<'a> {
     let mut local_registers = [None; 16];
     let mut pc = block.start_pc;
     while pc < block.end_pc {
-      let word = self.chunk.code[pc];
+      let word = self.code.words[pc];
       let op = (word & 0xff) as u8;
       let rd = ((word >> 8) & 0xf) as usize;
       let rs = ((word >> 12) & 0xf) as usize;
-      if op == Op::Const as u8 {
+      if op == Opcode::Const as u8 {
         let Constant::Number(value) = self
-          .chunk
+          .code
           .constants
           .get(((word >> 16) & 0xffff) as usize)
           .ok_or_else(|| "constant index out of bounds".to_string())?
@@ -161,16 +162,16 @@ impl<'a> BaselineCompiler<'a> {
         };
         registers[rd] = Some(*value);
         local_registers[rd] = None;
-      } else if op == Op::LoadLocal as u8 {
+      } else if op == Opcode::LoadLocal as u8 {
         registers[rd] = None;
         local_registers[rd] = Some(((word >> 16) & 0xffff) as u16);
-      } else if op == Op::Move as u8 {
+      } else if op == Opcode::Move as u8 {
         registers[rd] = registers[rs];
         local_registers[rd] = local_registers[rs];
         if registers[rd].is_none() && local_registers[rd].is_none() {
           return Err("block Move depends on incoming VM state".to_string());
         }
-      } else if op == Op::Return as u8 {
+      } else if op == Opcode::Return as u8 {
         if let Some(value) = registers[rd] {
           return NativeCode::return_number(value);
         }
@@ -179,16 +180,16 @@ impl<'a> BaselineCompiler<'a> {
         }
         return NativeCode::return_register(rd as u32);
       } else if matches!(
-        Op::from_byte(op),
-        Some(Op::JumpIfFalse | Op::JumpIfTrue | Op::JumpIfNullish)
+        Opcode::from_byte(op),
+        Some(Opcode::JumpIfFalse | Opcode::JumpIfTrue | Opcode::JumpIfNullish)
       ) {
         let [taken, fallthrough] = block.successors.as_slice() else {
           return Err("conditional block does not have two successors".to_string());
         };
-        let condition = match Op::from_byte(op) {
-          Some(Op::JumpIfFalse) => 0,
-          Some(Op::JumpIfTrue) => 1,
-          Some(Op::JumpIfNullish) => 2,
+        let condition = match Opcode::from_byte(op) {
+          Some(Opcode::JumpIfFalse) => 0,
+          Some(Opcode::JumpIfTrue) => 1,
+          Some(Opcode::JumpIfNullish) => 2,
           _ => unreachable!(),
         };
         if let Some(value) = registers[rd] {
@@ -211,7 +212,7 @@ impl<'a> BaselineCompiler<'a> {
           *taken as u32,
           *fallthrough as u32,
         );
-      } else if op == Op::Jump as u8 {
+      } else if op == Opcode::Jump as u8 {
         let Some(target) = block.successors.first().copied() else {
           return Err("jump block has no successor".to_string());
         };
@@ -272,8 +273,6 @@ impl FunctionId {
   }
 }
 
-pub(crate) type VmPc = usize;
-
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct JitStats {
   pub(crate) baseline_entries: u64,
@@ -293,22 +292,24 @@ pub(crate) enum JitCodeState {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CompiledBlock {
-  pub(crate) start_pc: VmPc,
-  pub(crate) end_pc: VmPc,
-  pub(crate) successors: Vec<VmPc>,
+  pub(crate) start_pc: InstructionIndex,
+  pub(crate) end_pc: InstructionIndex,
+  pub(crate) successors: Vec<InstructionIndex>,
 }
 
-fn discover_blocks(chunk: &Chunk) -> Result<Vec<CompiledBlock>, String> {
+fn discover_blocks(code: &Chunk) -> Result<Vec<CompiledBlock>, String> {
   use std::collections::BTreeSet;
 
-  if chunk.code.is_empty() {
+  if code.words.is_empty() {
     return Ok(Vec::new());
   }
   let mut leaders = BTreeSet::from([0]);
-  for (pc, word) in chunk.code.iter().copied().enumerate() {
-    let op = Op::from_byte((word & 0xff) as u8).ok_or_else(|| format!("invalid opcode at {pc}"))?;
+  for (pc, word) in code.words.iter().copied().enumerate() {
+    let op = Instruction::decode(word)
+      .map_err(|error| format!("{error} at instruction {pc}"))?
+      .opcode;
     let offset = match op {
-      Op::Jump => {
+      Opcode::Jump => {
         let payload = ((word >> 8) & 0x00ff_ffff) as i32;
         Some(if payload & 0x0080_0000 != 0 {
           payload | !0x00ff_ffff
@@ -316,23 +317,23 @@ fn discover_blocks(chunk: &Chunk) -> Result<Vec<CompiledBlock>, String> {
           payload
         })
       }
-      Op::JumpIfFalse | Op::JumpIfTrue | Op::JumpIfNullish => {
-        Some(crate::bytecode::decode_risc_cond_offset(word))
+      Opcode::JumpIfFalse | Opcode::JumpIfTrue | Opcode::JumpIfNullish => {
+        Some(crate::bytecode::decode_conditional_branch_offset(word))
       }
-      Op::CompareJump => Some(crate::bytecode::decode_compare_jump(word).3 as i32),
+      Opcode::CompareJump => Some(crate::bytecode::decode_compare_jump(word).3 as i32),
       _ => None,
     };
     if let Some(offset) = offset {
       let target = usize::try_from(pc as i64 + 1 + offset as i64)
         .map_err(|_| format!("negative branch target at {pc}"))?;
-      if target >= chunk.code.len() {
-        return Err(format!("branch target {target} is outside the chunk"));
+      if target >= code.words.len() {
+        return Err(format!("branch target {target} is outside the code"));
       }
       leaders.insert(target);
-      if pc + 1 < chunk.code.len() {
+      if pc + 1 < code.words.len() {
         leaders.insert(pc + 1);
       }
-    } else if matches!(op, Op::Return | Op::Throw) && pc + 1 < chunk.code.len() {
+    } else if matches!(op, Opcode::Return | Opcode::Throw) && pc + 1 < code.words.len() {
       leaders.insert(pc + 1);
     }
   }
@@ -343,14 +344,15 @@ fn discover_blocks(chunk: &Chunk) -> Result<Vec<CompiledBlock>, String> {
     let end_pc = leaders
       .get(index + 1)
       .copied()
-      .unwrap_or(chunk.code.len());
+      .unwrap_or(code.words.len());
     let terminal_pc = end_pc - 1;
-    let word = chunk.code[terminal_pc];
-    let op =
-      Op::from_byte((word & 0xff) as u8).ok_or_else(|| "invalid terminal opcode".to_string())?;
+    let word = code.words[terminal_pc];
+    let op = Instruction::decode(word)
+      .map_err(|error| format!("invalid terminal instruction: {error}"))?
+      .opcode;
     let mut successors = Vec::with_capacity(2);
     match op {
-      Op::Jump => {
+      Opcode::Jump => {
         let payload = ((word >> 8) & 0x00ff_ffff) as i32;
         let offset = if payload & 0x0080_0000 != 0 {
           payload | !0x00ff_ffff
@@ -359,24 +361,25 @@ fn discover_blocks(chunk: &Chunk) -> Result<Vec<CompiledBlock>, String> {
         };
         successors.push((terminal_pc as i64 + 1 + offset as i64) as usize);
       }
-      Op::JumpIfFalse | Op::JumpIfTrue | Op::JumpIfNullish => {
+      Opcode::JumpIfFalse | Opcode::JumpIfTrue | Opcode::JumpIfNullish => {
         let target =
-          (terminal_pc as i64 + 1 + crate::bytecode::decode_risc_cond_offset(word) as i64) as usize;
+          (terminal_pc as i64 + 1 + crate::bytecode::decode_conditional_branch_offset(word) as i64)
+            as usize;
         successors.push(target);
-        if end_pc < chunk.code.len() {
+        if end_pc < code.words.len() {
           successors.push(end_pc);
         }
       }
-      Op::CompareJump => {
+      Opcode::CompareJump => {
         let target =
           (terminal_pc as i64 + 1 + crate::bytecode::decode_compare_jump(word).3 as i64) as usize;
         successors.push(target);
-        if end_pc < chunk.code.len() {
+        if end_pc < code.words.len() {
           successors.push(end_pc);
         }
       }
-      Op::Return | Op::Throw => {}
-      _ if end_pc < chunk.code.len() => successors.push(end_pc),
+      Opcode::Return | Opcode::Throw => {}
+      _ if end_pc < code.words.len() => successors.push(end_pc),
       _ => {}
     }
     blocks.push(CompiledBlock {
@@ -399,7 +402,7 @@ pub(crate) struct NativeBlock {
 pub(crate) struct JitCode {
   pub(crate) version: CodeVersionId,
   pub(crate) state: JitCodeState,
-  native_blocks: HashMap<VmPc, NativeBlock>,
+  native_blocks: HashMap<InstructionIndex, NativeBlock>,
   direct_call: Option<DirectCallTarget>,
 }
 
@@ -449,7 +452,7 @@ pub(crate) enum DirectCallOutcome {
 
 pub(crate) struct BaselineInvocation<'a> {
   pub(crate) vm: *mut crate::vm::state::Vm,
-  pub(crate) start_pc: VmPc,
+  pub(crate) start_pc: InstructionIndex,
   pub(crate) registers: &'a mut [Value],
   pub(crate) arguments: &'a [Value],
   pub(crate) locals: &'a mut [crate::binding::BindingCell],
@@ -459,8 +462,8 @@ pub(crate) struct BaselineInvocation<'a> {
 pub(crate) enum BaselineOutcome {
   Unavailable,
   Returned(Value),
-  Interpret { resume_pc: VmPc },
-  Invalidated { resume_pc: VmPc },
+  Interpret { resume_pc: InstructionIndex },
+  Invalidated { resume_pc: InstructionIndex },
 }
 
 impl DirectCallTarget {
@@ -601,11 +604,11 @@ impl JitRuntime {
   pub(crate) fn install_const_prefix(
     &mut self,
     function: FunctionId,
-    chunk: &Chunk,
+    code: &Chunk,
     parameter_count: usize,
   ) -> Result<CodeVersionId, String> {
-    let blocks = discover_blocks(chunk)?;
-    let compiler = BaselineCompiler { chunk };
+    let blocks = discover_blocks(code)?;
+    let compiler = BaselineCompiler { code };
     let direct_call = compiler
       .compile_direct_leaf(parameter_count)
       .ok()
@@ -670,14 +673,14 @@ impl JitRuntime {
   pub(crate) fn optimizing_numeric_binary_target(
     &mut self,
     function: FunctionId,
-    chunk: &Chunk,
+    code: &Chunk,
     parameter_count: usize,
   ) -> Result<Option<DirectCallTarget>, String> {
     self.poll_optimizing_completions();
     if self.optimizing.disabled {
       return Ok(None);
     }
-    let snapshot = match ir::CompilerChunk::from_chunk(chunk, parameter_count) {
+    let snapshot = match ir::FunctionSnapshot::from_code(code, parameter_count) {
       Ok(snapshot) => snapshot,
       Err(ir::IrError::TooManyParameters) => return Ok(None),
       Err(error) => return Err(format!("optimizing snapshot rejected: {error:?}")),
@@ -1023,7 +1026,7 @@ impl JitRuntime {
     let mut frame = native::JitFrame {
       vm,
       function_id: function.get(),
-      vm_pc: start_pc,
+      resume_pc: start_pc,
       registers: registers.as_mut_ptr(),
       register_count: registers.len(),
       result: &mut result,
@@ -1040,30 +1043,30 @@ impl JitRuntime {
     let Some(code) = code else {
       return Ok(BaselineOutcome::Unavailable);
     };
-    let mut next_pc = frame.vm_pc;
-    if !code.native_blocks.contains_key(&next_pc) {
+    let mut block_pc = frame.resume_pc;
+    if !code.native_blocks.contains_key(&block_pc) {
       return Ok(BaselineOutcome::Interpret {
-        resume_pc: frame.vm_pc,
+        resume_pc: frame.resume_pc,
       });
     }
     let exit = loop {
-      let Some(block) = code.native_blocks.get(&next_pc) else {
-        frame.vm_pc = next_pc;
+      let Some(block) = code.native_blocks.get(&block_pc) else {
+        frame.resume_pc = block_pc;
         break native::JitExit::ResumeInterpreter;
       };
       let exit = unsafe { block.code.call_frame(&mut frame) };
       if exit != native::JIT_EXIT_NEXT_BLOCK {
         break native::decode_exit(exit)?;
       }
-      next_pc = frame.vm_pc;
+      block_pc = frame.resume_pc;
     };
     match exit {
       native::JitExit::Return => Ok(BaselineOutcome::Returned(result)),
       native::JitExit::ResumeInterpreter => Ok(BaselineOutcome::Interpret {
-        resume_pc: frame.vm_pc,
+        resume_pc: frame.resume_pc,
       }),
       native::JitExit::Invalidated => Ok(BaselineOutcome::Invalidated {
-        resume_pc: frame.vm_pc,
+        resume_pc: frame.resume_pc,
       }),
       native::JitExit::NextBlock => Err("unresolved baseline block exit".to_string()),
       native::JitExit::Exception => Err("baseline JIT reported an exception".to_string()),
@@ -1076,8 +1079,8 @@ impl JitRuntime {
     &mut self,
     function: FunctionId,
     version: CodeVersionId,
-    source_pc: VmPc,
-    target_pc: VmPc,
+    source_pc: InstructionIndex,
+    target_pc: InstructionIndex,
   ) -> Result<(), String> {
     let code = self
       .code
@@ -1119,7 +1122,7 @@ pub(crate) enum BaselineState {
 mod tests {
   use super::native::JitFrame;
   use super::*;
-  use crate::bytecode::{Chunk, Constant, Op, encode_risc_cond_jump};
+  use crate::bytecode::{Chunk, Constant, Opcode, encode_conditional_branch};
   use crate::value::Value;
   use std::sync::Arc;
 
@@ -1127,7 +1130,7 @@ mod tests {
     runtime: &JitRuntime,
     function: FunctionId,
     registers: &mut [Value],
-    start_pc: VmPc,
+    start_pc: InstructionIndex,
   ) -> BaselineOutcome {
     let mut locals = [];
     runtime
@@ -1155,21 +1158,21 @@ mod tests {
   #[cfg(all(unix, target_arch = "x86_64"))]
   #[test]
   fn dispatches_unknown_conditional_to_compiled_successors() {
-    let mut chunk = Chunk::new(Arc::new(String::new()));
-    chunk.constants.push(Constant::Number(7.0));
-    chunk.constants.push(Constant::Number(42.0));
-    chunk.write_instr(
-      encode_risc_cond_jump(Op::JumpIfTrue, 0, 2).expect("encoding"),
+    let mut code = Chunk::new(Arc::new(String::new()));
+    code.constants.push(Constant::Number(7.0));
+    code.constants.push(Constant::Number(42.0));
+    code.write_instr(
+      encode_conditional_branch(Opcode::JumpIfTrue, 0, 2).expect("encoding"),
       0,
     );
-    chunk.write_instr(Op::Const as u32 | (1 << 8), 0);
-    chunk.write_instr(Op::Return as u32 | (1 << 8), 0);
-    chunk.write_instr(Op::Const as u32 | (1 << 8) | (1 << 16), 0);
-    chunk.write_instr(Op::Return as u32 | (1 << 8), 0);
+    code.write_instr(Opcode::Const as u32 | (1 << 8), 0);
+    code.write_instr(Opcode::Return as u32 | (1 << 8), 0);
+    code.write_instr(Opcode::Const as u32 | (1 << 8) | (1 << 16), 0);
+    code.write_instr(Opcode::Return as u32 | (1 << 8), 0);
     let function = FunctionId::new(1);
     let mut runtime = JitRuntime::default();
     runtime
-      .install_const_prefix(function, &chunk, 0)
+      .install_const_prefix(function, &code, 0)
       .expect("install blocks");
     for (condition, expected) in [(Value::Bool(false), 7.0), (Value::Bool(true), 42.0)] {
       let mut registers: [Value; 16] = std::array::from_fn(|_| Value::Undefined);
@@ -1183,18 +1186,18 @@ mod tests {
 
   #[cfg(all(unix, target_arch = "x86_64"))]
   #[test]
-  fn compiles_and_dispatches_discovered_risc_blocks() {
-    let mut chunk = Chunk::new(Arc::new(String::new()));
-    chunk.constants.push(Constant::Number(42.0));
-    chunk.constants.push(Constant::Number(7.0));
-    chunk.write_instr(Op::Const as u32, 0);
-    chunk.write_instr(Op::Jump as u32 | (1 << 8), 0);
-    chunk.write_instr(Op::Const as u32 | (1 << 16), 0);
-    chunk.write_instr(Op::Return as u32, 0);
+  fn compiles_and_dispatches_discovered_blocks() {
+    let mut code = Chunk::new(Arc::new(String::new()));
+    code.constants.push(Constant::Number(42.0));
+    code.constants.push(Constant::Number(7.0));
+    code.write_instr(Opcode::Const as u32, 0);
+    code.write_instr(Opcode::Jump as u32 | (1 << 8), 0);
+    code.write_instr(Opcode::Const as u32 | (1 << 16), 0);
+    code.write_instr(Opcode::Return as u32, 0);
     let function = FunctionId::new(1);
     let mut runtime = JitRuntime::default();
     runtime
-      .install_const_prefix(function, &chunk, 0)
+      .install_const_prefix(function, &code, 0)
       .expect("install blocks");
     assert!(runtime.code[&function][0].native_blocks.len() >= 2);
     let mut registers: [Value; 16] = std::array::from_fn(|_| Value::Undefined);
@@ -1281,14 +1284,14 @@ mod tests {
 
   #[test]
   fn discovers_basic_blocks_and_successors() {
-    let mut chunk = Chunk::new(Arc::new(String::new()));
-    chunk.write_instr(Op::Const as u32, 0);
-    chunk.write_instr(Op::Jump as u32 | (1 << 8), 0);
-    chunk.write_instr(Op::Const as u32, 0);
-    chunk.write_instr(Op::Return as u32, 0);
+    let mut code = Chunk::new(Arc::new(String::new()));
+    code.write_instr(Opcode::Const as u32, 0);
+    code.write_instr(Opcode::Jump as u32 | (1 << 8), 0);
+    code.write_instr(Opcode::Const as u32, 0);
+    code.write_instr(Opcode::Return as u32, 0);
 
     assert_eq!(
-      super::discover_blocks(&chunk).expect("block discovery"),
+      super::discover_blocks(&code).expect("block discovery"),
       vec![
         super::CompiledBlock {
           start_pc: 0,
@@ -1314,31 +1317,31 @@ mod tests {
     let mut jump = Chunk::new(Arc::new(String::new()));
     jump.constants.push(Constant::Number(42.0));
     jump.constants.push(Constant::Number(7.0));
-    jump.write_instr(Op::Const as u32, 0);
-    jump.write_instr(Op::Jump as u32 | (1 << 8), 0);
-    jump.write_instr(Op::Const as u32 | (1 << 16), 0);
-    jump.write_instr(Op::Return as u32, 0);
+    jump.write_instr(Opcode::Const as u32, 0);
+    jump.write_instr(Opcode::Jump as u32 | (1 << 8), 0);
+    jump.write_instr(Opcode::Const as u32 | (1 << 16), 0);
+    jump.write_instr(Opcode::Return as u32, 0);
 
     let mut conditional = Chunk::new(Arc::new(String::new()));
     conditional.constants.push(Constant::Number(1.0));
     conditional.constants.push(Constant::Number(9.0));
-    conditional.write_instr(Op::Const as u32, 0);
+    conditional.write_instr(Opcode::Const as u32, 0);
     conditional.write_instr(
-      encode_risc_cond_jump(Op::JumpIfTrue, 0, 1).expect("encoding"),
+      encode_conditional_branch(Opcode::JumpIfTrue, 0, 1).expect("encoding"),
       0,
     );
-    conditional.write_instr(Op::Const as u32 | (1 << 16), 0);
-    conditional.write_instr(Op::Return as u32, 0);
+    conditional.write_instr(Opcode::Const as u32 | (1 << 16), 0);
+    conditional.write_instr(Opcode::Return as u32, 0);
 
-    for chunk in [&jump, &conditional] {
-      let code = BaselineCompiler { chunk }
+    for code in [&jump, &conditional] {
+      let native_code = BaselineCompiler { code }
         .compile_const_prefix()
         .expect("baseline compile");
       let mut result = Value::Undefined;
       let mut frame = JitFrame {
         vm: std::ptr::null_mut(),
         function_id: 0,
-        vm_pc: 0,
+        resume_pc: 0,
         registers: std::ptr::null_mut(),
         register_count: 0,
         result: &mut result,
@@ -1347,28 +1350,28 @@ mod tests {
         locals: std::ptr::null_mut(),
         local_count: 0,
       };
-      assert_eq!(unsafe { code.call_frame(&mut frame) }, 0);
+      assert_eq!(unsafe { native_code.call_frame(&mut frame) }, 0);
       assert!(
-        matches!(result, Value::Number(value) if value == if std::ptr::eq(chunk, &jump) { 42.0 } else { 1.0 })
+        matches!(result, Value::Number(value) if value == if std::ptr::eq(code, &jump) { 42.0 } else { 1.0 })
       );
     }
   }
 
   #[test]
   fn propagates_move_without_materializing_a_vm_register() {
-    let mut chunk = Chunk::new(Arc::new(String::new()));
-    chunk.constants.push(Constant::Number(-13.5));
-    chunk.write_instr(Op::Const as u32 | (3 << 8), 0);
-    chunk.write_instr(Op::Move as u32 | (7 << 8) | (3 << 12), 0);
-    chunk.write_instr(Op::Return as u32 | (7 << 8), 0);
-    let code = BaselineCompiler { chunk: &chunk }
+    let mut code = Chunk::new(Arc::new(String::new()));
+    code.constants.push(Constant::Number(-13.5));
+    code.write_instr(Opcode::Const as u32 | (3 << 8), 0);
+    code.write_instr(Opcode::Move as u32 | (7 << 8) | (3 << 12), 0);
+    code.write_instr(Opcode::Return as u32 | (7 << 8), 0);
+    let code = BaselineCompiler { code: &code }
       .compile_const_prefix()
       .expect("baseline compile");
     let mut result = Value::Undefined;
     let mut frame = JitFrame {
       vm: std::ptr::null_mut(),
       function_id: 0,
-      vm_pc: 0,
+      resume_pc: 0,
       registers: std::ptr::null_mut(),
       register_count: 0,
       result: &mut result,
@@ -1382,12 +1385,12 @@ mod tests {
   }
 
   #[test]
-  fn exits_to_interpreter_at_next_risc_pc() {
-    let mut chunk = Chunk::new(Arc::new(String::new()));
-    chunk.constants.push(Constant::Number(42.0));
-    chunk.write_instr(Op::Const as u32, 0);
-    chunk.write_instr(Op::Neg as u32, 0);
-    let code = BaselineCompiler { chunk: &chunk }
+  fn exits_to_interpreter_at_next_pc() {
+    let mut code = Chunk::new(Arc::new(String::new()));
+    code.constants.push(Constant::Number(42.0));
+    code.write_instr(Opcode::Const as u32, 0);
+    code.write_instr(Opcode::Neg as u32, 0);
+    let code = BaselineCompiler { code: &code }
       .compile_const_prefix()
       .expect("baseline compile");
     let mut registers: [Value; 16] = std::array::from_fn(|_| Value::Undefined);
@@ -1395,7 +1398,7 @@ mod tests {
     let mut frame = JitFrame {
       vm: std::ptr::null_mut(),
       function_id: 0,
-      vm_pc: 0,
+      resume_pc: 0,
       registers: registers.as_mut_ptr(),
       register_count: registers.len(),
       result: &mut result,
@@ -1405,21 +1408,21 @@ mod tests {
       local_count: 0,
     };
     assert_eq!(unsafe { code.call_frame(&mut frame) }, 1);
-    assert_eq!(frame.vm_pc, 1);
+    assert_eq!(frame.resume_pc, 1);
     assert!(matches!(registers[0], Value::Number(value) if value == 42.0));
   }
 
   #[cfg(all(unix, target_arch = "x86_64"))]
   #[test]
   fn missing_interior_block_resumes_without_restarting_the_function() {
-    let mut chunk = Chunk::new(Arc::new(String::new()));
-    chunk.constants.push(Constant::Number(42.0));
-    chunk.write_instr(Op::Const as u32, 0);
-    chunk.write_instr(Op::Return as u32, 0);
+    let mut code = Chunk::new(Arc::new(String::new()));
+    code.constants.push(Constant::Number(42.0));
+    code.write_instr(Opcode::Const as u32, 0);
+    code.write_instr(Opcode::Return as u32, 0);
     let function = FunctionId::new(1);
     let mut runtime = JitRuntime::default();
     runtime
-      .install_const_prefix(function, &chunk, 0)
+      .install_const_prefix(function, &code, 0)
       .expect("install blocks");
     let mut registers: [Value; 16] = std::array::from_fn(|_| Value::Undefined);
     assert_eq!(
@@ -1465,7 +1468,7 @@ mod tests {
 pub(crate) struct FunctionProfile {
   pub(crate) calls: u64,
   pub(crate) parameter_count: usize,
-  pub(crate) loop_counts: HashMap<VmPc, u64>,
+  pub(crate) loop_counts: HashMap<InstructionIndex, u64>,
   pub(crate) baseline: BaselineState,
 }
 
@@ -1479,7 +1482,7 @@ impl FunctionProfile {
 
   pub(crate) fn record_backedge(
     &mut self,
-    pc: VmPc,
+    pc: InstructionIndex,
   ) {
     let count = self.loop_counts.entry(pc).or_default();
     *count = count.saturating_add(1);

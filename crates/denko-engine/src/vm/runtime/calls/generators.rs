@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use crate::bytecode::FunctionProto;
+use crate::bytecode::Function;
 use crate::errors::RuntimeError;
 use crate::gc;
 use crate::value::{ObjectData, Value};
 use crate::vm::Vm;
-use crate::vm::state::{GeneratorRunner, GeneratorStatus, RiscExecutionState, RiscRunOutcome};
+use crate::vm::state::{GeneratorRunner, GeneratorStatus, RegisterState, RunOutcome};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -26,19 +26,25 @@ impl Vm {
 
   pub(in crate::vm::runtime) fn create_generator_object(
     &mut self,
-    proto: &Rc<FunctionProto>,
+    proto: &Rc<Function>,
     closure_env: &crate::closure_environment::ClosureEnvironment,
     call_args: Vec<Value>,
     this_value: Value,
     callee: &Value,
   ) -> Result<Value, RuntimeError> {
     let mut child = self.fork_execution();
+    let register_arguments = call_args
+      .iter()
+      .take(crate::bytecode::abi::REGISTER_ARGUMENT_COUNT)
+      .cloned()
+      .collect::<Vec<_>>();
     child.push_call_frame(proto, closure_env, call_args, this_value, callee.clone())?;
-    let mut risc_state = RiscExecutionState::new(
+    let mut register_state = RegisterState::new(
       child.execution.active.this_value.clone(),
-      child.execution.active.chunk.risc_spill_count as usize,
+      &register_arguments,
+      child.execution.active.code.spill_slot_count as usize,
     );
-    let initialization = match child.run_risc_state(&mut risc_state, true) {
+    let initialization = match child.run_state(&mut register_state, true) {
       Ok(outcome) => outcome,
       Err(error) => {
         let Some(thrown) = child.exceptions.last_uncaught.take() else {
@@ -53,11 +59,11 @@ impl Vm {
       }
     };
     match initialization {
-      RiscRunOutcome::Initialized => {}
-      RiscRunOutcome::Return(_)
-      | RiscRunOutcome::Yield(_)
-      | RiscRunOutcome::YieldStar(_)
-      | RiscRunOutcome::Await(_) => {
+      RunOutcome::Initialized => {}
+      RunOutcome::Return(_)
+      | RunOutcome::Yield(_)
+      | RunOutcome::YieldStar(_)
+      | RunOutcome::Await(_) => {
         return Err(RuntimeError::from(
           "generator body reached a suspension before initialization",
         ));
@@ -65,7 +71,7 @@ impl Vm {
     }
     let runner = Rc::new(RefCell::new(GeneratorRunner {
       vm: child,
-      risc_state,
+      register_state,
       status: GeneratorStatus::SuspendedStart,
     }));
     let next_runner = Rc::clone(&runner);
@@ -112,20 +118,22 @@ impl Vm {
           }
 
           let outcome = {
-            let GeneratorRunner { vm, risc_state, .. } = &mut *runner;
-            vm.run_risc_state(risc_state, false)
+            let GeneratorRunner {
+              vm, register_state, ..
+            } = &mut *runner;
+            vm.run_state(register_state, false)
           };
           match outcome {
-            Ok(RiscRunOutcome::Yield(value)) => Ok(vm.make_iterator_result(value, false)),
-            Ok(RiscRunOutcome::YieldStar(result)) => Ok(result),
-            Ok(RiscRunOutcome::Return(value)) => {
+            Ok(RunOutcome::Yield(value)) => Ok(vm.make_iterator_result(value, false)),
+            Ok(RunOutcome::YieldStar(result)) => Ok(result),
+            Ok(RunOutcome::Return(value)) => {
               runner.complete();
               Ok(vm.make_iterator_result(value, true))
             }
-            Ok(RiscRunOutcome::Initialized) => Err(RuntimeError::from(
+            Ok(RunOutcome::Initialized) => Err(RuntimeError::from(
               "generator initialization marker executed twice",
             )),
-            Ok(RiscRunOutcome::Await(_)) => {
+            Ok(RunOutcome::Await(_)) => {
               Err(RuntimeError::from("await boundary reached in generator"))
             }
             Err(error) => {
@@ -166,22 +174,22 @@ impl Vm {
           let outcome = {
             let GeneratorRunner {
               vm: generator_vm,
-              risc_state,
+              register_state,
               ..
             } = &mut *runner;
-            generator_vm.run_risc_state(risc_state, false)
+            generator_vm.run_state(register_state, false)
           };
           match outcome {
-            Ok(RiscRunOutcome::Yield(value)) => Ok(vm.make_iterator_result(value, false)),
-            Ok(RiscRunOutcome::YieldStar(result)) => Ok(result),
-            Ok(RiscRunOutcome::Return(value)) => {
+            Ok(RunOutcome::Yield(value)) => Ok(vm.make_iterator_result(value, false)),
+            Ok(RunOutcome::YieldStar(result)) => Ok(result),
+            Ok(RunOutcome::Return(value)) => {
               runner.complete();
               Ok(vm.make_iterator_result(value, true))
             }
-            Ok(RiscRunOutcome::Initialized) => Err(RuntimeError::from(
+            Ok(RunOutcome::Initialized) => Err(RuntimeError::from(
               "generator initialization marker executed twice",
             )),
-            Ok(RiscRunOutcome::Await(_)) => {
+            Ok(RunOutcome::Await(_)) => {
               Err(RuntimeError::from("await boundary reached in generator"))
             }
             Err(error) => {
@@ -214,20 +222,22 @@ impl Vm {
         }
 
         let outcome = {
-          let GeneratorRunner { vm, risc_state, .. } = &mut *runner;
-          vm.run_risc_state(risc_state, false)
+          let GeneratorRunner {
+            vm, register_state, ..
+          } = &mut *runner;
+          vm.run_state(register_state, false)
         };
         match outcome {
-          Ok(RiscRunOutcome::Yield(value)) => Ok(vm.make_iterator_result(value, false)),
-          Ok(RiscRunOutcome::YieldStar(result)) => Ok(result),
-          Ok(RiscRunOutcome::Return(value)) => {
+          Ok(RunOutcome::Yield(value)) => Ok(vm.make_iterator_result(value, false)),
+          Ok(RunOutcome::YieldStar(result)) => Ok(result),
+          Ok(RunOutcome::Return(value)) => {
             runner.complete();
             Ok(vm.make_iterator_result(value, true))
           }
-          Ok(RiscRunOutcome::Initialized) => Err(RuntimeError::from(
+          Ok(RunOutcome::Initialized) => Err(RuntimeError::from(
             "generator initialization marker executed twice",
           )),
-          Ok(RiscRunOutcome::Await(_)) => {
+          Ok(RunOutcome::Await(_)) => {
             Err(RuntimeError::from("await boundary reached in generator"))
           }
           Err(error) => {

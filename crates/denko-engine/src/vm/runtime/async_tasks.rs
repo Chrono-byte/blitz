@@ -12,7 +12,7 @@
 //!   installed, and do not stop the remaining queue from being drained.
 //! - Promise reactions and thenable-resolution work are queued as microtasks,
 //!   preserving their observable job ordering.
-use crate::bytecode::FunctionProto;
+use crate::bytecode::Function;
 use crate::runtime_utils::{reject_pending_promise, resolve_promise_with_value};
 use crate::value::{ObjectData, PromiseState, Value};
 use crate::vm::state::*;
@@ -22,7 +22,7 @@ use std::rc::Rc;
 
 struct AsyncExecution {
   vm: Vm,
-  risc_state: RiscExecutionState,
+  register_state: RegisterState,
 }
 
 struct AsyncRunner {
@@ -323,7 +323,7 @@ impl Vm {
   /// microtasks are recorded on the VM and reported through the host hook.
   pub(super) fn invoke_async_closure(
     &mut self,
-    proto: &Rc<FunctionProto>,
+    proto: &Rc<Function>,
     env: &crate::closure_environment::ClosureEnvironment,
     call_args: Vec<Value>,
     this_arg: Value,
@@ -342,6 +342,11 @@ impl Vm {
     }
 
     let mut child = self.fork_execution();
+    let register_arguments = call_args
+      .iter()
+      .take(crate::bytecode::abi::REGISTER_ARGUMENT_COUNT)
+      .cloned()
+      .collect::<Vec<_>>();
     if let Err(error) = child.push_call_frame(proto, env, call_args, this_arg, callee.clone()) {
       let reason = child
         .exceptions
@@ -351,14 +356,15 @@ impl Vm {
       reject_pending_promise(self, &promise, reason);
       return Ok(self.promise_value(promise));
     }
-    let risc_state = RiscExecutionState::new(
+    let register_state = RegisterState::new(
       child.execution.active.this_value.clone(),
-      child.execution.active.chunk.risc_spill_count as usize,
+      &register_arguments,
+      child.execution.active.code.spill_slot_count as usize,
     );
     let runner = Rc::new(RefCell::new(AsyncRunner {
       execution: Some(AsyncExecution {
         vm: child,
-        risc_state,
+        register_state,
       }),
       result_promise: Rc::clone(&promise),
     }));
@@ -378,32 +384,40 @@ impl Vm {
     let run_result = match resume {
       AsyncResume::Start => execution
         .vm
-        .run_risc_state(&mut execution.risc_state, false),
+        .run_state(&mut execution.register_state, false),
       AsyncResume::Fulfill(value) => {
-        if execution.risc_state.pending_operation.is_some() {
+        if execution
+          .register_state
+          .pending_operation
+          .is_some()
+        {
           execution
-            .risc_state
+            .register_state
             .settle_pending_operation(AwaitSettlement::Fulfilled(value));
         } else {
-          execution.risc_state.resume_with(value);
+          execution.register_state.resume_with(value);
         }
         execution
           .vm
-          .run_risc_state(&mut execution.risc_state, false)
+          .run_state(&mut execution.register_state, false)
       }
       AsyncResume::Reject(reason) => {
-        if execution.risc_state.pending_operation.is_some() {
+        if execution
+          .register_state
+          .pending_operation
+          .is_some()
+        {
           execution
-            .risc_state
+            .register_state
             .settle_pending_operation(AwaitSettlement::Rejected(reason));
           execution
             .vm
-            .run_risc_state(&mut execution.risc_state, false)
+            .run_state(&mut execution.register_state, false)
         } else {
           match execution.vm.throw_value(reason) {
             Ok(()) => execution
               .vm
-              .run_risc_state(&mut execution.risc_state, false),
+              .run_state(&mut execution.register_state, false),
             Err(error) => Err(error),
           }
         }
@@ -420,7 +434,7 @@ impl Vm {
       .append(&mut execution.vm.jobs.dynamic_imports);
 
     match run_result {
-      Ok(RiscRunOutcome::Await(value)) => {
+      Ok(RunOutcome::Await(value)) => {
         runner.borrow_mut().execution = Some(execution);
         if let Err(error) = Self::queue_async_resume(host, runner, value) {
           let result_promise = Rc::clone(&runner.borrow().result_promise);
@@ -432,14 +446,14 @@ impl Vm {
           if let Some(mut execution) = runner.borrow_mut().execution.take() {
             execution
               .vm
-              .discard_suspended_risc_activation(&mut execution.risc_state);
+              .discard_suspended_activation(&mut execution.register_state);
           }
         }
       }
-      Ok(RiscRunOutcome::Return(value)) => {
+      Ok(RunOutcome::Return(value)) => {
         execution
           .vm
-          .discard_suspended_risc_activation(&mut execution.risc_state);
+          .discard_suspended_activation(&mut execution.register_state);
         let result_promise = Rc::clone(&runner.borrow().result_promise);
         if let Err(error) = resolve_promise_with_value(host, &result_promise, value) {
           reject_pending_promise(
@@ -449,10 +463,10 @@ impl Vm {
           );
         }
       }
-      Ok(RiscRunOutcome::Initialized) => {
+      Ok(RunOutcome::Initialized) => {
         Self::reject_invalid_async_outcome(host, runner, &mut execution, "generator boundary");
       }
-      Ok(RiscRunOutcome::Yield(_) | RiscRunOutcome::YieldStar(_)) => {
+      Ok(RunOutcome::Yield(_) | RunOutcome::YieldStar(_)) => {
         Self::reject_invalid_async_outcome(host, runner, &mut execution, "yield boundary");
       }
       Err(error) => {
@@ -464,7 +478,7 @@ impl Vm {
           .unwrap_or_else(|| Value::String(error.to_string().into()));
         execution
           .vm
-          .discard_suspended_risc_activation(&mut execution.risc_state);
+          .discard_suspended_activation(&mut execution.register_state);
         let result_promise = Rc::clone(&runner.borrow().result_promise);
         reject_pending_promise(host, &result_promise, reason);
       }
@@ -479,7 +493,7 @@ impl Vm {
   ) {
     execution
       .vm
-      .discard_suspended_risc_activation(&mut execution.risc_state);
+      .discard_suspended_activation(&mut execution.register_state);
     let result_promise = Rc::clone(&runner.borrow().result_promise);
     reject_pending_promise(
       host,

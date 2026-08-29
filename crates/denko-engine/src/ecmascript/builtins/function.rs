@@ -101,14 +101,14 @@ pub(crate) fn create_generator_function_constructor(
           .join(","),
         body
       );
-      let chunk = crate::typecheck::with_strict_override(None, || {
+      let code = crate::typecheck::with_strict_override(None, || {
         let session = Parser::parse_source(&source)
           .map_err(|error| syntax_error(vm, format!("parse: {error}")))?;
         compiler::compile_repl_session(&session)
           .map_err(|error| syntax_error(vm, format!("compile: {error}")))
       })?;
       let mut child = Vm::new(Rc::clone(&constructor_globals));
-      let result = child.run(chunk)?;
+      let result = child.run(code)?;
       if let Value::Closure { props, .. } = &result {
         props.borrow_mut().set_internal_slot(
           "[[RealmGlobals]]",
@@ -179,14 +179,14 @@ pub(crate) fn create_async_function_constructor(
           .join(","),
         body
       );
-      let chunk = crate::typecheck::with_strict_override(None, || {
+      let code = crate::typecheck::with_strict_override(None, || {
         let session = Parser::parse_source(&source)
           .map_err(|error| syntax_error(vm, format!("parse: {error}")))?;
         compiler::compile_repl_session(&session)
           .map_err(|error| syntax_error(vm, format!("compile: {error}")))
       })?;
       let mut child = Vm::new(Rc::clone(&constructor_globals));
-      let result = child.run(chunk)?;
+      let result = child.run(code)?;
       if let Value::Closure { props, .. } = &result {
         props.borrow_mut().set_internal_slot(
           "[[RealmGlobals]]",
@@ -255,14 +255,14 @@ pub(crate) fn create_function_intrinsics(
         .join(","),
       body_src
     );
-    let chunk = crate::typecheck::with_strict_override(None, || {
+    let code = crate::typecheck::with_strict_override(None, || {
       let session =
         Parser::parse_source(&source).map_err(|e| syntax_error(vm, format!("parse: {}", e)))?;
       compiler::compile_repl_session(&session)
         .map_err(|e| syntax_error(vm, format!("compile: {}", e)))
     })?;
     let mut child = Vm::new(Rc::clone(&function_ctor_globals));
-    let result = child.run(chunk)?;
+    let result = child.run(code)?;
     set_builtin_name(&result, "anonymous");
     match &result {
       Value::Closure { props, .. } | Value::BuiltinObject(_, props) => {

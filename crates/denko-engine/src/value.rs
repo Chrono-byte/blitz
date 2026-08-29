@@ -386,8 +386,8 @@ fn fill_f64_slice(
     unsafe {
       let packed = _mm_set1_pd(value);
       let mut chunks = slice.chunks_exact_mut(2);
-      for chunk in &mut chunks {
-        _mm_storeu_pd(chunk.as_mut_ptr(), packed);
+      for code in &mut chunks {
+        _mm_storeu_pd(code.as_mut_ptr(), packed);
       }
       for item in chunks.into_remainder() {
         *item = value;
@@ -858,7 +858,7 @@ impl ObjectData {
   }
 }
 
-use crate::bytecode::FunctionProto;
+use crate::bytecode::Function;
 
 /// Promise internal state
 #[derive(Clone, Debug)]
@@ -913,7 +913,7 @@ pub enum Value {
   /// Function closure with prototype and captured environment
   Closure {
     /// Function prototype
-    proto: Rc<FunctionProto>,
+    proto: Rc<Function>,
     /// Captured / closed-over binding cells
     env: crate::closure_environment::ClosureEnvironment,
     /// Lexically captured `this` value for arrow functions.
@@ -960,7 +960,7 @@ pub(crate) enum WeakValue {
   Array(Weak<RefCell<ArrayData>>, Weak<RefCell<ObjectData>>),
   Proxy(Weak<RefCell<ProxyData>>),
   Closure(
-    Weak<FunctionProto>,
+    Weak<Function>,
     crate::closure_environment::WeakClosureEnvironment,
     Option<Box<WeakValue>>,
     Weak<RefCell<ObjectData>>,

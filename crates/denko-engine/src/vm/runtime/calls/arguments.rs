@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use crate::bytecode::FunctionProto;
+use crate::bytecode::Function;
 use crate::errors::RuntimeError;
 use crate::gc;
 use crate::runtime_utils::{usize_to_decimal_string, usize_to_f64};
@@ -70,7 +70,7 @@ impl Vm {
   pub(in crate::vm::runtime) fn prepare_call_args(
     &self,
     args: Vec<Value>,
-    proto: &FunctionProto,
+    proto: &Function,
   ) -> Result<Vec<Value>, RuntimeError> {
     if !proto.has_rest {
       return Ok(args);
@@ -151,7 +151,7 @@ impl Vm {
   /// Builds an arguments object for a function call, mapping arguments to local slots.
   pub(in crate::vm::runtime) fn build_mapped_arguments_object(
     &mut self,
-    proto: &FunctionProto,
+    proto: &Function,
     callee: Value,
     args_for_arguments: &[Option<Value>],
   ) -> Value {

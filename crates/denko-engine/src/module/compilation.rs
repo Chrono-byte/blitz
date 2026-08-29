@@ -49,7 +49,7 @@ pub(super) fn compile_modules_parallel(
                     Some(&job.context),
                     &job.source,
                   )
-                  .map(crate::runtime_utils::clear_slot_types_in_chunk)
+                  .map(crate::runtime_utils::clear_slot_types_in_code)
                   .map_err(|error| format!("Compile failed: {error}"))
                 })
             }))
@@ -87,8 +87,8 @@ pub(super) fn compile_modules_parallel(
   results.sort_unstable_by_key(|(index, _, _)| *index);
   let mut compiled = HashMap::with_capacity(jobs.len());
   for (_, path, result) in results {
-    let chunk = result.map_err(crate::errors::RuntimeError::from)?;
-    compiled.insert(path, chunk);
+    let code = result.map_err(crate::errors::RuntimeError::from)?;
+    compiled.insert(path, code);
   }
   Ok(compiled)
 }
@@ -192,10 +192,10 @@ pub fn evaluate_entry_shared(
           break 'prepare None;
         }
         rec.state = ModuleState::Evaluating;
-        let chunk = match &rec.payload {
+        let code = match &rec.payload {
           ModuleRecordPayload::Prelinked { .. } => rec.bytecode.clone().ok_or_else(|| {
             crate::errors::RuntimeError::from(
-              "Prelinked module record is missing its validated bytecode chunk",
+              "Prelinked module record is missing its validated chunk",
             )
           })?,
           ModuleRecordPayload::Source {
@@ -224,33 +224,33 @@ pub fn evaluate_entry_shared(
               exports: rec.exports.keys().cloned().collect(),
               namespace_exports: rec.namespace_exports.clone(),
             };
-            let chunk = if let Some(chunk) = rec.bytecode.clone() {
-              crate::runtime_utils::clear_slot_types_in_chunk(chunk)
-            } else if let Some(chunk) = compiled.remove(&path) {
-              chunk
+            let code = if let Some(code) = rec.bytecode.clone() {
+              crate::runtime_utils::clear_slot_types_in_code(code)
+            } else if let Some(code) = compiled.remove(&path) {
+              code
             } else {
               loader_ref.pipeline_counters.source_compilation();
-              let chunk =
+              let code =
                 crate::compiler::compile_oxc_with_ctx(program, Some(&context), session.source())
                   .map_err(|error| {
                     crate::errors::RuntimeError::from(format!("Compile failed: {error}"))
                   })?;
-              crate::runtime_utils::clear_slot_types_in_chunk(chunk)
+              crate::runtime_utils::clear_slot_types_in_code(code)
             };
-            rec.bytecode = Some(chunk.clone());
-            chunk
+            rec.bytecode = Some(code.clone());
+            code
           }
         };
-        Some((rec_rc_return, chunk))
+        Some((rec_rc_return, code))
       } else {
         None
       }
     };
 
-    if let Some((rec_rc, chunk)) = maybe_chunk {
+    if let Some((rec_rc, code)) = maybe_chunk {
       let specifier = rec_rc.borrow().specifier.clone();
       vm.set_current_module_specifier(Some(specifier));
-      let result = vm.run(chunk);
+      let result = vm.run(code);
       vm.set_current_module_specifier(None);
       result?;
       rec_rc.borrow_mut().state = ModuleState::Evaluated;

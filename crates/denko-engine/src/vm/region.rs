@@ -5,7 +5,7 @@
 mod patterns;
 
 use crate::bytecode::{
-  Chunk, FunctionProto, Op, decode_compare_jump, decode_rd, decode_risc_aux16, decode_rs,
+  Chunk, Function, Opcode, decode_aux16, decode_compare_jump, decode_rd, decode_rs,
 };
 use patterns::*;
 
@@ -404,12 +404,12 @@ pub(super) enum NumericLeafArguments {
 
 impl NumericLoopRegion {
   pub(super) fn decode_property(
-    chunk: &Chunk,
-    ip: usize,
+    code: &Chunk,
+    pc: usize,
   ) -> Option<Self> {
-    let words = chunk
-      .code
-      .get(ip..ip + NUMERIC_PROPERTY_LOOP.len())?;
+    let words = code
+      .words
+      .get(pc..pc + NUMERIC_PROPERTY_LOOP.len())?;
     if !words
       .iter()
       .zip(NUMERIC_PROPERTY_LOOP)
@@ -418,10 +418,10 @@ impl NumericLoopRegion {
       return None;
     }
 
-    let index_slot = decode_risc_aux16(words[0]) as usize;
-    let accumulator_slot = decode_risc_aux16(words[3]) as usize;
-    let object_slot = decode_risc_aux16(words[4]) as usize;
-    let temporary_slot = decode_risc_aux16(words[8]) as usize;
+    let index_slot = decode_aux16(words[0]) as usize;
+    let accumulator_slot = decode_aux16(words[3]) as usize;
+    let object_slot = decode_aux16(words[4]) as usize;
+    let temporary_slot = decode_aux16(words[8]) as usize;
     let (condition, left, right, exit_offset) = decode_compare_jump(words[2]);
     let loop_len = words.len();
     let jump_payload = ((words[loop_len - 1] >> 8) & 0x00ff_ffff) as i32;
@@ -430,9 +430,9 @@ impl NumericLoopRegion {
     } else {
       jump_payload
     };
-    let completed_pc = ip + loop_len;
-    let actual_exit = (ip as i64 + 3 + exit_offset as i64) as usize;
-    let actual_backedge = (ip as i64 + loop_len as i64 + jump_offset as i64) as usize;
+    let completed_pc = pc + loop_len;
+    let actual_exit = (pc as i64 + 3 + exit_offset as i64) as usize;
+    let actual_backedge = (pc as i64 + loop_len as i64 + jump_offset as i64) as usize;
     let index_register = decode_rd(words[0]);
     let accumulator_register = decode_rd(words[3]);
     let step_register = decode_rd(words[16]);
@@ -440,44 +440,44 @@ impl NumericLoopRegion {
       || left != index_register
       || right != decode_rd(words[1])
       || actual_exit != completed_pc
-      || actual_backedge != ip
+      || actual_backedge != pc
       || decode_rd(words[6]) != decode_rd(words[4])
       || decode_rs(words[6]) != decode_rd(words[5])
       || decode_rd(words[7]) != accumulator_register
       || decode_rs(words[7]) != decode_rd(words[6])
       || decode_rd(words[8]) != accumulator_register
-      || decode_risc_aux16(words[8]) as usize != temporary_slot
-      || decode_risc_aux16(words[9]) as usize != accumulator_slot
-      || decode_risc_aux16(words[10]) as usize != temporary_slot
-      || decode_risc_aux16(words[11]) as usize != accumulator_slot
-      || decode_risc_aux16(words[13]) as usize != index_slot
+      || decode_aux16(words[8]) as usize != temporary_slot
+      || decode_aux16(words[9]) as usize != accumulator_slot
+      || decode_aux16(words[10]) as usize != temporary_slot
+      || decode_aux16(words[11]) as usize != accumulator_slot
+      || decode_aux16(words[13]) as usize != index_slot
       || decode_rs(words[17]) != index_register
       || decode_rd(words[18]) != decode_rd(words[17])
       || decode_rs(words[18]) != step_register
       || decode_rd(words[19]) != decode_rd(words[18])
-      || decode_risc_aux16(words[19]) as usize != temporary_slot
-      || decode_risc_aux16(words[20]) as usize != index_slot
-      || decode_risc_aux16(words[21]) as usize != temporary_slot
-      || decode_risc_aux16(words[22]) as usize != index_slot
+      || decode_aux16(words[19]) as usize != temporary_slot
+      || decode_aux16(words[20]) as usize != index_slot
+      || decode_aux16(words[21]) as usize != temporary_slot
+      || decode_aux16(words[22]) as usize != index_slot
       || index_slot == accumulator_slot
       || index_slot == temporary_slot
       || accumulator_slot == temporary_slot
     {
       return None;
     }
-    let key_constant = decode_risc_aux16(words[5]) as usize;
-    match chunk.constants.get(key_constant) {
+    let key_constant = decode_aux16(words[5]) as usize;
+    match code.constants.get(key_constant) {
       Some(crate::bytecode::Constant::String(_)) => {}
       _ => return None,
     }
     Some(Self {
-      entry_pc: ip,
+      entry_pc: pc,
       completed_pc,
       index_slot,
       accumulator_slot,
       temporary_slot,
-      limit: number_constant(chunk, words[1])?,
-      step: number_constant(chunk, words[16])?,
+      limit: number_constant(code, words[1])?,
+      step: number_constant(code, words[16])?,
       prerequisites: NumericLoopPrerequisites::AddProperty {
         object_slot,
         key_constant,
@@ -495,12 +495,12 @@ impl NumericLoopRegion {
   }
 
   pub(super) fn decode_accumulator(
-    chunk: &Chunk,
-    ip: usize,
+    code: &Chunk,
+    pc: usize,
   ) -> Option<Self> {
-    let words = chunk
-      .code
-      .get(ip..ip + NUMERIC_ACCUMULATOR_LOOP.len())?;
+    let words = code
+      .words
+      .get(pc..pc + NUMERIC_ACCUMULATOR_LOOP.len())?;
     if !words
       .iter()
       .zip(NUMERIC_ACCUMULATOR_LOOP)
@@ -509,9 +509,9 @@ impl NumericLoopRegion {
       return None;
     }
 
-    let index_slot = decode_risc_aux16(words[0]) as usize;
-    let accumulator_slot = decode_risc_aux16(words[3]) as usize;
-    let temporary_slot = decode_risc_aux16(words[6]) as usize;
+    let index_slot = decode_aux16(words[0]) as usize;
+    let accumulator_slot = decode_aux16(words[3]) as usize;
+    let temporary_slot = decode_aux16(words[6]) as usize;
     let (condition, left, right, exit_offset) = decode_compare_jump(words[2]);
     let loop_len = words.len();
     let jump_payload = ((words[loop_len - 1] >> 8) & 0x00ff_ffff) as i32;
@@ -520,9 +520,9 @@ impl NumericLoopRegion {
     } else {
       jump_payload
     };
-    let completed_pc = ip + loop_len;
-    let actual_exit = (ip as i64 + 3 + exit_offset as i64) as usize;
-    let actual_backedge = (ip as i64 + loop_len as i64 + jump_offset as i64) as usize;
+    let completed_pc = pc + loop_len;
+    let actual_exit = (pc as i64 + 3 + exit_offset as i64) as usize;
+    let actual_backedge = (pc as i64 + loop_len as i64 + jump_offset as i64) as usize;
     let index_register = decode_rd(words[0]);
     let accumulator_register = decode_rd(words[3]);
     let step_register = decode_rd(words[14]);
@@ -530,23 +530,23 @@ impl NumericLoopRegion {
       || left != index_register
       || right != decode_rd(words[1])
       || actual_exit != completed_pc
-      || actual_backedge != ip
+      || actual_backedge != pc
       || decode_rd(words[5]) != accumulator_register
       || decode_rs(words[5]) != decode_rd(words[4])
       || decode_rd(words[6]) != accumulator_register
-      || decode_risc_aux16(words[6]) as usize != temporary_slot
-      || decode_risc_aux16(words[7]) as usize != accumulator_slot
-      || decode_risc_aux16(words[8]) as usize != temporary_slot
-      || decode_risc_aux16(words[9]) as usize != accumulator_slot
-      || decode_risc_aux16(words[11]) as usize != index_slot
+      || decode_aux16(words[6]) as usize != temporary_slot
+      || decode_aux16(words[7]) as usize != accumulator_slot
+      || decode_aux16(words[8]) as usize != temporary_slot
+      || decode_aux16(words[9]) as usize != accumulator_slot
+      || decode_aux16(words[11]) as usize != index_slot
       || decode_rs(words[15]) != index_register
       || decode_rd(words[16]) != decode_rd(words[15])
       || decode_rs(words[16]) != step_register
       || decode_rd(words[17]) != decode_rd(words[16])
-      || decode_risc_aux16(words[17]) as usize != temporary_slot
-      || decode_risc_aux16(words[18]) as usize != index_slot
-      || decode_risc_aux16(words[19]) as usize != temporary_slot
-      || decode_risc_aux16(words[20]) as usize != index_slot
+      || decode_aux16(words[17]) as usize != temporary_slot
+      || decode_aux16(words[18]) as usize != index_slot
+      || decode_aux16(words[19]) as usize != temporary_slot
+      || decode_aux16(words[20]) as usize != index_slot
       || index_slot == accumulator_slot
       || index_slot == temporary_slot
       || accumulator_slot == temporary_slot
@@ -555,13 +555,13 @@ impl NumericLoopRegion {
     }
 
     Some(Self {
-      entry_pc: ip,
+      entry_pc: pc,
       completed_pc,
       index_slot,
       accumulator_slot,
       temporary_slot,
-      limit: number_constant(chunk, words[1])?,
-      step: number_constant(chunk, words[14])?,
+      limit: number_constant(code, words[1])?,
+      step: number_constant(code, words[14])?,
       prerequisites: NumericLoopPrerequisites::AddIndex,
       exits: NumericExitMap {
         index_register: index_register as usize,
@@ -578,12 +578,12 @@ impl NumericLoopRegion {
 
 impl DenseArrayPushRegion {
   pub(super) fn decode(
-    chunk: &Chunk,
-    ip: usize,
+    code: &Chunk,
+    pc: usize,
   ) -> Option<Self> {
-    let words = chunk
-      .code
-      .get(ip..ip + DENSE_ARRAY_PUSH_LOOP.len())?;
+    let words = code
+      .words
+      .get(pc..pc + DENSE_ARRAY_PUSH_LOOP.len())?;
     if !words
       .iter()
       .zip(DENSE_ARRAY_PUSH_LOOP)
@@ -592,10 +592,10 @@ impl DenseArrayPushRegion {
       return None;
     }
 
-    let index_slot = decode_risc_aux16(words[0]) as usize;
-    let array_slot = decode_risc_aux16(words[3]) as usize;
-    let call_temporary_slot = decode_risc_aux16(words[4]) as usize;
-    let increment_temporary_slot = decode_risc_aux16(words[22]) as usize;
+    let index_slot = decode_aux16(words[0]) as usize;
+    let array_slot = decode_aux16(words[3]) as usize;
+    let call_temporary_slot = decode_aux16(words[4]) as usize;
+    let increment_temporary_slot = decode_aux16(words[22]) as usize;
     let (condition, left, right, exit_offset) = decode_compare_jump(words[2]);
     let jump_payload = ((words[26] >> 8) & 0x00ff_ffff) as i32;
     let jump_offset = if jump_payload & 0x0080_0000 != 0 {
@@ -603,30 +603,30 @@ impl DenseArrayPushRegion {
     } else {
       jump_payload
     };
-    let completed_pc = ip + words.len();
-    let actual_exit = (ip as i64 + 3 + exit_offset as i64) as usize;
-    let actual_backedge = (ip as i64 + words.len() as i64 + jump_offset as i64) as usize;
+    let completed_pc = pc + words.len();
+    let actual_exit = (pc as i64 + 3 + exit_offset as i64) as usize;
+    let actual_backedge = (pc as i64 + words.len() as i64 + jump_offset as i64) as usize;
     if condition != 2
       || left != decode_rd(words[0])
       || right != decode_rd(words[1])
       || actual_exit != completed_pc
-      || actual_backedge != ip
-      || decode_risc_aux16(words[5]) as usize != call_temporary_slot
-      || decode_risc_aux16(words[6]) as usize != call_temporary_slot
-      || decode_risc_aux16(words[9]) as usize != index_slot
-      || decode_risc_aux16(words[16]) as usize != index_slot
-      || decode_risc_aux16(words[23]) as usize != index_slot
-      || decode_risc_aux16(words[24]) as usize != increment_temporary_slot
-      || decode_risc_aux16(words[25]) as usize != index_slot
+      || actual_backedge != pc
+      || decode_aux16(words[5]) as usize != call_temporary_slot
+      || decode_aux16(words[6]) as usize != call_temporary_slot
+      || decode_aux16(words[9]) as usize != index_slot
+      || decode_aux16(words[16]) as usize != index_slot
+      || decode_aux16(words[23]) as usize != index_slot
+      || decode_aux16(words[24]) as usize != increment_temporary_slot
+      || decode_aux16(words[25]) as usize != index_slot
       || index_slot == call_temporary_slot
       || index_slot == increment_temporary_slot
       || call_temporary_slot == increment_temporary_slot
     {
       return None;
     }
-    let Some(crate::bytecode::Constant::String(method_key)) = chunk
+    let Some(crate::bytecode::Constant::String(method_key)) = code
       .constants
-      .get(decode_risc_aux16(words[7]) as usize)
+      .get(decode_aux16(words[7]) as usize)
     else {
       return None;
     };
@@ -635,7 +635,7 @@ impl DenseArrayPushRegion {
     }
 
     Some(Self {
-      entry_pc: ip,
+      entry_pc: pc,
       completed_pc,
       index_slot,
       array_slot,
@@ -644,20 +644,20 @@ impl DenseArrayPushRegion {
       index_register: decode_rd(words[0]) as usize,
       limit_register: decode_rd(words[1]) as usize,
       step_register: decode_rd(words[19]) as usize,
-      limit: number_constant(chunk, words[1])?,
-      step: number_constant(chunk, words[19])?,
+      limit: number_constant(code, words[1])?,
+      step: number_constant(code, words[19])?,
     })
   }
 }
 
 impl DenseMaskedReadRegion {
   pub(super) fn decode(
-    chunk: &Chunk,
-    ip: usize,
+    code: &Chunk,
+    pc: usize,
   ) -> Option<Self> {
-    let words = chunk
-      .code
-      .get(ip..ip + DENSE_MASKED_READ_LOOP.len())?;
+    let words = code
+      .words
+      .get(pc..pc + DENSE_MASKED_READ_LOOP.len())?;
     if !words
       .iter()
       .zip(DENSE_MASKED_READ_LOOP)
@@ -665,10 +665,10 @@ impl DenseMaskedReadRegion {
     {
       return None;
     }
-    let index_slot = decode_risc_aux16(words[0]) as usize;
-    let accumulator_slot = decode_risc_aux16(words[3]) as usize;
-    let array_slot = decode_risc_aux16(words[4]) as usize;
-    let temporary_slot = decode_risc_aux16(words[10]) as usize;
+    let index_slot = decode_aux16(words[0]) as usize;
+    let accumulator_slot = decode_aux16(words[3]) as usize;
+    let array_slot = decode_aux16(words[4]) as usize;
+    let temporary_slot = decode_aux16(words[10]) as usize;
     let index_register = decode_rd(words[0]);
     let limit_register = decode_rd(words[1]);
     let accumulator_register = decode_rd(words[3]);
@@ -685,15 +685,15 @@ impl DenseMaskedReadRegion {
     } else {
       jump_payload
     };
-    let completed_pc = ip + words.len();
-    let actual_exit = (ip as i64 + 3 + exit_offset as i64) as usize;
-    let actual_backedge = (ip as i64 + words.len() as i64 + jump_offset as i64) as usize;
+    let completed_pc = pc + words.len();
+    let actual_exit = (pc as i64 + 3 + exit_offset as i64) as usize;
+    let actual_backedge = (pc as i64 + words.len() as i64 + jump_offset as i64) as usize;
     if condition != 2
       || left != index_register
       || right != limit_register
       || actual_exit != completed_pc
-      || actual_backedge != ip
-      || decode_risc_aux16(words[5]) as usize != index_slot
+      || actual_backedge != pc
+      || decode_aux16(words[5]) as usize != index_slot
       || decode_rd(words[7]) != masked_index_register
       || decode_rs(words[7]) != mask_register
       || decode_rd(words[8]) != array_register
@@ -701,11 +701,11 @@ impl DenseMaskedReadRegion {
       || decode_rd(words[9]) != accumulator_register
       || decode_rs(words[9]) != array_register
       || decode_rd(words[10]) != accumulator_register
-      || decode_risc_aux16(words[11]) as usize != accumulator_slot
-      || decode_risc_aux16(words[12]) as usize != temporary_slot
-      || decode_risc_aux16(words[13]) as usize != accumulator_slot
-      || decode_risc_aux16(words[14]) as usize != index_slot
-      || decode_risc_aux16(words[15]) as usize != index_slot
+      || decode_aux16(words[11]) as usize != accumulator_slot
+      || decode_aux16(words[12]) as usize != temporary_slot
+      || decode_aux16(words[13]) as usize != accumulator_slot
+      || decode_aux16(words[14]) as usize != index_slot
+      || decode_aux16(words[15]) as usize != index_slot
       || decode_rd(words[16]) != previous_index_register
       || decode_rs(words[16]) != previous_index_register
       || decode_rd(words[17]) != previous_index_register
@@ -717,21 +717,21 @@ impl DenseMaskedReadRegion {
       || decode_rd(words[22]) != next_index_register
       || decode_rd(words[23]) != next_index_register
       || decode_rd(words[24]) != next_index_register
-      || decode_risc_aux16(words[21]) as usize != temporary_slot
-      || decode_risc_aux16(words[22]) as usize != index_slot
-      || decode_risc_aux16(words[23]) as usize != temporary_slot
-      || decode_risc_aux16(words[24]) as usize != index_slot
+      || decode_aux16(words[21]) as usize != temporary_slot
+      || decode_aux16(words[22]) as usize != index_slot
+      || decode_aux16(words[23]) as usize != temporary_slot
+      || decode_aux16(words[24]) as usize != index_slot
       || index_slot == accumulator_slot
       || index_slot == temporary_slot
       || accumulator_slot == temporary_slot
-      || number_constant(chunk, words[6])? != 3.0
-      || number_constant(chunk, words[18])? != 1.0
+      || number_constant(code, words[6])? != 3.0
+      || number_constant(code, words[18])? != 1.0
     {
       return None;
     }
 
     Some(Self {
-      entry_pc: ip,
+      entry_pc: pc,
       completed_pc,
       index_slot,
       accumulator_slot,
@@ -743,26 +743,26 @@ impl DenseMaskedReadRegion {
       next_index_register: next_index_register as usize,
       step_register: step_register as usize,
       mask_register: mask_register as usize,
-      limit: number_constant(chunk, words[1])?,
+      limit: number_constant(code, words[1])?,
     })
   }
 }
 
 impl NumericBinaryParameters {
-  pub(super) fn decode(proto: &FunctionProto) -> Option<Self> {
-    let [left, right, add, return_word] = proto.chunk.code.as_slice() else {
+  pub(super) fn decode(proto: &Function) -> Option<Self> {
+    let [left, right, add, return_word] = proto.code.words.as_slice() else {
       return None;
     };
-    let left_slot = decode_risc_aux16(*left) as usize;
-    let right_slot = decode_risc_aux16(*right) as usize;
+    let left_slot = decode_aux16(*left) as usize;
+    let right_slot = decode_aux16(*right) as usize;
     if proto.arity < 2
       || proto.has_rest
       || proto.captures_this
       || !proto.upvalues.is_empty()
-      || opcode(*left) != Op::LoadLocal
-      || opcode(*right) != Op::LoadLocal
-      || opcode(*add) != Op::Add
-      || opcode(*return_word) != Op::Return
+      || opcode(*left) != Opcode::LoadLocal
+      || opcode(*right) != Opcode::LoadLocal
+      || opcode(*add) != Opcode::Add
+      || opcode(*return_word) != Opcode::Return
       || left_slot != 0
       || right_slot != 1
       || decode_rd(*add) != decode_rd(*left)
@@ -780,12 +780,12 @@ impl NumericBinaryParameters {
 
 impl OwnMethodBinaryLoopRegion {
   pub(super) fn decode(
-    chunk: &Chunk,
-    ip: usize,
+    code: &Chunk,
+    pc: usize,
   ) -> Option<Self> {
-    let words = chunk
-      .code
-      .get(ip..ip + OWN_METHOD_BINARY_LOOP.len())?;
+    let words = code
+      .words
+      .get(pc..pc + OWN_METHOD_BINARY_LOOP.len())?;
     if !words
       .iter()
       .zip(OWN_METHOD_BINARY_LOOP)
@@ -793,11 +793,11 @@ impl OwnMethodBinaryLoopRegion {
     {
       return None;
     }
-    let index_slot = decode_risc_aux16(words[0]) as usize;
-    let accumulator_slot = decode_risc_aux16(words[3]) as usize;
-    let receiver_slot = decode_risc_aux16(words[4]) as usize;
-    let call_temporary_slot = decode_risc_aux16(words[5]) as usize;
-    let arithmetic_temporary_slot = decode_risc_aux16(words[19]) as usize;
+    let index_slot = decode_aux16(words[0]) as usize;
+    let accumulator_slot = decode_aux16(words[3]) as usize;
+    let receiver_slot = decode_aux16(words[4]) as usize;
+    let call_temporary_slot = decode_aux16(words[5]) as usize;
+    let arithmetic_temporary_slot = decode_aux16(words[19]) as usize;
     let index_register = decode_rd(words[0]);
     let limit_register = decode_rd(words[1]);
     let accumulator_register = decode_rd(words[3]);
@@ -817,15 +817,15 @@ impl OwnMethodBinaryLoopRegion {
     } else {
       jump_payload
     };
-    let completed_pc = ip + words.len();
+    let completed_pc = pc + words.len();
     if condition != 2
       || left != index_register
       || right != limit_register
-      || (ip as i64 + 3 + exit_offset as i64) as usize != completed_pc
-      || (ip as i64 + words.len() as i64 + jump_offset as i64) as usize != ip
+      || (pc as i64 + 3 + exit_offset as i64) as usize != completed_pc
+      || (pc as i64 + words.len() as i64 + jump_offset as i64) as usize != pc
       || decode_rd(words[5]) != receiver_register
-      || decode_risc_aux16(words[6]) as usize != call_temporary_slot
-      || decode_risc_aux16(words[7]) as usize != call_temporary_slot
+      || decode_aux16(words[6]) as usize != call_temporary_slot
+      || decode_aux16(words[7]) as usize != call_temporary_slot
       || decode_rd(words[9]) != callee_register
       || decode_rs(words[9]) != key_register
       || decode_rd(words[12]) != 2
@@ -836,17 +836,17 @@ impl OwnMethodBinaryLoopRegion {
       || decode_rs(words[14]) != receiver_register
       || decode_rd(words[15]) != 0
       || decode_rs(words[15]) != callee_register
-      || decode_risc_aux16(words[16]) != 2
+      || decode_aux16(words[16]) != 2
       || decode_rd(words[17]) != result_register
       || decode_rs(words[17]) != 0
       || decode_rd(words[18]) != accumulator_register
       || decode_rs(words[18]) != result_register
       || decode_rd(words[19]) != accumulator_register
-      || decode_risc_aux16(words[20]) as usize != accumulator_slot
-      || decode_risc_aux16(words[21]) as usize != arithmetic_temporary_slot
-      || decode_risc_aux16(words[22]) as usize != accumulator_slot
-      || decode_risc_aux16(words[23]) as usize != index_slot
-      || decode_risc_aux16(words[24]) as usize != index_slot
+      || decode_aux16(words[20]) as usize != accumulator_slot
+      || decode_aux16(words[21]) as usize != arithmetic_temporary_slot
+      || decode_aux16(words[22]) as usize != accumulator_slot
+      || decode_aux16(words[23]) as usize != index_slot
+      || decode_aux16(words[24]) as usize != index_slot
       || decode_rd(words[25]) != previous_index_register
       || decode_rs(words[25]) != previous_index_register
       || decode_rd(words[26]) != previous_index_register
@@ -855,13 +855,13 @@ impl OwnMethodBinaryLoopRegion {
       || decode_rs(words[28]) != previous_index_register
       || decode_rs(words[29]) != step_register
       || decode_rd(words[30]) != next_index_register
-      || decode_risc_aux16(words[30]) as usize != arithmetic_temporary_slot
+      || decode_aux16(words[30]) as usize != arithmetic_temporary_slot
       || decode_rd(words[31]) != next_index_register
-      || decode_risc_aux16(words[31]) as usize != index_slot
+      || decode_aux16(words[31]) as usize != index_slot
       || decode_rd(words[32]) != next_index_register
-      || decode_risc_aux16(words[32]) as usize != arithmetic_temporary_slot
+      || decode_aux16(words[32]) as usize != arithmetic_temporary_slot
       || decode_rd(words[33]) != next_index_register
-      || decode_risc_aux16(words[33]) as usize != index_slot
+      || decode_aux16(words[33]) as usize != index_slot
       || [
         index_slot,
         accumulator_slot,
@@ -879,17 +879,17 @@ impl OwnMethodBinaryLoopRegion {
     {
       return None;
     }
-    let method_key_constant = decode_risc_aux16(words[8]) as usize;
-    match chunk.constants.get(method_key_constant) {
+    let method_key_constant = decode_aux16(words[8]) as usize;
+    match code.constants.get(method_key_constant) {
       Some(crate::bytecode::Constant::String(_)) => {}
       _ => return None,
     }
-    let step = number_constant(chunk, words[27])?;
+    let step = number_constant(code, words[27])?;
     if step != 1.0 {
       return None;
     }
     Some(Self {
-      entry_pc: ip,
+      entry_pc: pc,
       completed_pc,
       index_slot,
       accumulator_slot,
@@ -897,9 +897,9 @@ impl OwnMethodBinaryLoopRegion {
       call_temporary_slot,
       arithmetic_temporary_slot,
       method_key_constant,
-      left_argument: number_constant(chunk, words[10])?,
-      right_argument: number_constant(chunk, words[11])?,
-      limit: number_constant(chunk, words[1])?,
+      left_argument: number_constant(code, words[10])?,
+      right_argument: number_constant(code, words[11])?,
+      limit: number_constant(code, words[1])?,
       step,
       index_register: index_register as usize,
       limit_register: limit_register as usize,
@@ -914,15 +914,15 @@ impl OwnMethodBinaryLoopRegion {
 }
 
 impl ReceiverNumericRead {
-  pub(super) fn decode(proto: &FunctionProto) -> Option<Self> {
-    let words = proto.chunk.code.as_slice();
+  pub(super) fn decode(proto: &Function) -> Option<Self> {
+    let words = proto.code.words.as_slice();
     let [get_this, key, get_property, return_word, ..] = words else {
       return None;
     };
     let valid_legacy_trailer = match words {
       [_, _, _, _, implicit_undefined, implicit_return] => {
-        opcode(*implicit_undefined) == Op::Undefined
-          && opcode(*implicit_return) == Op::Return
+        opcode(*implicit_undefined) == Opcode::Undefined
+          && opcode(*implicit_return) == Opcode::Return
           && decode_rd(*implicit_return) == decode_rd(*implicit_undefined)
       }
       [_, _, _, _] => true,
@@ -933,18 +933,18 @@ impl ReceiverNumericRead {
       || proto.captures_this
       || !proto.upvalues.is_empty()
       || !valid_legacy_trailer
-      || opcode(*get_this) != Op::GetThis
-      || opcode(*key) != Op::Const
-      || opcode(*get_property) != Op::GetProperty
-      || opcode(*return_word) != Op::Return
+      || opcode(*get_this) != Opcode::GetThis
+      || opcode(*key) != Opcode::Const
+      || opcode(*get_property) != Opcode::GetProperty
+      || opcode(*return_word) != Opcode::Return
       || decode_rd(*get_property) != decode_rd(*get_this)
       || decode_rs(*get_property) != decode_rd(*key)
       || decode_rd(*return_word) != decode_rd(*get_property)
     {
       return None;
     }
-    let property_key_constant = decode_risc_aux16(*key) as usize;
-    match proto.chunk.constants.get(property_key_constant) {
+    let property_key_constant = decode_aux16(*key) as usize;
+    match proto.code.constants.get(property_key_constant) {
       Some(crate::bytecode::Constant::String(_)) => Some(Self {
         property_key_constant,
       }),
@@ -955,12 +955,12 @@ impl ReceiverNumericRead {
 
 impl OwnMethodReadLoopRegion {
   pub(super) fn decode(
-    chunk: &Chunk,
-    ip: usize,
+    code: &Chunk,
+    pc: usize,
   ) -> Option<Self> {
-    let words = chunk
-      .code
-      .get(ip..ip + OWN_METHOD_READ_LOOP.len())?;
+    let words = code
+      .words
+      .get(pc..pc + OWN_METHOD_READ_LOOP.len())?;
     if !words
       .iter()
       .zip(OWN_METHOD_READ_LOOP)
@@ -968,11 +968,11 @@ impl OwnMethodReadLoopRegion {
     {
       return None;
     }
-    let index_slot = decode_risc_aux16(words[0]) as usize;
-    let accumulator_slot = decode_risc_aux16(words[3]) as usize;
-    let receiver_slot = decode_risc_aux16(words[4]) as usize;
-    let call_temporary_slot = decode_risc_aux16(words[5]) as usize;
-    let arithmetic_temporary_slot = decode_risc_aux16(words[15]) as usize;
+    let index_slot = decode_aux16(words[0]) as usize;
+    let accumulator_slot = decode_aux16(words[3]) as usize;
+    let receiver_slot = decode_aux16(words[4]) as usize;
+    let call_temporary_slot = decode_aux16(words[5]) as usize;
+    let arithmetic_temporary_slot = decode_aux16(words[15]) as usize;
     let index_register = decode_rd(words[0]);
     let limit_register = decode_rd(words[1]);
     let accumulator_register = decode_rd(words[3]);
@@ -990,32 +990,32 @@ impl OwnMethodReadLoopRegion {
     } else {
       jump_payload
     };
-    let completed_pc = ip + words.len();
+    let completed_pc = pc + words.len();
     if condition != 2
       || left != index_register
       || right != limit_register
-      || (ip as i64 + 3 + exit_offset as i64) as usize != completed_pc
-      || (ip as i64 + words.len() as i64 + jump_offset as i64) as usize != ip
+      || (pc as i64 + 3 + exit_offset as i64) as usize != completed_pc
+      || (pc as i64 + words.len() as i64 + jump_offset as i64) as usize != pc
       || decode_rd(words[5]) != receiver_register
-      || decode_risc_aux16(words[6]) as usize != call_temporary_slot
-      || decode_risc_aux16(words[7]) as usize != call_temporary_slot
+      || decode_aux16(words[6]) as usize != call_temporary_slot
+      || decode_aux16(words[7]) as usize != call_temporary_slot
       || decode_rd(words[9]) != callee_register
       || decode_rs(words[9]) != key_register
       || decode_rd(words[10]) != 1
       || decode_rs(words[10]) != receiver_register
       || decode_rd(words[11]) != 0
       || decode_rs(words[11]) != callee_register
-      || decode_risc_aux16(words[12]) != 0
+      || decode_aux16(words[12]) != 0
       || decode_rd(words[13]) != result_register
       || decode_rs(words[13]) != 0
       || decode_rd(words[14]) != accumulator_register
       || decode_rs(words[14]) != result_register
       || decode_rd(words[15]) != accumulator_register
-      || decode_risc_aux16(words[16]) as usize != accumulator_slot
-      || decode_risc_aux16(words[17]) as usize != arithmetic_temporary_slot
-      || decode_risc_aux16(words[18]) as usize != accumulator_slot
-      || decode_risc_aux16(words[19]) as usize != index_slot
-      || decode_risc_aux16(words[20]) as usize != index_slot
+      || decode_aux16(words[16]) as usize != accumulator_slot
+      || decode_aux16(words[17]) as usize != arithmetic_temporary_slot
+      || decode_aux16(words[18]) as usize != accumulator_slot
+      || decode_aux16(words[19]) as usize != index_slot
+      || decode_aux16(words[20]) as usize != index_slot
       || decode_rd(words[21]) != previous_index_register
       || decode_rs(words[21]) != previous_index_register
       || decode_rd(words[22]) != previous_index_register
@@ -1024,13 +1024,13 @@ impl OwnMethodReadLoopRegion {
       || decode_rs(words[24]) != previous_index_register
       || decode_rs(words[25]) != step_register
       || decode_rd(words[26]) != next_index_register
-      || decode_risc_aux16(words[26]) as usize != arithmetic_temporary_slot
+      || decode_aux16(words[26]) as usize != arithmetic_temporary_slot
       || decode_rd(words[27]) != next_index_register
-      || decode_risc_aux16(words[27]) as usize != index_slot
+      || decode_aux16(words[27]) as usize != index_slot
       || decode_rd(words[28]) != next_index_register
-      || decode_risc_aux16(words[28]) as usize != arithmetic_temporary_slot
+      || decode_aux16(words[28]) as usize != arithmetic_temporary_slot
       || decode_rd(words[29]) != next_index_register
-      || decode_risc_aux16(words[29]) as usize != index_slot
+      || decode_aux16(words[29]) as usize != index_slot
       || [
         index_slot,
         accumulator_slot,
@@ -1048,17 +1048,17 @@ impl OwnMethodReadLoopRegion {
     {
       return None;
     }
-    let method_key_constant = decode_risc_aux16(words[8]) as usize;
-    match chunk.constants.get(method_key_constant) {
+    let method_key_constant = decode_aux16(words[8]) as usize;
+    match code.constants.get(method_key_constant) {
       Some(crate::bytecode::Constant::String(_)) => {}
       _ => return None,
     }
-    let step = number_constant(chunk, words[23])?;
+    let step = number_constant(code, words[23])?;
     if step != 1.0 {
       return None;
     }
     Some(Self {
-      entry_pc: ip,
+      entry_pc: pc,
       completed_pc,
       index_slot,
       accumulator_slot,
@@ -1066,7 +1066,7 @@ impl OwnMethodReadLoopRegion {
       call_temporary_slot,
       arithmetic_temporary_slot,
       method_key_constant,
-      limit: number_constant(chunk, words[1])?,
+      limit: number_constant(code, words[1])?,
       step,
       index_register: index_register as usize,
       limit_register: limit_register as usize,
@@ -1079,31 +1079,31 @@ impl OwnMethodReadLoopRegion {
 }
 
 impl ReceiverNumericEffect {
-  pub(super) fn decode(proto: &FunctionProto) -> Option<Self> {
-    const OPS: &[Op] = &[
-      Op::GetThis,
-      Op::StoreLocal,
-      Op::Const,
-      Op::StoreLocal,
-      Op::LoadLocal,
-      Op::LoadLocal,
-      Op::GetProperty,
-      Op::LoadLocal,
-      Op::Add,
-      Op::StoreLocal,
-      Op::LoadLocal,
-      Op::LoadLocal,
-      Op::LoadLocal,
-      Op::Move,
-      Op::Move,
-      Op::Move,
-      Op::SetProperty,
-      Op::Move,
-      Op::Undefined,
-      Op::Return,
+  pub(super) fn decode(proto: &Function) -> Option<Self> {
+    const OPS: &[Opcode] = &[
+      Opcode::GetThis,
+      Opcode::StoreLocal,
+      Opcode::Const,
+      Opcode::StoreLocal,
+      Opcode::LoadLocal,
+      Opcode::LoadLocal,
+      Opcode::GetProperty,
+      Opcode::LoadLocal,
+      Opcode::Add,
+      Opcode::StoreLocal,
+      Opcode::LoadLocal,
+      Opcode::LoadLocal,
+      Opcode::LoadLocal,
+      Opcode::Move,
+      Opcode::Move,
+      Opcode::Move,
+      Opcode::SetProperty,
+      Opcode::Move,
+      Opcode::Undefined,
+      Opcode::Return,
     ];
-    let words = proto.chunk.code.get(..OPS.len())?;
-    if proto.chunk.code.len() != OPS.len()
+    let words = proto.code.words.get(..OPS.len())?;
+    if proto.code.words.len() != OPS.len()
       || proto.arity < 1
       || proto.has_rest
       || proto.captures_this
@@ -1116,26 +1116,26 @@ impl ReceiverNumericEffect {
       return None;
     }
     let this_register = decode_rd(words[0]);
-    let this_slot = decode_risc_aux16(words[1]) as usize;
+    let this_slot = decode_aux16(words[1]) as usize;
     let key_register = decode_rd(words[2]);
-    let key_slot = decode_risc_aux16(words[3]) as usize;
+    let key_slot = decode_aux16(words[3]) as usize;
     let value_register = decode_rd(words[4]);
     let loaded_key_register = decode_rd(words[5]);
     let argument_register = decode_rd(words[7]);
-    let value_slot = decode_risc_aux16(words[9]) as usize;
+    let value_slot = decode_aux16(words[9]) as usize;
     if decode_rd(words[1]) != this_register
       || decode_rd(words[3]) != key_register
-      || decode_risc_aux16(words[4]) as usize != this_slot
-      || decode_risc_aux16(words[5]) as usize != key_slot
+      || decode_aux16(words[4]) as usize != this_slot
+      || decode_aux16(words[5]) as usize != key_slot
       || decode_rd(words[6]) != value_register
       || decode_rs(words[6]) != loaded_key_register
-      || decode_risc_aux16(words[7]) != 0
+      || decode_aux16(words[7]) != 0
       || decode_rd(words[8]) != value_register
       || decode_rs(words[8]) != argument_register
       || decode_rd(words[9]) != value_register
-      || decode_risc_aux16(words[10]) as usize != this_slot
-      || decode_risc_aux16(words[11]) as usize != key_slot
-      || decode_risc_aux16(words[12]) as usize != value_slot
+      || decode_aux16(words[10]) as usize != this_slot
+      || decode_aux16(words[11]) as usize != key_slot
+      || decode_aux16(words[12]) as usize != value_slot
       || decode_rd(words[13]) != 0
       || decode_rs(words[13]) != decode_rd(words[10])
       || decode_rd(words[14]) != 1
@@ -1144,15 +1144,15 @@ impl ReceiverNumericEffect {
       || decode_rs(words[15]) != decode_rd(words[12])
       || decode_rd(words[16]) != 0
       || decode_rs(words[16]) != 1
-      || decode_risc_aux16(words[16]) != 2
+      || decode_aux16(words[16]) != 2
       || decode_rs(words[17]) != 0
       || decode_rd(words[18]) != decode_rd(words[17])
       || decode_rd(words[19]) != decode_rd(words[18])
     {
       return None;
     }
-    let property_key_constant = decode_risc_aux16(words[2]) as usize;
-    match proto.chunk.constants.get(property_key_constant) {
+    let property_key_constant = decode_aux16(words[2]) as usize;
+    match proto.code.constants.get(property_key_constant) {
       Some(crate::bytecode::Constant::String(_)) => Some(Self {
         property_key_constant,
         argument_slot: 0,
@@ -1165,12 +1165,12 @@ impl ReceiverNumericEffect {
 
 impl OwnMethodEffectLoopRegion {
   pub(super) fn decode(
-    chunk: &Chunk,
-    ip: usize,
+    code: &Chunk,
+    pc: usize,
   ) -> Option<Self> {
-    let words = chunk
-      .code
-      .get(ip..ip + OWN_METHOD_EFFECT_LOOP.len())?;
+    let words = code
+      .words
+      .get(pc..pc + OWN_METHOD_EFFECT_LOOP.len())?;
     if !words
       .iter()
       .zip(OWN_METHOD_EFFECT_LOOP)
@@ -1178,10 +1178,10 @@ impl OwnMethodEffectLoopRegion {
     {
       return None;
     }
-    let index_slot = decode_risc_aux16(words[0]) as usize;
-    let receiver_slot = decode_risc_aux16(words[3]) as usize;
-    let call_temporary_slot = decode_risc_aux16(words[4]) as usize;
-    let arithmetic_temporary_slot = decode_risc_aux16(words[22]) as usize;
+    let index_slot = decode_aux16(words[0]) as usize;
+    let receiver_slot = decode_aux16(words[3]) as usize;
+    let call_temporary_slot = decode_aux16(words[4]) as usize;
+    let arithmetic_temporary_slot = decode_aux16(words[22]) as usize;
     let index_register = decode_rd(words[0]);
     let limit_register = decode_rd(words[1]);
     let receiver_register = decode_rd(words[3]);
@@ -1198,15 +1198,15 @@ impl OwnMethodEffectLoopRegion {
     } else {
       jump_payload
     };
-    let completed_pc = ip + words.len();
+    let completed_pc = pc + words.len();
     if condition != 2
       || left != index_register
       || right != limit_register
-      || (ip as i64 + 3 + exit_offset as i64) as usize != completed_pc
-      || (ip as i64 + words.len() as i64 + jump_offset as i64) as usize != ip
+      || (pc as i64 + 3 + exit_offset as i64) as usize != completed_pc
+      || (pc as i64 + words.len() as i64 + jump_offset as i64) as usize != pc
       || decode_rd(words[4]) != receiver_register
-      || decode_risc_aux16(words[5]) as usize != call_temporary_slot
-      || decode_risc_aux16(words[6]) as usize != call_temporary_slot
+      || decode_aux16(words[5]) as usize != call_temporary_slot
+      || decode_aux16(words[6]) as usize != call_temporary_slot
       || decode_rd(words[8]) != callee_register
       || decode_rs(words[8]) != key_register
       || decode_rd(words[10]) != 2
@@ -1215,10 +1215,10 @@ impl OwnMethodEffectLoopRegion {
       || decode_rs(words[11]) != receiver_register
       || decode_rd(words[12]) != 0
       || decode_rs(words[12]) != callee_register
-      || decode_risc_aux16(words[13]) != 1
+      || decode_aux16(words[13]) != 1
       || decode_rs(words[14]) != 0
-      || decode_risc_aux16(words[15]) as usize != index_slot
-      || decode_risc_aux16(words[16]) as usize != index_slot
+      || decode_aux16(words[15]) as usize != index_slot
+      || decode_aux16(words[16]) as usize != index_slot
       || decode_rd(words[17]) != previous_index_register
       || decode_rs(words[17]) != previous_index_register
       || decode_rd(words[18]) != previous_index_register
@@ -1228,11 +1228,11 @@ impl OwnMethodEffectLoopRegion {
       || decode_rs(words[21]) != step_register
       || decode_rd(words[22]) != next_index_register
       || decode_rd(words[23]) != next_index_register
-      || decode_risc_aux16(words[23]) as usize != index_slot
+      || decode_aux16(words[23]) as usize != index_slot
       || decode_rd(words[24]) != next_index_register
-      || decode_risc_aux16(words[24]) as usize != arithmetic_temporary_slot
+      || decode_aux16(words[24]) as usize != arithmetic_temporary_slot
       || decode_rd(words[25]) != next_index_register
-      || decode_risc_aux16(words[25]) as usize != index_slot
+      || decode_aux16(words[25]) as usize != index_slot
       || index_slot == receiver_slot
       || index_slot == call_temporary_slot
       || index_slot == arithmetic_temporary_slot
@@ -1242,25 +1242,25 @@ impl OwnMethodEffectLoopRegion {
     {
       return None;
     }
-    let method_key_constant = decode_risc_aux16(words[7]) as usize;
-    match chunk.constants.get(method_key_constant) {
+    let method_key_constant = decode_aux16(words[7]) as usize;
+    match code.constants.get(method_key_constant) {
       Some(crate::bytecode::Constant::String(_)) => {}
       _ => return None,
     }
-    let step = number_constant(chunk, words[19])?;
+    let step = number_constant(code, words[19])?;
     if step != 1.0 {
       return None;
     }
     Some(Self {
-      entry_pc: ip,
+      entry_pc: pc,
       completed_pc,
       index_slot,
       receiver_slot,
       call_temporary_slot,
       arithmetic_temporary_slot,
       method_key_constant,
-      argument: number_constant(chunk, words[9])?,
-      limit: number_constant(chunk, words[1])?,
+      argument: number_constant(code, words[9])?,
+      limit: number_constant(code, words[1])?,
       step,
       index_register: index_register as usize,
       limit_register: limit_register as usize,
@@ -1275,12 +1275,12 @@ impl OwnMethodEffectLoopRegion {
 
 impl OwnMethodNumericLoopRegion {
   pub(super) fn decode(
-    chunk: &Chunk,
-    ip: usize,
+    code: &Chunk,
+    pc: usize,
   ) -> Option<Self> {
-    let words = chunk
-      .code
-      .get(ip..ip + OWN_METHOD_NUMERIC_LOOP.len())?;
+    let words = code
+      .words
+      .get(pc..pc + OWN_METHOD_NUMERIC_LOOP.len())?;
     if !words
       .iter()
       .zip(OWN_METHOD_NUMERIC_LOOP)
@@ -1288,11 +1288,11 @@ impl OwnMethodNumericLoopRegion {
     {
       return None;
     }
-    let index_slot = decode_risc_aux16(words[0]) as usize;
-    let accumulator_slot = decode_risc_aux16(words[3]) as usize;
-    let receiver_slot = decode_risc_aux16(words[4]) as usize;
-    let call_temporary_slot = decode_risc_aux16(words[5]) as usize;
-    let arithmetic_temporary_slot = decode_risc_aux16(words[17]) as usize;
+    let index_slot = decode_aux16(words[0]) as usize;
+    let accumulator_slot = decode_aux16(words[3]) as usize;
+    let receiver_slot = decode_aux16(words[4]) as usize;
+    let call_temporary_slot = decode_aux16(words[5]) as usize;
+    let arithmetic_temporary_slot = decode_aux16(words[17]) as usize;
     let index_register = decode_rd(words[0]);
     let limit_register = decode_rd(words[1]);
     let accumulator_register = decode_rd(words[3]);
@@ -1311,17 +1311,17 @@ impl OwnMethodNumericLoopRegion {
     } else {
       jump_payload
     };
-    let completed_pc = ip + words.len();
-    let actual_exit = (ip as i64 + 3 + exit_offset as i64) as usize;
-    let actual_backedge = (ip as i64 + words.len() as i64 + jump_offset as i64) as usize;
+    let completed_pc = pc + words.len();
+    let actual_exit = (pc as i64 + 3 + exit_offset as i64) as usize;
+    let actual_backedge = (pc as i64 + words.len() as i64 + jump_offset as i64) as usize;
     if condition != 2
       || left != index_register
       || right != limit_register
       || actual_exit != completed_pc
-      || actual_backedge != ip
+      || actual_backedge != pc
       || decode_rd(words[5]) != receiver_register
-      || decode_risc_aux16(words[6]) as usize != call_temporary_slot
-      || decode_risc_aux16(words[7]) as usize != call_temporary_slot
+      || decode_aux16(words[6]) as usize != call_temporary_slot
+      || decode_aux16(words[7]) as usize != call_temporary_slot
       || decode_rd(words[9]) != callee_register
       || decode_rs(words[9]) != key_register
       || decode_rd(words[11]) != 2
@@ -1330,17 +1330,17 @@ impl OwnMethodNumericLoopRegion {
       || decode_rs(words[12]) != receiver_register
       || decode_rd(words[13]) != 0
       || decode_rs(words[13]) != callee_register
-      || decode_risc_aux16(words[14]) != 1
+      || decode_aux16(words[14]) != 1
       || decode_rd(words[15]) != result_register
       || decode_rs(words[15]) != 0
       || decode_rd(words[16]) != accumulator_register
       || decode_rs(words[16]) != result_register
       || decode_rd(words[17]) != accumulator_register
-      || decode_risc_aux16(words[18]) as usize != accumulator_slot
-      || decode_risc_aux16(words[19]) as usize != arithmetic_temporary_slot
-      || decode_risc_aux16(words[20]) as usize != accumulator_slot
-      || decode_risc_aux16(words[21]) as usize != index_slot
-      || decode_risc_aux16(words[22]) as usize != index_slot
+      || decode_aux16(words[18]) as usize != accumulator_slot
+      || decode_aux16(words[19]) as usize != arithmetic_temporary_slot
+      || decode_aux16(words[20]) as usize != accumulator_slot
+      || decode_aux16(words[21]) as usize != index_slot
+      || decode_aux16(words[22]) as usize != index_slot
       || decode_rd(words[23]) != previous_index_register
       || decode_rs(words[23]) != previous_index_register
       || decode_rd(words[24]) != previous_index_register
@@ -1349,13 +1349,13 @@ impl OwnMethodNumericLoopRegion {
       || decode_rs(words[26]) != previous_index_register
       || decode_rs(words[27]) != step_register
       || decode_rd(words[28]) != next_index_register
-      || decode_risc_aux16(words[28]) as usize != arithmetic_temporary_slot
+      || decode_aux16(words[28]) as usize != arithmetic_temporary_slot
       || decode_rd(words[29]) != next_index_register
-      || decode_risc_aux16(words[29]) as usize != index_slot
+      || decode_aux16(words[29]) as usize != index_slot
       || decode_rd(words[30]) != next_index_register
-      || decode_risc_aux16(words[30]) as usize != arithmetic_temporary_slot
+      || decode_aux16(words[30]) as usize != arithmetic_temporary_slot
       || decode_rd(words[31]) != next_index_register
-      || decode_risc_aux16(words[31]) as usize != index_slot
+      || decode_aux16(words[31]) as usize != index_slot
       || [
         index_slot,
         accumulator_slot,
@@ -1373,18 +1373,18 @@ impl OwnMethodNumericLoopRegion {
     {
       return None;
     }
-    let key_constant = decode_risc_aux16(words[8]) as usize;
-    match chunk.constants.get(key_constant) {
+    let key_constant = decode_aux16(words[8]) as usize;
+    match code.constants.get(key_constant) {
       Some(crate::bytecode::Constant::String(_)) => {}
       _ => return None,
     }
-    let step = number_constant(chunk, words[25])?;
+    let step = number_constant(code, words[25])?;
     if step != 1.0 {
       return None;
     }
 
     Some(Self {
-      entry_pc: ip,
+      entry_pc: pc,
       completed_pc,
       index_slot,
       accumulator_slot,
@@ -1392,9 +1392,9 @@ impl OwnMethodNumericLoopRegion {
       call_temporary_slot,
       arithmetic_temporary_slot,
       key_constant,
-      call_site: ip + 14,
-      argument: number_constant(chunk, words[10])?,
-      limit: number_constant(chunk, words[1])?,
+      call_site: pc + 14,
+      argument: number_constant(code, words[10])?,
+      limit: number_constant(code, words[1])?,
       step,
       index_register: index_register as usize,
       limit_register: limit_register as usize,
@@ -1409,12 +1409,12 @@ impl OwnMethodNumericLoopRegion {
 
 impl NumericLoopRegion {
   pub(super) fn decode_numeric_add_call(
-    chunk: &Chunk,
-    ip: usize,
+    code: &Chunk,
+    pc: usize,
   ) -> Option<Self> {
-    let words = chunk
-      .code
-      .get(ip..ip + NUMERIC_ADD_CALL_LOOP.len())?;
+    let words = code
+      .words
+      .get(pc..pc + NUMERIC_ADD_CALL_LOOP.len())?;
     if !words
       .iter()
       .zip(NUMERIC_ADD_CALL_LOOP)
@@ -1422,12 +1422,12 @@ impl NumericLoopRegion {
     {
       return None;
     }
-    let index_slot = decode_risc_aux16(words[0]) as usize;
-    let accumulator_slot = decode_risc_aux16(words[4]) as usize;
-    let callee_slot = decode_risc_aux16(words[3]) as usize;
-    let temporary_slot = decode_risc_aux16(words[16]) as usize;
+    let index_slot = decode_aux16(words[0]) as usize;
+    let accumulator_slot = decode_aux16(words[4]) as usize;
+    let callee_slot = decode_aux16(words[3]) as usize;
+    let temporary_slot = decode_aux16(words[16]) as usize;
     let (condition, left, right, exit_offset) = decode_compare_jump(words[2]);
-    let completed_pc = ip + words.len();
+    let completed_pc = pc + words.len();
     let jump_payload = ((words[20] >> 8) & 0x00ff_ffff) as i32;
     let jump_offset = if jump_payload & 0x0080_0000 != 0 {
       jump_payload | !0x00ff_ffff
@@ -1442,28 +1442,28 @@ impl NumericLoopRegion {
     if condition != 2
       || left != index_register
       || right != decode_rd(words[1])
-      || (ip as i64 + 3 + exit_offset as i64) as usize != completed_pc
-      || (ip as i64 + words.len() as i64 + jump_offset as i64) as usize != ip
+      || (pc as i64 + 3 + exit_offset as i64) as usize != completed_pc
+      || (pc as i64 + words.len() as i64 + jump_offset as i64) as usize != pc
       || decode_rd(words[6]) != 2
       || decode_rs(words[6]) != accumulator_register
       || decode_rd(words[7]) != 3
       || decode_rs(words[7]) != constant_register
       || decode_rd(words[8]) != 0
       || decode_rs(words[8]) != decode_rd(words[3])
-      || decode_risc_aux16(words[9]) != 2
+      || decode_aux16(words[9]) != 2
       || decode_rs(words[10]) != 0
       || decode_rd(words[11]) != result_register
-      || decode_risc_aux16(words[11]) as usize != accumulator_slot
-      || decode_risc_aux16(words[12]) as usize != index_slot
-      || decode_risc_aux16(words[13]) as usize != index_slot
+      || decode_aux16(words[11]) as usize != accumulator_slot
+      || decode_aux16(words[12]) as usize != index_slot
+      || decode_aux16(words[13]) as usize != index_slot
       || decode_rd(words[15]) != increment_register
       || decode_rs(words[15]) != decode_rd(words[14])
       || decode_rd(words[16]) != increment_register
-      || decode_risc_aux16(words[16]) as usize != temporary_slot
-      || decode_risc_aux16(words[17]) as usize != index_slot
-      || decode_risc_aux16(words[18]) as usize != temporary_slot
+      || decode_aux16(words[16]) as usize != temporary_slot
+      || decode_aux16(words[17]) as usize != index_slot
+      || decode_aux16(words[18]) as usize != temporary_slot
       || decode_rd(words[19]) != decode_rd(words[18])
-      || decode_risc_aux16(words[19]) as usize != index_slot
+      || decode_aux16(words[19]) as usize != index_slot
       || index_slot == accumulator_slot
       || index_slot == callee_slot
       || index_slot == temporary_slot
@@ -1475,21 +1475,21 @@ impl NumericLoopRegion {
     }
     let argument = NumericLeafArguments::AccumulatorAndConstant {
       accumulator_register: 2,
-      value: number_constant(chunk, words[5])?,
+      value: number_constant(code, words[5])?,
       value_register: 3,
       result_register: result_register as usize,
     };
     Some(Self {
-      entry_pc: ip,
+      entry_pc: pc,
       completed_pc,
       index_slot,
       accumulator_slot,
       temporary_slot,
-      limit: number_constant(chunk, words[1])?,
-      step: number_constant(chunk, words[14])?,
+      limit: number_constant(code, words[1])?,
+      step: number_constant(code, words[14])?,
       prerequisites: NumericLoopPrerequisites::DirectCall {
         callee_slot,
-        call_site: ip + 9,
+        call_site: pc + 9,
         arguments: argument,
       },
       exits: NumericExitMap {
@@ -1504,16 +1504,16 @@ impl NumericLoopRegion {
   }
 
   pub(super) fn decode_call(
-    chunk: &Chunk,
-    ip: usize,
+    code: &Chunk,
+    pc: usize,
   ) -> Option<Self> {
     let (words, call_offset, argument_constant_offset, increment_offset) = if let Some(words) =
-      chunk.code.get(ip..ip + 22)
-      && opcode(words[6]) == Op::Call
+      code.words.get(pc..pc + 22)
+      && opcode(words[6]) == Opcode::Call
     {
       (words, 6, None, 15)
-    } else if let Some(words) = chunk.code.get(ip..ip + 24)
-      && opcode(words[8]) == Op::Call
+    } else if let Some(words) = code.words.get(pc..pc + 24)
+      && opcode(words[8]) == Opcode::Call
     {
       (words, 8, Some(5), 17)
     } else {
@@ -1532,10 +1532,10 @@ impl NumericLoopRegion {
       return None;
     }
 
-    let index_slot = decode_risc_aux16(words[0]) as usize;
-    let accumulator_slot = decode_risc_aux16(words[3]) as usize;
-    let callee_slot = decode_risc_aux16(words[4]) as usize;
-    let temporary_slot = decode_risc_aux16(words[call_offset + 3]) as usize;
+    let index_slot = decode_aux16(words[0]) as usize;
+    let accumulator_slot = decode_aux16(words[3]) as usize;
+    let callee_slot = decode_aux16(words[4]) as usize;
+    let temporary_slot = decode_aux16(words[call_offset + 3]) as usize;
     let (condition, left, right, exit_offset) = decode_compare_jump(words[2]);
     let loop_len = words.len();
     let jump_payload = ((words[loop_len - 1] >> 8) & 0x00ff_ffff) as i32;
@@ -1544,9 +1544,9 @@ impl NumericLoopRegion {
     } else {
       jump_payload
     };
-    let completed_pc = ip + loop_len;
-    let actual_exit = (ip as i64 + 3 + exit_offset as i64) as usize;
-    let actual_backedge = (ip as i64 + loop_len as i64 + jump_offset as i64) as usize;
+    let completed_pc = pc + loop_len;
+    let actual_exit = (pc as i64 + 3 + exit_offset as i64) as usize;
+    let actual_backedge = (pc as i64 + loop_len as i64 + jump_offset as i64) as usize;
     let accumulator_register = decode_rd(words[3]);
     let callee_register = decode_rd(words[4]);
     let result_register = decode_rd(words[call_offset + 1]);
@@ -1556,29 +1556,28 @@ impl NumericLoopRegion {
       || left != decode_rd(words[0])
       || right != decode_rd(words[1])
       || actual_exit != completed_pc
-      || actual_backedge != ip
+      || actual_backedge != pc
       || decode_rd(words[call_offset - 1]) != 0
       || decode_rs(words[call_offset - 1]) != callee_register
-      || decode_risc_aux16(words[call_offset]) as usize
-        != argument_constant_offset.is_some() as usize
+      || decode_aux16(words[call_offset]) as usize != argument_constant_offset.is_some() as usize
       || decode_rs(words[call_offset + 1]) != 0
       || decode_rd(words[call_offset + 2]) != accumulator_register
       || decode_rs(words[call_offset + 2]) != result_register
       || decode_rd(words[accumulator_store]) != accumulator_register
-      || decode_risc_aux16(words[accumulator_store]) as usize != temporary_slot
-      || decode_risc_aux16(words[accumulator_store + 1]) as usize != accumulator_slot
-      || decode_risc_aux16(words[accumulator_store + 2]) as usize != temporary_slot
+      || decode_aux16(words[accumulator_store]) as usize != temporary_slot
+      || decode_aux16(words[accumulator_store + 1]) as usize != accumulator_slot
+      || decode_aux16(words[accumulator_store + 2]) as usize != temporary_slot
       || decode_rd(words[accumulator_store + 3]) != decode_rd(words[accumulator_store + 2])
-      || decode_risc_aux16(words[accumulator_store + 3]) as usize != accumulator_slot
-      || decode_risc_aux16(words[accumulator_store + 4]) as usize != index_slot
-      || decode_risc_aux16(words[increment_offset - 1]) as usize != index_slot
+      || decode_aux16(words[accumulator_store + 3]) as usize != accumulator_slot
+      || decode_aux16(words[accumulator_store + 4]) as usize != index_slot
+      || decode_aux16(words[increment_offset - 1]) as usize != index_slot
       || decode_rd(words[increment_offset + 1]) != increment_register
       || decode_rs(words[increment_offset + 1]) != decode_rd(words[increment_offset])
-      || decode_risc_aux16(words[increment_offset + 2]) as usize != temporary_slot
-      || decode_risc_aux16(words[increment_offset + 3]) as usize != index_slot
-      || decode_risc_aux16(words[increment_offset + 4]) as usize != temporary_slot
+      || decode_aux16(words[increment_offset + 2]) as usize != temporary_slot
+      || decode_aux16(words[increment_offset + 3]) as usize != index_slot
+      || decode_aux16(words[increment_offset + 4]) as usize != temporary_slot
       || decode_rd(words[increment_offset + 5]) != decode_rd(words[increment_offset + 4])
-      || decode_risc_aux16(words[loop_len - 2]) as usize != index_slot
+      || decode_aux16(words[loop_len - 2]) as usize != index_slot
       || index_slot == accumulator_slot
       || index_slot == temporary_slot
       || accumulator_slot == temporary_slot
@@ -1593,7 +1592,7 @@ impl NumericLoopRegion {
         return None;
       }
       NumericLeafArguments::OneConstant {
-        value: number_constant(chunk, words[offset])?,
+        value: number_constant(code, words[offset])?,
         register: 2,
       }
     } else {
@@ -1601,16 +1600,16 @@ impl NumericLoopRegion {
     };
 
     Some(Self {
-      entry_pc: ip,
+      entry_pc: pc,
       completed_pc,
       index_slot,
       accumulator_slot,
       temporary_slot,
-      limit: number_constant(chunk, words[1])?,
-      step: number_constant(chunk, words[increment_offset])?,
+      limit: number_constant(code, words[1])?,
+      step: number_constant(code, words[increment_offset])?,
       prerequisites: NumericLoopPrerequisites::DirectCall {
         callee_slot,
-        call_site: ip + call_offset,
+        call_site: pc + call_offset,
         arguments: argument,
       },
       exits: NumericExitMap {

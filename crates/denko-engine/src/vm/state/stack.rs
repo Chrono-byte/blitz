@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MPL-2.0
-use super::frame::Frame;
+use super::frame::CallFrame;
 use super::handler::HandlerRecord;
 
 /// Manages VM call frames as a compact stack component.
 #[derive(Default)]
 pub(crate) struct CallStack {
-  frames: Vec<Frame>,
+  frames: Vec<CallFrame>,
 }
 
 impl CallStack {
@@ -29,23 +29,23 @@ impl CallStack {
   /// Pushes a frame onto the stack.
   pub(crate) fn push(
     &mut self,
-    frame: Frame,
+    frame: CallFrame,
   ) {
     self.frames.push(frame);
   }
 
   /// Pops and returns the last frame from the stack.
-  pub(crate) fn pop(&mut self) -> Option<Frame> {
+  pub(crate) fn pop(&mut self) -> Option<CallFrame> {
     self.frames.pop()
   }
 
   /// Returns a reference to the last frame without removing it.
-  pub(crate) fn last(&self) -> Option<&Frame> {
+  pub(crate) fn last(&self) -> Option<&CallFrame> {
     self.frames.last()
   }
 
   /// Returns a mutable reference to the active frame.
-  pub(crate) fn last_mut(&mut self) -> Option<&mut Frame> {
+  pub(crate) fn last_mut(&mut self) -> Option<&mut CallFrame> {
     self.frames.last_mut()
   }
 
@@ -63,12 +63,12 @@ impl CallStack {
   }
 
   /// Returns an iterator over the frames in the stack.
-  pub(crate) fn iter(&self) -> std::slice::Iter<'_, Frame> {
+  pub(crate) fn iter(&self) -> std::slice::Iter<'_, CallFrame> {
     self.frames.iter()
   }
 
   /// Returns a mutable iterator over the frames in the stack.
-  pub(crate) fn iter_mut(&mut self) -> std::slice::IterMut<'_, Frame> {
+  pub(crate) fn iter_mut(&mut self) -> std::slice::IterMut<'_, CallFrame> {
     self.frames.iter_mut()
   }
 }

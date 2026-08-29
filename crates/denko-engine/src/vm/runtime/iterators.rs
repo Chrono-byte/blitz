@@ -5,7 +5,7 @@ use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value}
 use crate::vm::Vm;
 use crate::vm::runtime::execution::{YieldStarStep, ensure_slot};
 use crate::vm::state::{
-  AwaitSettlement, PendingOperationStep, PendingRiscOperation, YieldStarResume, YieldStarState,
+  AwaitSettlement, PendingOperation, PendingOperationStep, YieldStarResume, YieldStarState,
 };
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -130,7 +130,7 @@ impl Vm {
         self.get_property_host(&result, &PropertyKey::String("value".to_string().into()))?;
       return Ok(Some(PendingOperationStep::Await {
         value,
-        operation: PendingRiscOperation::NextSync {
+        operation: PendingOperation::NextSync {
           destination,
           record: iterator.clone(),
           done,
@@ -139,7 +139,7 @@ impl Vm {
     }
     Ok(Some(PendingOperationStep::Await {
       value: result,
-      operation: PendingRiscOperation::NextNative {
+      operation: PendingOperation::NextNative {
         destination,
         record: iterator.clone(),
       },
@@ -185,7 +185,7 @@ impl Vm {
         self.get_property_host(&result, &PropertyKey::String("value".to_string().into()))?;
       return Ok(Some(PendingOperationStep::Await {
         value,
-        operation: PendingRiscOperation::CloseSync {
+        operation: PendingOperation::CloseSync {
           destination,
           record: iterator.clone(),
         },
@@ -193,7 +193,7 @@ impl Vm {
     }
     Ok(Some(PendingOperationStep::Await {
       value: result,
-      operation: PendingRiscOperation::CloseNative {
+      operation: PendingOperation::CloseNative {
         destination,
         record: iterator.clone(),
       },
@@ -202,11 +202,11 @@ impl Vm {
 
   pub(super) fn resume_pending_iterator_operation(
     &mut self,
-    operation: PendingRiscOperation,
+    operation: PendingOperation,
     settlement: AwaitSettlement,
   ) -> Result<PendingOperationStep, RuntimeError> {
     if let (
-      PendingRiscOperation::NextSync {
+      PendingOperation::NextSync {
         record,
         done: false,
         ..
@@ -223,7 +223,7 @@ impl Vm {
     match (operation, settlement) {
       (_, AwaitSettlement::Rejected(reason)) => Ok(PendingOperationStep::Throw(reason)),
       (
-        PendingRiscOperation::NextNative {
+        PendingOperation::NextNative {
           destination,
           record,
         },
@@ -249,7 +249,7 @@ impl Vm {
         })
       }
       (
-        PendingRiscOperation::NextSync {
+        PendingOperation::NextSync {
           destination,
           record,
           done,
@@ -265,7 +265,7 @@ impl Vm {
         })
       }
       (
-        PendingRiscOperation::CloseNative {
+        PendingOperation::CloseNative {
           destination,
           record,
         },
@@ -280,7 +280,7 @@ impl Vm {
         })
       }
       (
-        PendingRiscOperation::CloseSync {
+        PendingOperation::CloseSync {
           destination,
           record,
         },
@@ -464,7 +464,7 @@ impl Vm {
       .iter()
       .rposition(|handler| {
         handler.frame_count == self.execution.call_stack.len()
-          && Arc::ptr_eq(&handler.chunk, &self.execution.active.chunk)
+          && Arc::ptr_eq(&handler.code, &self.execution.active.code)
           && handler.finally.is_some()
       })
     else {
@@ -478,7 +478,7 @@ impl Vm {
     self.execution.active.locals[finally.return_slot].set(value);
     self.execution.active.locals[finally.did_return_slot].set(Value::Bool(true));
     self.execution.active.lexical_env = handler.saved_lexical_env;
-    self.execution.active.ip = finally.finalizer_ip;
+    self.execution.active.pc = finally.finalizer_pc;
     self.execution.active.yield_star = None;
     self
       .execution

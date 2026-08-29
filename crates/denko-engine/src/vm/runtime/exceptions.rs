@@ -59,7 +59,7 @@ impl Vm {
 
     while self.execution.call_stack.len() > handler.frame_count {
       if let Some(frame) = self.execution.call_stack.pop() {
-        self.exceptions.unwound_risc_state = frame.risc_state;
+        self.exceptions.unwound_register_state = frame.register_state;
         self.execution.active = frame.context;
         self.leave_function_realm(frame.previous_realm);
       }
@@ -68,8 +68,8 @@ impl Vm {
 
     self.exceptions.pending_frame_count = Some(handler.frame_count);
     self.execution.control_flow_epoch = self.execution.control_flow_epoch.wrapping_add(1);
-    self.execution.active.chunk = handler.chunk;
-    self.execution.active.ip = handler.handler_ip;
+    self.execution.active.code = handler.code;
+    self.execution.active.pc = handler.handler_pc;
     self.execution.active.lexical_env = handler.saved_lexical_env;
 
     self

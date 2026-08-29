@@ -5,8 +5,8 @@
 //! along with fundamental helper methods for scope management, local variable tracking,
 //! and basic bytecode emission.
 
-use super::emit::FrontendOp as Op;
-use super::risc::RiscBuilder;
+use super::bytecode::Lowering;
+use super::emit::LoweringOpcode;
 use crate::bytecode::{Chunk, Constant, UpvalueSpec};
 use crate::errors::CompilerError;
 use crate::typecheck::Type;
@@ -45,11 +45,11 @@ pub struct ModuleContext {
 
 /// Compiles AST to bytecode
 pub(crate) struct Compiler {
-  /// Current chunk being compiled
-  pub chunk: Chunk,
+  /// Current code being compiled
+  pub code: Chunk,
   /// Compiler-owned virtual instruction stream. Frontend operations never
-  /// enter `Chunk::code`; only finalized RISC v2 words are stored there.
-  pub(crate) risc: RiscBuilder,
+  /// enter `Chunk::code`; only finalized bytecode v2 words are stored there.
+  pub(crate) risc: Lowering,
   /// Original source text for this compilation unit
   pub source_text: Arc<String>,
   /// Local variable names
@@ -282,8 +282,8 @@ pub struct LabelPatchState {
 
 impl Compiler {
   /// Current frontend instruction position. Labels and metadata are expressed
-  /// in this compiler-owned coordinate space until RISC finalization.
-  pub(crate) fn current_ip(&mut self) -> usize {
+  /// in this compiler-owned coordinate space until bytecode finalization.
+  pub(crate) fn current_pc(&mut self) -> usize {
     self.risc.len()
   }
 
@@ -294,8 +294,9 @@ impl Compiler {
     offset: usize,
   ) -> usize {
     let op_at = |idx: usize| self.risc.op_at(idx);
-    let is_patchable_jump_at =
-      |idx: usize| op_at(idx).is_some_and(|op| op.is_jump() || matches!(op, Op::PushHandler));
+    let is_patchable_jump_at = |idx: usize| {
+      op_at(idx).is_some_and(|op| op.is_jump() || matches!(op, LoweringOpcode::PushHandler))
+    };
 
     if offset > 0 && is_patchable_jump_at(offset - 1) {
       offset - 1
@@ -309,12 +310,12 @@ impl Compiler {
     let (allow_new_target, allow_super) = COMPILE_CONTEXT_OVERRIDE
       .with(|override_state| *override_state.borrow())
       .unwrap_or((false, false));
-    let mut chunk = Chunk::new(Arc::clone(&source_text));
-    chunk.allow_new_target = allow_new_target;
-    chunk.allow_super = allow_super;
+    let mut code = Chunk::new(Arc::clone(&source_text));
+    code.allow_new_target = allow_new_target;
+    code.allow_super = allow_super;
     Self {
-      chunk,
-      risc: RiscBuilder::new(),
+      code,
+      risc: Lowering::new(),
       source_text,
       locals: Vec::new(),
       local_types: Vec::new(),
@@ -388,7 +389,7 @@ impl Compiler {
   /// Emits a single instruction word with an 8-bit opcode and zero payload.
   pub(crate) fn emit(
     &mut self,
-    op: Op,
+    op: LoweringOpcode,
     line: u32,
   ) {
     self.risc.emit(op, 0, line);
@@ -400,17 +401,17 @@ impl Compiler {
     line: u32,
   ) {
     if self.risc.is_reachable() {
-      self.emit(Op::Undefined, line);
-      self.emit(Op::Return, line);
+      self.emit(LoweringOpcode::Undefined, line);
+      self.emit(LoweringOpcode::Return, line);
     }
   }
 
   /// Emit a single instruction word with a 24-bit payload packed into bits 8..31.
-  /// This is the preferred path for RISC-style fixed-width instructions where
+  /// This is the preferred path for fixed-width fixed-width instructions where
   /// the opcode and all operands must be written as one u32.
   pub(crate) fn emit_with_payload(
     &mut self,
-    op: Op,
+    op: LoweringOpcode,
     payload24: u32,
     line: u32,
   ) {
@@ -446,7 +447,7 @@ impl Compiler {
     self.pending_operand_bytes += 1;
   }
 
-  /// Encode a local-frame slot in the 16-bit auxiliary field used by RISC v2.
+  /// Encode a local-frame slot in the 16-bit auxiliary field used by bytecode v2.
   pub(crate) fn emit_slot(
     &mut self,
     slot: usize,
@@ -491,7 +492,7 @@ impl Compiler {
         return;
       }
     };
-    let idx = self.chunk.add_constant(constant);
+    let idx = self.code.add_constant(constant);
     let Ok(idx) = u16::try_from(idx) else {
       self
         .emission_error
@@ -499,10 +500,10 @@ impl Compiler {
       return;
     };
     let idx = u32::from(idx);
-    self.emit_with_payload(Op::Const, idx, line);
+    self.emit_with_payload(LoweringOpcode::Const, idx, line);
   }
 
-  /// Encode a nested-function index in the 16-bit auxiliary field used by RISC v2.
+  /// Encode a nested-function index in the 16-bit auxiliary field used by bytecode v2.
   pub(crate) fn emit_function_index(
     &mut self,
     idx: usize,
@@ -522,7 +523,7 @@ impl Compiler {
   ///
   /// Module instructions dedicate their sixteen auxiliary bits to this
   /// descriptor, avoiding separate eight-bit limits for module and export
-  /// indices while retaining the fixed-width RISC encoding.
+  /// indices while retaining the fixed-width encoding.
   pub(crate) fn module_export_descriptor_index(
     &mut self,
     module_index: usize,
@@ -530,11 +531,11 @@ impl Compiler {
   ) -> Result<u16, CompilerError> {
     let descriptor = Constant::String(format!("{module_index}\0{name}").into());
     let index = self
-      .chunk
+      .code
       .constants
       .iter()
       .position(|value| value == &descriptor)
-      .unwrap_or_else(|| self.chunk.add_constant(descriptor));
+      .unwrap_or_else(|| self.code.add_constant(descriptor));
     u16::try_from(index)
       .map_err(|_| CompilerError::from(format!("Too many constants (max 65535, got {index})")))
   }
@@ -977,7 +978,7 @@ impl Compiler {
     bindings.sort_by_key(|(slot, _)| *slot);
     for (slot, name) in &bindings {
       self.emit_constant(crate::value::Value::String(name.clone().into()), 1);
-      self.emit_with_payload(Op::PushLexicalEnv, *slot as u32, 1);
+      self.emit_with_payload(LoweringOpcode::PushLexicalEnv, *slot as u32, 1);
     }
     if let Some(scope) = self.scopes.last_mut() {
       scope.runtime_env_count += bindings.len();
@@ -1003,7 +1004,7 @@ impl Compiler {
     bindings.sort_by_key(|(slot, _)| *slot);
     for (slot, name) in &bindings {
       self.emit_constant(crate::value::Value::String(name.clone().into()), 1);
-      self.emit_with_payload(Op::PushLexicalEnv, *slot as u32, 1);
+      self.emit_with_payload(LoweringOpcode::PushLexicalEnv, *slot as u32, 1);
     }
     if let Some(scope) = self.scopes.last_mut() {
       scope.runtime_env_count += bindings.len();
@@ -1034,7 +1035,7 @@ impl Compiler {
       return;
     };
     for _ in 0..scope.runtime_env_count {
-      self.emit(Op::PopEnv, 1);
+      self.emit(LoweringOpcode::PopEnv, 1);
     }
     if matches!(scope.kind, ScopeKind::Function) && self.scopes.is_empty() {
       self.emission_error.get_or_insert_with(|| {
@@ -1195,7 +1196,7 @@ impl Compiler {
     slot: usize,
   ) -> Result<(), CompilerError> {
     if self.owns_local_module_export(name, slot) {
-      self.emit(Op::LoadLocal, LINE);
+      self.emit(LoweringOpcode::LoadLocal, LINE);
       self.emit_slot(slot, LINE);
       self.emit_set_own_module_export(name)?;
     }
@@ -1207,7 +1208,7 @@ impl Compiler {
     upvalue: u16,
   ) -> Result<(), CompilerError> {
     if let Some((upvalue, export_name)) = self.module_export_for_upvalue(upvalue) {
-      self.emit(Op::GetUpvalue, LINE);
+      self.emit(LoweringOpcode::GetUpvalue, LINE);
       self.emit_u16(upvalue, LINE);
       self.emit_set_own_module_export(&export_name)?;
     }
@@ -1243,21 +1244,21 @@ impl Compiler {
       let reference_slot = self.alloc_temp_local("with_identifier_reference");
       self.emit_get_builtin_name("resolveWithBindingObject");
       self.emit_constant(Value::String(name.into()), LINE);
-      self.emit(Op::Call, LINE);
+      self.emit(LoweringOpcode::Call, LINE);
       self.emit_byte(1, LINE);
-      self.emit(Op::StoreLocal, LINE);
+      self.emit(LoweringOpcode::StoreLocal, LINE);
       self.emit_slot(reference_slot, LINE);
       self.emit_get_builtin_name("getResolvedIdentifier");
-      self.emit(Op::LoadLocal, LINE);
+      self.emit(LoweringOpcode::LoadLocal, LINE);
       self.emit_slot(reference_slot, LINE);
       self.emit_constant(Value::String(name.into()), LINE);
-      self.emit(Op::Call, LINE);
+      self.emit(LoweringOpcode::Call, LINE);
       self.emit_byte(2, LINE);
     } else if let Some(slot) = self.resolve_local(name) {
-      self.emit(Op::LoadLocal, LINE);
+      self.emit(LoweringOpcode::LoadLocal, LINE);
       self.emit_slot(slot, LINE);
     } else if let Some(upvalue) = self.resolve_upvalue(name) {
-      self.emit(Op::GetUpvalue, LINE);
+      self.emit(LoweringOpcode::GetUpvalue, LINE);
       self.emit_u16(upvalue, LINE);
     } else if let Some((src_idx, exported_name)) = self
       .current_module
@@ -1267,7 +1268,7 @@ impl Compiler {
       let descriptor = self
         .module_export_descriptor_index(src_idx, &exported_name)
         .expect("module export descriptor fits in the constant pool");
-      self.emit(Op::GetModuleExport, LINE);
+      self.emit(LoweringOpcode::GetModuleExport, LINE);
       self.emit_byte(descriptor.to_le_bytes()[0], LINE);
       self.emit_byte(descriptor.to_le_bytes()[1], LINE);
     } else {
@@ -1281,7 +1282,7 @@ impl Compiler {
     export_name: &str,
   ) -> Result<(), CompilerError> {
     if !self.owns_module_export(export_name) {
-      self.emit(Op::Discard, LINE);
+      self.emit(LoweringOpcode::Discard, LINE);
       return Ok(());
     }
     let module_index = self
@@ -1290,7 +1291,7 @@ impl Compiler {
       .map(|c| c.module_index)
       .ok_or_else(|| CompilerError::from("module_index expected"))?;
     let descriptor = self.module_export_descriptor_index(module_index, export_name)?;
-    self.emit(Op::SetModuleExport, LINE);
+    self.emit(LoweringOpcode::SetModuleExport, LINE);
     self.emit_byte(descriptor.to_le_bytes()[0], LINE);
     self.emit_byte(descriptor.to_le_bytes()[1], LINE);
     Ok(())
@@ -1354,12 +1355,12 @@ impl Compiler {
     name: &str,
   ) -> usize {
     if let Some(&idx) = self.globals.get(name)
-      && idx < self.chunk.constants.len()
+      && idx < self.code.constants.len()
     {
       return idx;
     }
     let idx = self
-      .chunk
+      .code
       .add_constant(Constant::String(name.to_string().into()));
     self.globals.insert(name.to_string(), idx);
     idx
@@ -1395,7 +1396,7 @@ impl Compiler {
         return;
       }
     };
-    self.emit(Op::GetGlobal, LINE);
+    self.emit(LoweringOpcode::GetGlobal, LINE);
     self.emit_u16(idx_u16, LINE);
   }
 
@@ -1414,7 +1415,7 @@ impl Compiler {
         return;
       }
     };
-    self.emit(Op::GetBuiltin, LINE);
+    self.emit(LoweringOpcode::GetBuiltin, LINE);
     self.emit_u16(idx_u16, LINE);
   }
 
@@ -1451,12 +1452,12 @@ impl Compiler {
     &mut self,
     home_slot: usize,
   ) -> Result<(), CompilerError> {
-    self.emit(Op::Copy, LINE);
+    self.emit(LoweringOpcode::Copy, LINE);
     self.emit_constant(Value::String("[[HomeObject]]".to_string().into()), LINE);
-    self.emit(Op::LoadLocal, LINE);
+    self.emit(LoweringOpcode::LoadLocal, LINE);
     self.emit_slot(home_slot, LINE);
-    self.emit(Op::SetProperty, LINE);
-    self.emit(Op::Discard, LINE);
+    self.emit(LoweringOpcode::SetProperty, LINE);
+    self.emit(LoweringOpcode::Discard, LINE);
     Ok(())
   }
 
@@ -1466,9 +1467,9 @@ impl Compiler {
     name: &str,
   ) {
     if let Some(slot) = self.resolve_local(name) {
-      self.emit(Op::LoadLocal, LINE);
+      self.emit(LoweringOpcode::LoadLocal, LINE);
       self.emit_slot(slot, LINE);
-      self.emit(Op::Typeof, LINE);
+      self.emit(LoweringOpcode::Typeof, LINE);
     } else {
       let idx = self.global_name_index(name);
       let idx_u16 = match u16::try_from(idx) {
@@ -1480,7 +1481,7 @@ impl Compiler {
           return;
         }
       };
-      self.emit(Op::TypeofGlobal, LINE);
+      self.emit(LoweringOpcode::TypeofGlobal, LINE);
       self.emit_u16(idx_u16, LINE);
     }
   }
@@ -1500,7 +1501,7 @@ impl Compiler {
         return;
       }
     };
-    self.emit(Op::SetGlobal, LINE);
+    self.emit(LoweringOpcode::SetGlobal, LINE);
     self.emit_u16(idx_u16, LINE);
   }
 
@@ -1510,7 +1511,7 @@ impl Compiler {
     offset: usize,
   ) {
     let patch_idx = self.resolve_jump_patch_index(offset);
-    let target = self.current_ip() as isize;
+    let target = self.current_pc() as isize;
     let rel = target - (patch_idx as isize) - 1;
     let Ok(val) = i32::try_from(rel) else {
       self
@@ -1521,7 +1522,7 @@ impl Compiler {
     self.apply_jump_patch(patch_idx, val);
   }
 
-  /// Applies a jump patch to the chunk at the given patch index with the given value.
+  /// Applies a jump patch to the code at the given patch index with the given value.
   fn apply_jump_patch(
     &mut self,
     patch_idx: usize,
@@ -1559,7 +1560,7 @@ impl Compiler {
         .get_or_insert_with(|| CompilerError::from("jump offset exceeds i32 range"));
       return;
     };
-    let idx = self.current_ip().saturating_sub(1);
+    let idx = self.current_pc().saturating_sub(1);
     self.risc.patch_branch_line(idx, v, line);
     self.pending_operand_bytes = 0;
   }

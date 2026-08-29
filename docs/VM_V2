@@ -25,7 +25,7 @@ Design — concrete pieces
 Process (single-VM, multithreaded)
   - The runtime continues to use one VM executable. Instead of multiple `Vm` instances,
     introduce a small per-process mutable state struct `ProcessState` holding registers,
-    IP, stack, frames, locals, and per-process inline caches.
+    a PC, frames, locals, spill slots, and per-process inline caches.
   - Process fields:
     - `pid`: unique identifier
     - `exec_level`: user | kernel
@@ -36,7 +36,7 @@ Process (single-VM, multithreaded)
     - `reductions_left`: u32 (quota per tick)
     - `quotas`: { memory_bytes, mailbox_len, fds }
     - `links/monitors`: supervisor metadata
-    - `process_state`: mutable interpreter state (chunk, ip, stack vec, locals, frames,
+    - `process_state`: mutable interpreter state (chunk, PC, registers, locals, frames,
        current_slot_types, per-process IC caches)
   - Access rules: only the scheduler thread that holds a process may mutate its `ProcessState`.
     Ownership is transferred between schedulers via stealing and a CAS on a process run-state.

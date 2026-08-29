@@ -114,12 +114,12 @@ fn dynamic_import_defers_construction_and_evaluation_to_its_job() {
 fn generated_bytecode_virtual_modules_are_loaded_and_run() {
   let session = crate::parser::Parser::parse_source(crate::js!("globalThis.bytecodeResult = 7;"))
     .expect("bytecode source parses");
-  let chunk = crate::compiler::compile(session.program(), session.source()).expect("compiles");
+  let code = crate::compiler::compile(session.program(), session.source()).expect("compiles");
   let mut loader = ModuleLoader::new();
   loader
     .register_virtual_module(VirtualModule::new(
       "test:bytecode",
-      VirtualModuleSource::Bytecode(chunk),
+      VirtualModuleSource::Bytecode(code),
       SourceType::mjs(),
       None,
     ))

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 use crate::binding::BindingCell;
-use crate::bytecode::FunctionProto;
+use crate::bytecode::Function;
 use crate::ecmascript::semantics::properties::own_property_descriptor;
 use crate::environment::EnvironmentRecord;
 use crate::errors::RuntimeError;
@@ -8,7 +8,7 @@ use crate::gc;
 use crate::runtime_utils::{strict_equal, to_length, usize_to_decimal_string, usize_to_f64};
 use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
 use crate::vm::Vm;
-use crate::vm::state::{ArgumentsState, ExecutionContext, Frame, RealmState, SlotMetadata};
+use crate::vm::state::{ArgumentsState, CallFrame, ExecutionContext, RealmState, SlotMetadata};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -162,7 +162,7 @@ impl Vm {
 
   pub(super) fn throw_class_constructor_call_error(
     &mut self,
-    proto: &FunctionProto,
+    proto: &Function,
   ) -> RuntimeError {
     self.throw_type_error(&format!(
       "Class constructor {} cannot be invoked without 'new'",
@@ -173,7 +173,7 @@ impl Vm {
   pub(super) fn throw_class_constructor_call_error_for(
     &mut self,
     callee: &Value,
-    proto: &FunctionProto,
+    proto: &Function,
   ) -> RuntimeError {
     let previous_realm = self.enter_function_realm(callee);
     let error = self.throw_class_constructor_call_error(proto);
@@ -229,28 +229,28 @@ impl Vm {
     if !callee.is_constructable() {
       if crate::trace::enabled() {
         eprintln!(
-          "[trace] construct_value: callee not constructable ip={} actual={}",
-          self.execution.active.ip.saturating_sub(1),
+          "[trace] construct_value: callee not constructable pc={} actual={}",
+          self.execution.active.pc.saturating_sub(1),
           callee.type_name()
         );
         crate::trace::value_string("[trace]   callee", callee);
-        let cur_ip = self.execution.active.ip.saturating_sub(1);
-        let start = cur_ip.saturating_sub(16);
-        let end = (cur_ip + 16).min(self.execution.active.chunk.code.len());
+        let cur_pc = self.execution.active.pc.saturating_sub(1);
+        let start = cur_pc.saturating_sub(16);
+        let end = (cur_pc + 16).min(self.execution.active.code.words.len());
         eprintln!("[trace]   bytecode window ({}..{}):", start, end);
         for i in start..end {
-          let instr = self.execution.active.chunk.code[i];
+          let instr = self.execution.active.code.words[i];
           let b = (instr & 0xFF) as u8;
           eprintln!("[trace]     {:04} 0x{:02x}", i, b);
         }
         eprintln!(
           "[trace]   constants (len={}):",
-          self.execution.active.chunk.constants.len()
+          self.execution.active.code.constants.len()
         );
         for (i, constant) in self
           .execution
           .active
-          .chunk
+          .code
           .constants
           .iter()
           .enumerate()
@@ -553,14 +553,15 @@ impl Vm {
       args = flattened;
     }
 
-    let frame = self
+    let callee = self
       .execution
-      .call_stack
-      .last()
+      .active
+      .active_function
+      .clone()
       .ok_or_else(|| RuntimeError::from("super() outside function frame"))?;
-    let (callee, is_derived_constructor) = match &frame.callee {
-      Value::Closure { proto, .. } => (frame.callee.clone(), proto.is_derived_constructor),
-      _ => (frame.callee.clone(), false),
+    let is_derived_constructor = match &callee {
+      Value::Closure { proto, .. } => proto.is_derived_constructor,
+      _ => false,
     };
     if !is_derived_constructor {
       return Err(self.throw_type_error("super() is only valid in derived class constructors"));
@@ -592,7 +593,7 @@ impl Vm {
 
   /// Calls a function without an explicit receiver.
   ///
-  /// Native builtins use the same argument convention as RISC v2 bytecode
+  /// Native builtins use the same argument convention as bytecode v2
   /// `Call` opcode: user arguments begin at index zero. Closures still pass
   /// through ordinary ECMAScript `this` preparation.
   pub(super) fn call_value(
@@ -820,7 +821,7 @@ impl Vm {
             let caller_handler_len = self.exceptions.handlers.len();
             self.push_call_frame(proto, &closure_env, call_args, this_arg, callee.clone())?;
             let result = self
-              .run_risc_loop(false)
+              .run_loop(false)
               .and_then(|value| self.execute_return(value));
             if result.is_ok() || self.exceptions.pending.is_none() {
               self.execution.active = caller_context;
@@ -857,7 +858,7 @@ impl Vm {
   #[allow(clippy::too_many_lines)]
   pub(super) fn configure_call_frame(
     &mut self,
-    proto: &Rc<FunctionProto>,
+    proto: &Rc<Function>,
     closure_env: &crate::closure_environment::ClosureEnvironment,
     call_args: Vec<Value>,
     mut this_value: Value,
@@ -879,8 +880,9 @@ impl Vm {
       }
     }
 
-    self.execution.active.chunk = Arc::clone(&proto.chunk);
-    self.execution.active.ip = 0;
+    self.execution.active.code = Arc::clone(&proto.code);
+    self.execution.active.pc = 0;
+    self.execution.active.active_function = Some(callee.clone());
     self.execution.active.closure_env = Some(closure_env.clone());
     self.execution.active.slots = Some(SlotMetadata {
       names: proto.slot_names.clone(),
@@ -1066,7 +1068,7 @@ impl Vm {
   /// Save the caller's state and set up the callee.
   pub(super) fn push_call_frame(
     &mut self,
-    proto: &Rc<FunctionProto>,
+    proto: &Rc<Function>,
     closure_env: &crate::closure_environment::ClosureEnvironment,
     call_args: Vec<Value>,
     this_value: Value,
@@ -1078,8 +1080,9 @@ impl Vm {
     let caller_context = std::mem::replace(
       &mut self.execution.active,
       ExecutionContext {
-        chunk: Arc::clone(&proto.chunk),
-        ip: 0,
+        code: Arc::clone(&proto.code),
+        pc: 0,
+        active_function: Some(callee.clone()),
         locals: Vec::new(),
         this_value: this_value.clone(),
         closure_env: None,
@@ -1093,10 +1096,9 @@ impl Vm {
         strict: proto.is_strict,
       },
     );
-    self.execution.call_stack.push(Frame {
+    self.execution.call_stack.push(CallFrame {
       context: caller_context,
-      risc_state: None,
-      callee: callee.clone(),
+      register_state: None,
       previous_realm,
       new_target,
       upvalues: proto.upvalues.clone(),
