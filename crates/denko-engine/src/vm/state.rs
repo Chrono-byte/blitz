@@ -291,7 +291,7 @@ pub(super) struct ProfilingState {
   pub(super) functions: HashMap<crate::vm::jit::FunctionId, crate::vm::jit::FunctionProfile>,
   /// Temporary identity bridge until executable code owns a stable ID. The
   /// retained Arc intentionally prevents pointer reuse during this phase.
-  pub(super) code_ids: HashMap<usize, crate::vm::jit::FunctionId>,
+  pub(super) chunk_ids: HashMap<usize, crate::vm::jit::FunctionId>,
   pub(super) chunk_refs: HashMap<usize, Arc<Chunk>>,
   pub(super) next_function_id: u64,
   pub(super) active_function_identity: usize,

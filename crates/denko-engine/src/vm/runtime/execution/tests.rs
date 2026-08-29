@@ -2473,7 +2473,7 @@ mod test {
 
     let globals = test_globals();
     let mut vm = Vm::new(Rc::clone(&globals));
-    vm.run(code).expect("risc run");
+    vm.run(code).expect("bytecode run");
 
     assert!(matches!(
       vm.get_global("result"),
@@ -2529,7 +2529,7 @@ mod test {
 
     let globals = test_globals();
     let mut vm = Vm::new(Rc::clone(&globals));
-    vm.run(code).expect("risc run");
+    vm.run(code).expect("bytecode run");
 
     assert!(matches!(
       vm.get_global("result"),

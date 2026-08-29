@@ -443,11 +443,11 @@ impl Lowering {
   }
 
   pub(crate) fn finish(
-    mut code: Chunk,
+    mut chunk: Chunk,
     mut builder: Lowering,
   ) -> Result<Chunk, CompilerError> {
     builder.finalize_pending();
-    crate::compiler::optimize::optimize(&mut builder, &mut code);
+    crate::compiler::optimize::optimize(&mut builder, &mut chunk);
     for instruction in &builder.instructions {
       if !executor_supports(instruction.opcode) {
         return Err(CompilerError::from(format!(
@@ -458,8 +458,8 @@ impl Lowering {
     }
     let plan = AllocationPlan::for_value_count(builder.max_values)?;
     debug_assert!(
-      code.words.is_empty(),
-      "frontend instructions leaked into Chunk::code"
+      chunk.words.is_empty(),
+      "frontend instructions leaked into Chunk::chunk"
     );
     let window_size = builder
       .instructions
@@ -467,9 +467,9 @@ impl Lowering {
       .map(|instruction| window_size(instruction.opcode, instruction.payload))
       .max()
       .unwrap_or(0);
-    let frontend_handlers = code.finally_handlers.clone();
-    code.version = BytecodeVersion::RiscV2;
-    let mut lowered = code;
+    let frontend_handlers = chunk.finally_handlers.clone();
+    chunk.version = BytecodeVersion::RiscV2;
+    let mut lowered = chunk;
     lowered.spill_slot_count = plan
       .value_spill_count
       .checked_add(
@@ -1255,11 +1255,11 @@ fn executor_supports(op: LoweringOpcode) -> bool {
 }
 
 fn emit(
-  code: &mut Chunk,
+  chunk: &mut Chunk,
   word: u32,
   line: u32,
 ) {
-  code.write_instr(word, line);
+  chunk.write_instr(word, line);
 }
 
 fn destination_register(
@@ -1273,7 +1273,7 @@ fn destination_register(
 }
 
 fn load_location(
-  code: &mut Chunk,
+  chunk: &mut Chunk,
   location: AllocatedValue,
   scratch: u8,
   line: u32,
@@ -1282,7 +1282,7 @@ fn load_location(
     AllocatedValue::Register(register) => register,
     AllocatedValue::SpillSlot(spill) => {
       emit(
-        code,
+        chunk,
         encode_aux16_instruction(LoweringOpcode::LoadSpill, scratch, spill),
         line,
       );
@@ -1292,7 +1292,7 @@ fn load_location(
 }
 
 fn store_location(
-  code: &mut Chunk,
+  chunk: &mut Chunk,
   location: AllocatedValue,
   source: u8,
   line: u32,
@@ -1300,7 +1300,7 @@ fn store_location(
   match location {
     AllocatedValue::Register(register) if register != source => {
       emit(
-        code,
+        chunk,
         encode_register_instruction(LoweringOpcode::Move, register, source),
         line,
       );
@@ -1308,7 +1308,7 @@ fn store_location(
     AllocatedValue::Register(_) => {}
     AllocatedValue::SpillSlot(spill) => {
       emit(
-        code,
+        chunk,
         encode_aux16_instruction(LoweringOpcode::StoreSpill, source, spill),
         line,
       );
@@ -1317,15 +1317,15 @@ fn store_location(
 }
 
 fn move_location_to_register(
-  code: &mut Chunk,
+  chunk: &mut Chunk,
   location: AllocatedValue,
   register: u8,
   line: u32,
 ) {
-  let source = load_location(code, location, register, line);
+  let source = load_location(chunk, location, register, line);
   if source != register {
     emit(
-      code,
+      chunk,
       encode_register_instruction(LoweringOpcode::Move, register, source),
       line,
     );
@@ -1344,16 +1344,16 @@ fn all_register_homed(
 }
 
 fn stage_window(
-  code: &mut Chunk,
+  chunk: &mut Chunk,
   plan: &AllocationPlan,
   inputs: &[VirtualValue],
   line: u32,
 ) -> Result<(), CompilerError> {
-  stage_window_at(code, plan, inputs, 0, line)
+  stage_window_at(chunk, plan, inputs, 0, line)
 }
 
 fn stage_window_at(
-  code: &mut Chunk,
+  chunk: &mut Chunk,
   plan: &AllocationPlan,
   inputs: &[VirtualValue],
   window_offset: usize,
@@ -1371,7 +1371,7 @@ fn stage_window_at(
       )
       .ok_or_else(|| CompilerError::from("operand spill index exceeds u16"))?;
     emit(
-      code,
+      chunk,
       encode_aux16_instruction(LoweringOpcode::StoreSpill, source, spill),
       line,
     );
@@ -1381,7 +1381,7 @@ fn stage_window_at(
     if matches!(location, AllocatedValue::Register(_)) {
       continue;
     }
-    let source = load_location(code, location, 0, line);
+    let source = load_location(chunk, location, 0, line);
     let spill = plan
       .value_spill_count
       .checked_add(
@@ -1390,7 +1390,7 @@ fn stage_window_at(
       )
       .ok_or_else(|| CompilerError::from("operand spill index exceeds u16"))?;
     emit(
-      code,
+      chunk,
       encode_aux16_instruction(LoweringOpcode::StoreSpill, source, spill),
       line,
     );
@@ -1568,19 +1568,19 @@ mod tests {
   fn compiler_produces_only_verified_code_recursively() {
     let source = crate::js!("function value(x) { try { return x + 1; } finally {} } value(2);");
     let session = Parser::parse_source(source).expect("parse");
-    let code = compiler::compile(session.program(), session.source()).expect("compile");
-    code.verify().expect("verified chunk tree");
-    fn assert_risc(code: &Chunk) {
-      assert_eq!(code.version, BytecodeVersion::RiscV2);
-      for word in &code.words {
+    let chunk = compiler::compile(session.program(), session.source()).expect("compile");
+    chunk.verify().expect("verified chunk tree");
+    fn assert_bytecode(chunk: &Chunk) {
+      assert_eq!(chunk.version, BytecodeVersion::RiscV2);
+      for word in &chunk.words {
         Opcode::from_byte((word & 0xff) as u8).expect("public opcode");
         assert!(!matches!(word & 0xff, 50..=53));
       }
-      for function in &code.functions {
-        assert_risc(&function.chunk);
+      for function in &chunk.functions {
+        assert_bytecode(&function.chunk);
       }
     }
-    assert_risc(&code);
+    assert_bytecode(&chunk);
   }
 
   #[test]
@@ -1590,8 +1590,8 @@ mod tests {
       "try { throw { value: 1 }; } catch ({ value }) { value; }",
     ] {
       let session = Parser::parse_source(source).expect("parse");
-      let code = compiler::compile(session.program(), session.source()).expect("compile");
-      code.verify().expect("verified chunk");
+      let chunk = compiler::compile(session.program(), session.source()).expect("compile");
+      chunk.verify().expect("verified chunk");
     }
   }
 
@@ -1602,8 +1602,8 @@ mod tests {
       .collect::<String>();
     source.push_str(crate::js!("let { ...rest } = {};"));
     let session = Parser::parse_source(&source).expect("parse");
-    let code = compiler::compile(session.program(), session.source()).expect("compile");
-    code.verify().expect("verified chunk");
+    let chunk = compiler::compile(session.program(), session.source()).expect("compile");
+    chunk.verify().expect("verified chunk");
   }
 
   #[test]
@@ -1642,15 +1642,15 @@ mod tests {
     builder.emit(op, 0, 1);
     builder.emit(LoweringOpcode::Return, 0, 1);
 
-    let code = Lowering::finish(Chunk::default(), builder).expect("lower chunk");
-    let suspend_pc = code
+    let chunk = Lowering::finish(Chunk::default(), builder).expect("lower chunk");
+    let suspend_pc = chunk
       .words
       .iter()
       .position(|word| Opcode::from_byte((word & 0xff) as u8) == Some(op.bytecode().unwrap()))
       .expect("suspending operation");
-    assert_eq!(code.value_spill_slot_count, 1);
+    assert_eq!(chunk.value_spill_slot_count, 1);
     assert_eq!(
-      Opcode::from_byte((code.words[suspend_pc + 1] & 0xff) as u8),
+      Opcode::from_byte((chunk.words[suspend_pc + 1] & 0xff) as u8),
       Some(LoweringOpcode::StoreSpill.bytecode().unwrap()),
       "{op:?} must store its spilled output"
     );
@@ -1663,10 +1663,10 @@ mod tests {
       crate::js!("let value = 0; if (value === 0) { /* body */ }").replace("/* body */", &body);
 
     let session = Parser::parse_source(&source).expect("parse");
-    let code = compiler::compile(session.program(), session.source()).expect("compile");
-    code.verify().expect("verified chunk");
+    let chunk = compiler::compile(session.program(), session.source()).expect("compile");
+    chunk.verify().expect("verified chunk");
 
-    let expanded = code.words.windows(3).any(|words| {
+    let expanded = chunk.words.windows(3).any(|words| {
       Opcode::from_byte((words[0] & 0xff) as u8) == Some(Opcode::CompareJump)
         && crate::bytecode::decode_compare_jump(words[0]).3 == 1
         && Opcode::from_byte((words[1] & 0xff) as u8) == Some(Opcode::Jump)

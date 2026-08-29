@@ -349,7 +349,7 @@ impl Vm {
       .baseline = crate::vm::jit::BaselineState::Compiling;
     let code = self
       .profiling
-      .code_ids
+      .chunk_ids
       .iter()
       .find_map(|(identity, id)| {
         (*id == function)
@@ -462,11 +462,11 @@ impl Vm {
     &mut self,
     code: &std::sync::Arc<crate::bytecode::Chunk>,
   ) -> crate::vm::jit::FunctionId {
-    let code_identity = std::sync::Arc::as_ptr(code) as usize;
+    let chunk_identity = std::sync::Arc::as_ptr(code) as usize;
     if let Some(id) = self
       .profiling
-      .code_ids
-      .get(&code_identity)
+      .chunk_ids
+      .get(&chunk_identity)
       .copied()
     {
       return id;
@@ -476,8 +476,11 @@ impl Vm {
     self
       .profiling
       .chunk_refs
-      .insert(code_identity, std::sync::Arc::clone(code));
-    self.profiling.code_ids.insert(code_identity, id);
+      .insert(chunk_identity, std::sync::Arc::clone(code));
+    self
+      .profiling
+      .chunk_ids
+      .insert(chunk_identity, id);
     id
   }
 
@@ -499,14 +502,14 @@ impl Vm {
     &mut self,
     pc: usize,
   ) {
-    let code_identity = Arc::as_ptr(&self.execution.active.chunk) as usize;
-    if self.profiling.last_hot_function == code_identity
+    let chunk_identity = Arc::as_ptr(&self.execution.active.chunk) as usize;
+    if self.profiling.last_hot_function == chunk_identity
       || self
         .profiling
         .hot_functions
-        .contains(&code_identity)
+        .contains(&chunk_identity)
     {
-      self.profiling.last_hot_function = code_identity;
+      self.profiling.last_hot_function = chunk_identity;
       return;
     }
     let function_id = self.active_function_id();
@@ -517,8 +520,11 @@ impl Vm {
       .or_default();
     profile.record_backedge(pc);
     if matches!(profile.baseline, crate::vm::jit::BaselineState::Requested) {
-      self.profiling.hot_functions.insert(code_identity);
-      self.profiling.last_hot_function = code_identity;
+      self
+        .profiling
+        .hot_functions
+        .insert(chunk_identity);
+      self.profiling.last_hot_function = chunk_identity;
     }
   }
 

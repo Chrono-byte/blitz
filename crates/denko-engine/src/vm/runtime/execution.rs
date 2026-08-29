@@ -43,12 +43,12 @@ pub(crate) struct NestedRunFailure {
 impl Vm {
   pub fn run(
     &mut self,
-    code: Chunk,
+    chunk: Chunk,
   ) -> Result<Value, RuntimeError> {
-    code
+    chunk
       .verify()
       .map_err(|error| RuntimeError::from(format!("Invalid bytecode: {}", error)))?;
-    self.run_root(Arc::new(code))
+    self.run_root(Arc::new(chunk))
   }
 
   /// Execute one interactive submission and retain its top-level bindings.
@@ -58,12 +58,12 @@ impl Vm {
   /// successful submission must remain visible to later submissions.
   pub fn run_repl(
     &mut self,
-    code: Chunk,
+    chunk: Chunk,
   ) -> Result<Value, RuntimeError> {
-    code
+    chunk
       .verify()
       .map_err(|error| RuntimeError::from(format!("Invalid bytecode: {}", error)))?;
-    let result = self.run_root(Arc::new(code))?;
+    let result = self.run_root(Arc::new(chunk))?;
     if self.current_module_specifier().is_none() {
       self.persist_root_bindings();
     }
@@ -73,9 +73,9 @@ impl Vm {
   /// Execute bytecode that has already passed structural verification.
   pub fn run_verified(
     &mut self,
-    code: &VerifiedChunk,
+    chunk: &VerifiedChunk,
   ) -> Result<Value, RuntimeError> {
-    self.run_root(code.chunk())
+    self.run_root(chunk.chunk())
   }
 
   fn run_root(
@@ -238,7 +238,7 @@ impl Vm {
       self.maybe_collect_garbage_prototype();
       self.memory.temporary.truncate(temp_root_base);
       self.memory.kept_alive.clear();
-      self.finish_opcode_profile_run("risc-return");
+      self.finish_opcode_profile_run("return");
     }
     Ok(Some(RunOutcome::Return(result)))
   }
@@ -484,7 +484,7 @@ impl Vm {
         .ok_or_else(|| RuntimeError::from("instruction pointer out of bounds"))?;
       let instruction_pc = self.execution.active.pc;
       self.execution.active.pc += 1;
-      // SAFETY: every public execution entry verifies the code recursively
+      // SAFETY: every public execution entry verifies the chunk recursively
       // before this loop runs, including nested function chunks.
       let op = unsafe { Opcode::from_byte_unchecked((word & 0xFF) as u8) };
       let rd = decode_rd(word) as usize;
@@ -495,7 +495,7 @@ impl Vm {
       }
       if crate::trace::enabled() {
         eprintln!(
-          "[trace] risc {}",
+          "[trace] bytecode {}",
           self
             .execution
             .active
@@ -1600,17 +1600,17 @@ impl Vm {
     }
   }
 
-  /// Execute a code without resetting the caller's live lexical bindings.
+  /// Execute a chunk without resetting the caller's live lexical bindings.
   ///
-  /// This is used for direct `eval`, where the evaluated code must observe
+  /// This is used for direct `eval`, where the evaluated chunk must observe
   /// and update the current execution context.
   #[allow(clippy::too_many_lines)]
   pub(crate) fn run_nested(
     &mut self,
-    code: Chunk,
+    chunk: Chunk,
     direct_eval: bool,
   ) -> Result<Value, NestedRunFailure> {
-    code.verify().map_err(|error| NestedRunFailure {
+    chunk.verify().map_err(|error| NestedRunFailure {
       error: RuntimeError::from(format!("Invalid bytecode: {}", error)),
       thrown: None,
     })?;
@@ -1690,7 +1690,7 @@ impl Vm {
           });
     }
 
-    let chunk_rc = Arc::new(code);
+    let chunk_rc = Arc::new(chunk);
     self.execution.root_chunk = Some(Arc::clone(&chunk_rc));
     self.execution.active.chunk = chunk_rc;
     self.execution.active.pc = 0;
@@ -1817,11 +1817,11 @@ impl Vm {
   /// for the shared prototype collector.
   pub(crate) fn run_nested_in_realm(
     &mut self,
-    code: Chunk,
+    chunk: Chunk,
     globals: Rc<RefCell<ObjectData>>,
   ) -> Result<Value, NestedRunFailure> {
     if Rc::ptr_eq(&globals, &self.realm_state.globals) {
-      return self.run_nested(code, false);
+      return self.run_nested(chunk, false);
     }
 
     let Some((intrinsics, global_env)) = crate::runtime_utils::realm_kernel(&globals) else {
@@ -1846,7 +1846,7 @@ impl Vm {
         global_env,
       },
     );
-    let result = self.run_nested(code, false);
+    let result = self.run_nested(chunk, false);
     self.realm_state = previous_realm;
     self.memory.temporary.truncate(temp_root_base);
     result
