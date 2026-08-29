@@ -176,8 +176,8 @@ impl Compiler {
         .directives
         .iter()
         .any(|directive| directive.directive.as_str() == "use strict");
-    self.code.allow_new_target = self.allow_new_target;
-    self.code.allow_super = self.allow_super;
+    self.chunk.allow_new_target = self.allow_new_target;
+    self.chunk.allow_super = self.allow_super;
 
     self.validate_early_errors_in_program(&program.body, program.source_type.is_module())?;
 
@@ -224,11 +224,11 @@ impl Compiler {
 
     self.emit(LoweringOpcode::Return, LINE);
     if self.is_root {
-      self.code.root_slot_types = self.local_types.clone();
-      self.code.root_slot_names = self.environment_slot_names();
-      self.code.root_lexical_tdz = self.local_tdz.clone();
-      self.code.root_slot_immutable = self.local_immutable.clone();
-      self.code.root_function_declarations = program
+      self.chunk.root_slot_types = self.local_types.clone();
+      self.chunk.root_slot_names = self.environment_slot_names();
+      self.chunk.root_lexical_tdz = self.local_tdz.clone();
+      self.chunk.root_slot_immutable = self.local_immutable.clone();
+      self.chunk.root_function_declarations = program
         .body
         .iter()
         .filter_map(|statement| match statement {
@@ -239,10 +239,10 @@ impl Compiler {
           _ => None,
         })
         .collect();
-      self.code.root_strict = self.strict_context;
+      self.chunk.root_strict = self.strict_context;
     }
-    let code = std::mem::take(&mut self.code);
-    let builder = std::mem::take(&mut self.risc);
+    let code = std::mem::take(&mut self.chunk);
+    let builder = std::mem::take(&mut self.lowering);
     bytecode::Lowering::finish(code, builder)
   }
 }

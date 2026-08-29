@@ -68,7 +68,7 @@ impl Vm {
 
     self.exceptions.pending_frame_count = Some(handler.frame_count);
     self.execution.control_flow_epoch = self.execution.control_flow_epoch.wrapping_add(1);
-    self.execution.active.code = handler.code;
+    self.execution.active.chunk = handler.chunk;
     self.execution.active.pc = handler.handler_pc;
     self.execution.active.lexical_env = handler.saved_lexical_env;
 

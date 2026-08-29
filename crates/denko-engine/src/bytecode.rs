@@ -339,12 +339,12 @@ pub struct VerifiedChunk(Arc<Chunk>);
 
 impl VerifiedChunk {
   /// Verify and retain chunk for repeated execution.
-  pub fn new(code: Chunk) -> Result<Self, String> {
-    code.verify()?;
-    Ok(Self(Arc::new(code)))
+  pub fn new(chunk: Chunk) -> Result<Self, String> {
+    chunk.verify()?;
+    Ok(Self(Arc::new(chunk)))
   }
 
-  pub(crate) fn code(&self) -> Arc<Chunk> {
+  pub(crate) fn chunk(&self) -> Arc<Chunk> {
     Arc::clone(&self.0)
   }
 }
@@ -374,7 +374,7 @@ pub struct Function {
   /// ECMAScript `length` value: parameters before the first default, excluding rest.
   pub length: usize,
   /// Compiled bytecode for this function
-  pub code: Arc<Chunk>,
+  pub chunk: Arc<Chunk>,
   /// Optional static slot types retained for tooling and serialization; the
   /// runtime does not enforce TypeScript annotations.
   pub slot_types: Vec<Option<Type>>,
@@ -1038,13 +1038,13 @@ impl Function {
       }
     }
     self
-      .code
+      .chunk
       .verify_with_layout(local_count, self.upvalues.len())
   }
 
   /// Return the exact source substring used to define this function, if tracked.
   pub fn source_text(&self) -> Option<&str> {
-    let text = &self.code.source_text;
+    let text = &self.chunk.source_text;
     let start = self.span.start as usize;
     let end = self.span.end as usize;
     if start <= end && end <= text.len() {

@@ -121,8 +121,8 @@ impl Compiler {
     }
 
     let mut inner = Compiler {
-      code: Chunk::new(Arc::clone(&self.source_text)),
-      risc: super::bytecode::Lowering::new(),
+      chunk: Chunk::new(Arc::clone(&self.source_text)),
+      lowering: super::bytecode::Lowering::new(),
       source_text: Arc::clone(&self.source_text),
       locals: Vec::new(),
       local_types: Vec::new(),
@@ -163,8 +163,8 @@ impl Compiler {
       emission_error: None,
     };
     inner.strict_context = function_is_strict;
-    inner.code.allow_new_target = inner.allow_new_target;
-    inner.code.allow_super = inner.allow_super;
+    inner.chunk.allow_new_target = inner.allow_new_target;
+    inner.chunk.allow_super = inner.allow_super;
     if !has_simple_parameter_list && !function_is_strict {
       inner.outer_bindings.clear();
     }
@@ -262,8 +262,8 @@ impl Compiler {
 
     inner.emit_fallthrough_return(LINE);
     let mut code = super::bytecode::Lowering::finish(
-      std::mem::take(&mut inner.code),
-      std::mem::take(&mut inner.risc),
+      std::mem::take(&mut inner.chunk),
+      std::mem::take(&mut inner.lowering),
     )?;
     code.allow_new_target = inner.allow_new_target;
     code.allow_super = inner.allow_super;
@@ -285,7 +285,7 @@ impl Compiler {
         span: func.span,
         arity: func.params.items.len() + usize::from(has_rest),
         length: Self::expected_argument_count(&func.params),
-        code: Arc::new(code),
+        chunk: Arc::new(code),
         slot_types,
         slot_names,
         lexical_tdz,
@@ -400,8 +400,8 @@ impl Compiler {
     }
 
     let mut inner = Compiler {
-      code: Chunk::new(Arc::clone(&self.source_text)),
-      risc: super::bytecode::Lowering::new(),
+      chunk: Chunk::new(Arc::clone(&self.source_text)),
+      lowering: super::bytecode::Lowering::new(),
       source_text: Arc::clone(&self.source_text),
       locals: Vec::new(),
       local_types: Vec::new(),
@@ -442,8 +442,8 @@ impl Compiler {
       emission_error: None,
     };
     inner.strict_context = function_is_strict;
-    inner.code.allow_new_target = inner.allow_new_target;
-    inner.code.allow_super = inner.allow_super;
+    inner.chunk.allow_new_target = inner.allow_new_target;
+    inner.chunk.allow_super = inner.allow_super;
 
     let mut raw_param_slots = Vec::new();
     if has_simple_parameter_list {
@@ -547,8 +547,8 @@ impl Compiler {
     inner.exit_scope();
 
     let mut code = super::bytecode::Lowering::finish(
-      std::mem::take(&mut inner.code),
-      std::mem::take(&mut inner.risc),
+      std::mem::take(&mut inner.chunk),
+      std::mem::take(&mut inner.lowering),
     )?;
     code.allow_new_target = inner.allow_new_target;
     code.allow_super = inner.allow_super;
@@ -567,7 +567,7 @@ impl Compiler {
         span: func.span,
         arity: func.params.items.len() + usize::from(has_rest),
         length: Self::expected_argument_count(&func.params),
-        code: Arc::new(code),
+        chunk: Arc::new(code),
         slot_types,
         slot_names,
         lexical_tdz,

@@ -1091,7 +1091,7 @@ mod tests {
       span: Span::new(0, 0),
       arity: 0,
       length: 0,
-      code: Arc::new(Chunk::new(Arc::new(String::new()))),
+      chunk: Arc::new(Chunk::new(Arc::new(String::new()))),
       slot_types: Vec::new(),
       slot_names: Vec::new(),
       lexical_tdz: Vec::new(),

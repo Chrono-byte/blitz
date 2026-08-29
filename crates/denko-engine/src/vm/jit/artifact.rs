@@ -275,7 +275,7 @@ mod tests {
     let session = Parser::parse_source(source).expect("source parses");
     let code = compiler::compile_session(&session).expect("source compiles");
     let proto = &code.functions[0];
-    let snapshot = FunctionSnapshot::from_code(&proto.code, proto.arity).expect("snapshot");
+    let snapshot = FunctionSnapshot::from_code(&proto.chunk, proto.arity).expect("snapshot");
     let semantic = SemanticFunction::decode(&snapshot).expect("semantic SSA");
     let typed = VerifiedTypedFunction::specialize_numeric_binary(&semantic).expect("typed SSA");
     emit_numeric_binary(&typed).expect("artifact")

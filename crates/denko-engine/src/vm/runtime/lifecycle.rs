@@ -61,7 +61,7 @@ impl Vm {
       },
       execution: ExecutionState {
         active: ExecutionContext {
-          code: Arc::new(Chunk::new(Arc::new(String::new()))),
+          chunk: Arc::new(Chunk::new(Arc::new(String::new()))),
           pc: 0,
           active_function: None,
           locals: Vec::with_capacity(LOCALS_INITIAL_CAPACITY),
@@ -169,7 +169,7 @@ impl Vm {
       },
       execution: ExecutionState {
         active: ExecutionContext {
-          code: Arc::new(Chunk::new(Arc::new(String::new()))),
+          chunk: Arc::new(Chunk::new(Arc::new(String::new()))),
           pc: 0,
           active_function: None,
           locals: Vec::with_capacity(LOCALS_INITIAL_CAPACITY),
@@ -442,7 +442,7 @@ impl Vm {
           _ => false,
         });
     (
-      self.execution.active.code.allow_new_target,
+      self.execution.active.chunk.allow_new_target,
       has_home_object,
       allows_super_call,
     )
@@ -1126,7 +1126,7 @@ impl Vm {
   ) {
     self.execution.active.locals.clear();
     self.execution.call_stack.clear();
-    self.execution.active.strict = self.execution.active.code.root_strict;
+    self.execution.active.strict = self.execution.active.chunk.root_strict;
     self.exceptions.handlers.clear();
     self.exceptions.pending = None;
     self.exceptions.pending_frame_count = None;
@@ -1158,7 +1158,7 @@ impl Vm {
     self.execution.active.arguments.object = None;
     self.execution.active.arguments.mapped_count = 0;
     self.execution.active.pc = 0;
-    self.execution.active.code = Arc::new(Chunk::new(Arc::new(String::new())));
+    self.execution.active.chunk = Arc::new(Chunk::new(Arc::new(String::new())));
     self.caches.property_get.clear();
     gc::reset_allocation_pressure();
     let mut g = self.realm_state.globals.borrow_mut();

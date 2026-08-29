@@ -501,7 +501,7 @@ impl Vm {
       self
         .execution
         .active
-        .code
+        .chunk
         .root_slot_names
         .iter()
         .enumerate()
@@ -531,7 +531,7 @@ impl Vm {
       && self
         .execution
         .active
-        .code
+        .chunk
         .root_slot_names
         .get(slot)
         .and_then(Clone::clone)

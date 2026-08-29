@@ -45,11 +45,11 @@ pub struct ModuleContext {
 
 /// Compiles AST to bytecode
 pub(crate) struct Compiler {
-  /// Current code being compiled
-  pub code: Chunk,
+  /// Current chunk being compiled
+  pub chunk: Chunk,
   /// Compiler-owned virtual instruction stream. Frontend operations never
-  /// enter `Chunk::code`; only finalized bytecode v2 words are stored there.
-  pub(crate) risc: Lowering,
+  /// enter `Chunk::words`; only finalized bytecode v2 words are stored there.
+  pub(crate) lowering: Lowering,
   /// Original source text for this compilation unit
   pub source_text: Arc<String>,
   /// Local variable names
@@ -284,7 +284,7 @@ impl Compiler {
   /// Current frontend instruction position. Labels and metadata are expressed
   /// in this compiler-owned coordinate space until bytecode finalization.
   pub(crate) fn current_pc(&mut self) -> usize {
-    self.risc.len()
+    self.lowering.len()
   }
 
   /// Resolves the patch index for a jump offset, accounting for fixed-width
@@ -293,7 +293,7 @@ impl Compiler {
     &self,
     offset: usize,
   ) -> usize {
-    let op_at = |idx: usize| self.risc.op_at(idx);
+    let op_at = |idx: usize| self.lowering.op_at(idx);
     let is_patchable_jump_at = |idx: usize| {
       op_at(idx).is_some_and(|op| op.is_jump() || matches!(op, LoweringOpcode::PushHandler))
     };
@@ -314,8 +314,8 @@ impl Compiler {
     code.allow_new_target = allow_new_target;
     code.allow_super = allow_super;
     Self {
-      code,
-      risc: Lowering::new(),
+      chunk: code,
+      lowering: Lowering::new(),
       source_text,
       locals: Vec::new(),
       local_types: Vec::new(),
@@ -392,7 +392,7 @@ impl Compiler {
     op: LoweringOpcode,
     line: u32,
   ) {
-    self.risc.emit(op, 0, line);
+    self.lowering.emit(op, 0, line);
     self.pending_operand_bytes = 0;
   }
 
@@ -400,7 +400,7 @@ impl Compiler {
     &mut self,
     line: u32,
   ) {
-    if self.risc.is_reachable() {
+    if self.lowering.is_reachable() {
       self.emit(LoweringOpcode::Undefined, line);
       self.emit(LoweringOpcode::Return, line);
     }
@@ -415,7 +415,7 @@ impl Compiler {
     payload24: u32,
     line: u32,
   ) {
-    self.risc.emit(op, payload24, line);
+    self.lowering.emit(op, payload24, line);
     self.pending_operand_bytes = 0;
   }
 
@@ -429,7 +429,7 @@ impl Compiler {
     byte: u8,
     line: u32,
   ) {
-    if self.risc.is_empty() {
+    if self.lowering.is_empty() {
       self
         .emission_error
         .get_or_insert_with(|| CompilerError::from("compiler emitted operand without instruction"));
@@ -442,7 +442,7 @@ impl Compiler {
       return;
     }
     self
-      .risc
+      .lowering
       .append_operand_byte(self.pending_operand_bytes, byte, line);
     self.pending_operand_bytes += 1;
   }
@@ -459,7 +459,9 @@ impl Compiler {
       });
       return;
     };
-    self.risc.set_last_payload(u32::from(slot), line);
+    self
+      .lowering
+      .set_last_payload(u32::from(slot), line);
     self.pending_operand_bytes = 2;
   }
 
@@ -471,7 +473,7 @@ impl Compiler {
     line: u32,
   ) {
     let payload = value as u32 & 0xFFFF;
-    self.risc.set_last_payload(payload, line);
+    self.lowering.set_last_payload(payload, line);
     self.pending_operand_bytes = 0;
   }
 
@@ -492,7 +494,7 @@ impl Compiler {
         return;
       }
     };
-    let idx = self.code.add_constant(constant);
+    let idx = self.chunk.add_constant(constant);
     let Ok(idx) = u16::try_from(idx) else {
       self
         .emission_error
@@ -515,7 +517,9 @@ impl Compiler {
       });
       return;
     };
-    self.risc.set_last_payload(u32::from(idx), line);
+    self
+      .lowering
+      .set_last_payload(u32::from(idx), line);
     self.pending_operand_bytes = 2;
   }
 
@@ -531,11 +535,11 @@ impl Compiler {
   ) -> Result<u16, CompilerError> {
     let descriptor = Constant::String(format!("{module_index}\0{name}").into());
     let index = self
-      .code
+      .chunk
       .constants
       .iter()
       .position(|value| value == &descriptor)
-      .unwrap_or_else(|| self.code.add_constant(descriptor));
+      .unwrap_or_else(|| self.chunk.add_constant(descriptor));
     u16::try_from(index)
       .map_err(|_| CompilerError::from(format!("Too many constants (max 65535, got {index})")))
   }
@@ -1355,12 +1359,12 @@ impl Compiler {
     name: &str,
   ) -> usize {
     if let Some(&idx) = self.globals.get(name)
-      && idx < self.code.constants.len()
+      && idx < self.chunk.constants.len()
     {
       return idx;
     }
     let idx = self
-      .code
+      .chunk
       .add_constant(Constant::String(name.to_string().into()));
     self.globals.insert(name.to_string(), idx);
     idx
@@ -1528,7 +1532,7 @@ impl Compiler {
     patch_idx: usize,
     val: i32,
   ) {
-    self.risc.patch_branch(patch_idx, val);
+    self.lowering.patch_branch(patch_idx, val);
   }
 
   /// Patches a jump instruction at the given offset to jump to the target instruction.
@@ -1561,7 +1565,7 @@ impl Compiler {
       return;
     };
     let idx = self.current_pc().saturating_sub(1);
-    self.risc.patch_branch_line(idx, v, line);
+    self.lowering.patch_branch_line(idx, v, line);
     self.pending_operand_bytes = 0;
   }
 

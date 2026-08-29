@@ -659,7 +659,7 @@ fn precompile_graph(
         .collect::<Result<Vec<_>, _>>()?,
       exports,
       imports,
-      code: chunk,
+      chunk,
     });
   }
 
@@ -715,7 +715,7 @@ fn compile_record(record: &ModuleRecord) -> Result<Chunk, String> {
   };
   let chunk = compile_session_with_context(session, &context)
     .map_err(|error| format!("compile {}: {error}", record.specifier))?;
-  let chunk = denko::runtime_utils::clear_slot_types_in_code(chunk);
+  let chunk = denko::runtime_utils::clear_slot_types_in_chunk(chunk);
   chunk
     .verify()
     .map_err(|error| format!("verify compiled {}: {error}", record.specifier))?;

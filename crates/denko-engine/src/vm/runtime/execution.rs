@@ -75,7 +75,7 @@ impl Vm {
     &mut self,
     code: &VerifiedChunk,
   ) -> Result<Value, RuntimeError> {
-    self.run_root(code.code())
+    self.run_root(code.chunk())
   }
 
   fn run_root(
@@ -83,11 +83,11 @@ impl Vm {
     chunk_rc: Arc<Chunk>,
   ) -> Result<Value, RuntimeError> {
     self.execution.root_chunk = Some(Arc::clone(&chunk_rc));
-    self.execution.active.code = chunk_rc;
+    self.execution.active.chunk = chunk_rc;
     self.execution.active.pc = 0;
     self.execution.active.locals.clear();
     self.execution.call_stack.clear();
-    self.execution.active.strict = self.execution.active.code.root_strict;
+    self.execution.active.strict = self.execution.active.chunk.root_strict;
     self.exceptions.handlers.clear();
     self.exceptions.pending = None;
     self.exceptions.pending_frame_count = None;
@@ -147,7 +147,7 @@ impl Vm {
     let mut state = RegisterState::new(
       self.execution.active.this_value.clone(),
       &[],
-      self.execution.active.code.spill_slot_count as usize,
+      self.execution.active.chunk.spill_slot_count as usize,
     );
     match self.run_state(&mut state, false)? {
       RunOutcome::Return(value) => Ok(value),
@@ -478,7 +478,7 @@ impl Vm {
       let word = *self
         .execution
         .active
-        .code
+        .chunk
         .words
         .get(self.execution.active.pc)
         .ok_or_else(|| RuntimeError::from("instruction pointer out of bounds"))?;
@@ -499,7 +499,7 @@ impl Vm {
           self
             .execution
             .active
-            .code
+            .chunk
             .disassemble_at(instruction_pc)
             .unwrap_or_else(|_| format!("pc={instruction_pc}"))
         );
@@ -512,7 +512,7 @@ impl Vm {
             registers[rd] = self
               .execution
               .active
-              .code
+              .chunk
               .constants
               .get(decode_aux16(word) as usize)
               .map(crate::bytecode::Constant::to_value)
@@ -585,7 +585,7 @@ impl Vm {
                     self
                       .execution
                       .active
-                      .code
+                      .chunk
                       .root_slot_names
                       .get(slot)
                       .and_then(Clone::clone)
@@ -1092,7 +1092,7 @@ impl Vm {
           }
           Opcode::BuildArray => {
             let count = decode_aux16(word) as usize;
-            let base = self.execution.active.code.value_spill_slot_count as usize;
+            let base = self.execution.active.chunk.value_spill_slot_count as usize;
             let values = spill_slots
               .get(base..base + count)
               .ok_or_else(|| RuntimeError::from("array operand window out of bounds"))?
@@ -1102,7 +1102,7 @@ impl Vm {
           Opcode::BuildObject => {
             let count = decode_aux16(word) as usize;
             let operand_count = count.saturating_mul(2);
-            let base = self.execution.active.code.value_spill_slot_count as usize;
+            let base = self.execution.active.chunk.value_spill_slot_count as usize;
             let values = spill_slots
               .get(base..base + operand_count)
               .ok_or_else(|| RuntimeError::from("object operand window out of bounds"))?
@@ -1199,7 +1199,7 @@ impl Vm {
               })
               .collect();
             let overflow = count.saturating_sub(abi::REGISTER_ARGUMENT_COUNT);
-            let base = self.execution.active.code.value_spill_slot_count as usize;
+            let base = self.execution.active.chunk.value_spill_slot_count as usize;
             if overflow > 0 {
               args.extend_from_slice(
                 spill_slots
@@ -1240,7 +1240,7 @@ impl Vm {
                   .collect::<Vec<_>>();
                 self.push_call_frame(proto, env, call_args, this_arg, callee.clone())?;
                 let callee_this = self.execution.active.this_value.clone();
-                let callee_spill_count = self.execution.active.code.spill_slot_count as usize;
+                let callee_spill_count = self.execution.active.chunk.spill_slot_count as usize;
                 let caller_state = RegisterState {
                   registers: std::mem::replace(
                     registers,
@@ -1323,7 +1323,7 @@ impl Vm {
               );
               spill_slots.clear();
               spill_slots.resize(
-                self.execution.active.code.spill_slot_count as usize,
+                self.execution.active.chunk.spill_slot_count as usize,
                 Value::Undefined,
               );
               state.resume_destination = None;
@@ -1363,7 +1363,7 @@ impl Vm {
               })
               .collect();
             let overflow = count.saturating_sub(abi::REGISTER_ARGUMENT_COUNT);
-            let base = self.execution.active.code.value_spill_slot_count as usize;
+            let base = self.execution.active.chunk.value_spill_slot_count as usize;
             if overflow > 0 {
               args.extend_from_slice(
                 spill_slots
@@ -1377,7 +1377,7 @@ impl Vm {
           }
           Opcode::SuperConstruct => {
             let count = decode_aux16(word) as usize;
-            let base = self.execution.active.code.value_spill_slot_count as usize;
+            let base = self.execution.active.chunk.value_spill_slot_count as usize;
             let args = spill_slots
               .get(base..base + count)
               .ok_or_else(|| RuntimeError::from("super operand window out of bounds"))?
@@ -1396,7 +1396,7 @@ impl Vm {
             let finally = self
               .execution
               .active
-              .code
+              .chunk
               .finally_handlers
               .iter()
               .find(|handler| handler.push_pc == instruction_pc)
@@ -1406,7 +1406,7 @@ impl Vm {
                 did_return_slot: handler.did_return_slot,
               });
             self.exceptions.handlers.push(HandlerRecord {
-              code: Arc::clone(&self.execution.active.code),
+              chunk: Arc::clone(&self.execution.active.chunk),
               handler_pc,
               saved_locals_len: self.execution.active.locals.len(),
               frame_count: self.execution.call_stack.len(),
@@ -1692,9 +1692,9 @@ impl Vm {
 
     let chunk_rc = Arc::new(code);
     self.execution.root_chunk = Some(Arc::clone(&chunk_rc));
-    self.execution.active.code = chunk_rc;
+    self.execution.active.chunk = chunk_rc;
     self.execution.active.pc = 0;
-    self.execution.active.strict = self.execution.active.code.root_strict;
+    self.execution.active.strict = self.execution.active.chunk.root_strict;
     if !direct_eval {
       self.execution.active.lexical_env = Rc::clone(&self.realm_state.global_env);
     }
@@ -1706,18 +1706,23 @@ impl Vm {
     if !self
       .execution
       .active
-      .code
+      .chunk
       .root_slot_names
       .is_empty()
     {
       self.initialize_root_bindings();
     }
     if direct_eval {
-      let names = self.execution.active.code.root_slot_names.clone();
+      let names = self
+        .execution
+        .active
+        .chunk
+        .root_slot_names
+        .clone();
       let lexical = self
         .execution
         .active
-        .code
+        .chunk
         .root_lexical_tdz
         .clone();
       for (index, maybe_name) in names.into_iter().enumerate() {
@@ -1889,7 +1894,7 @@ impl Vm {
     &self,
     idx: usize,
   ) -> Result<js_string::JsString, RuntimeError> {
-    match self.execution.active.code.constants.get(idx) {
+    match self.execution.active.chunk.constants.get(idx) {
       Some(crate::bytecode::Constant::String(value)) => Ok(value.clone()),
       Some(_) => Err(RuntimeError::from("Constant is not a string")),
       None => Err(RuntimeError::from("String constant index out of bounds")),
@@ -1925,13 +1930,13 @@ impl Vm {
     let start = self.execution.active.pc.saturating_sub(8);
     let end = usize::min(
       self.execution.active.pc + 8,
-      self.execution.active.code.words.len(),
+      self.execution.active.chunk.words.len(),
     );
     for pc in start..end {
       let instruction = self
         .execution
         .active
-        .code
+        .chunk
         .disassemble_at(pc)
         .unwrap_or_else(|error| format!("{pc:#06} <{error}>"));
       eprintln!("[diag] {instruction}");

@@ -59,7 +59,7 @@ impl Vm {
       return self.get_property_value(obj, key);
     };
     let site = (
-      std::sync::Arc::as_ptr(&self.execution.active.code) as usize,
+      std::sync::Arc::as_ptr(&self.execution.active.chunk) as usize,
       instruction_pc,
     );
 

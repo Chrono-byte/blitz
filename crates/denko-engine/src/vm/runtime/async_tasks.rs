@@ -359,7 +359,7 @@ impl Vm {
     let register_state = RegisterState::new(
       child.execution.active.this_value.clone(),
       &register_arguments,
-      child.execution.active.code.spill_slot_count as usize,
+      child.execution.active.chunk.spill_slot_count as usize,
     );
     let runner = Rc::new(RefCell::new(AsyncRunner {
       execution: Some(AsyncExecution {

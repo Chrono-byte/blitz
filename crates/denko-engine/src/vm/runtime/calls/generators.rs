@@ -42,7 +42,7 @@ impl Vm {
     let mut register_state = RegisterState::new(
       child.execution.active.this_value.clone(),
       &register_arguments,
-      child.execution.active.code.spill_slot_count as usize,
+      child.execution.active.chunk.spill_slot_count as usize,
     );
     let initialization = match child.run_state(&mut register_state, true) {
       Ok(outcome) => outcome,

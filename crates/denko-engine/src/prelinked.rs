@@ -287,7 +287,7 @@ impl PrelinkedModuleGraph {
     let mut budget = ChunkBudget::default();
     for module in &self.modules {
       validate_chunk_tree(
-        &module.code,
+        &module.chunk,
         module.module_index,
         &module.specifier,
         self.engine_bytecode_version,
@@ -298,14 +298,14 @@ impl PrelinkedModuleGraph {
         &mut budget,
       )?;
       module
-        .code
+        .chunk
         .verify()
         .map_err(|reason| PrelinkedGraphError::InvalidChunk {
           specifier: module.specifier.clone(),
           reason,
         })?;
     }
-    enforce_limit("code count", budget.codes, MAX_CHUNKS)?;
+    enforce_limit("code count", budget.chunks, MAX_CHUNKS)?;
     enforce_limit(
       "total code source bytes",
       budget.source_bytes,
@@ -349,7 +349,7 @@ pub struct PrelinkedModule {
   /// Local imported names mapped to canonical live-binding IDs.
   pub imports: Vec<PrelinkedImport>,
   /// Verified bytecode executed without parsing or compiling source text.
-  pub code: Chunk,
+  pub chunk: Chunk,
 }
 
 /// One exported name's canonical live-binding identity.
@@ -412,7 +412,7 @@ pub enum PrelinkedGraphError {
 
 #[derive(Default)]
 struct ChunkBudget {
-  codes: usize,
+  chunks: usize,
   source_bytes: usize,
   bytecode_bytes: usize,
   sources: HashSet<*const String>,
@@ -445,7 +445,7 @@ fn validate_chunk_tree(
     });
   }
 
-  budget.codes = checked_add(budget.codes, 1, "code count")?;
+  budget.chunks = checked_add(budget.chunks, 1, "code count")?;
   let new_source = budget
     .sources
     .insert(Arc::as_ptr(&code.source_text));
@@ -461,7 +461,7 @@ fn validate_chunk_tree(
       MAX_TOTAL_SOURCE_BYTES,
     )?;
   }
-  enforce_limit("code count", budget.codes, MAX_CHUNKS)?;
+  enforce_limit("code count", budget.chunks, MAX_CHUNKS)?;
   let instruction_bytes = code
     .words
     .len()
@@ -619,7 +619,7 @@ fn validate_chunk_tree(
 
   for function in &code.functions {
     validate_chunk_tree(
-      &function.code,
+      &function.chunk,
       owner_index,
       specifier,
       expected_version,
@@ -750,7 +750,7 @@ mod tests {
             binding_id: 0,
           }],
           imports: vec![],
-          code: return_chunk("debug value source"),
+          chunk: return_chunk("debug value source"),
         },
         PrelinkedModule {
           specifier: "synthetic:entry".to_string(),
@@ -765,7 +765,7 @@ mod tests {
             local_name: "value".to_string(),
             binding_id: 0,
           }],
-          code: return_chunk("debug entry source"),
+          chunk: return_chunk("debug entry source"),
         },
       ],
       binding_count: 1,
@@ -851,14 +851,14 @@ mod tests {
   #[test]
   fn rejects_invalid_code_and_descriptor_targets() {
     let mut invalid_chunk = graph();
-    invalid_chunk.modules[0].code.lines.pop();
+    invalid_chunk.modules[0].chunk.lines.pop();
     assert!(matches!(
       invalid_chunk.validate(),
       Err(PrelinkedGraphError::InvalidChunk { .. })
     ));
 
     let mut invalid_descriptor = graph();
-    let code = &mut invalid_descriptor.modules[1].code;
+    let code = &mut invalid_descriptor.modules[1].chunk;
     code
       .constants
       .push(Constant::String("0\0missing".to_string().into()));
@@ -871,7 +871,7 @@ mod tests {
 
     let mut missing_edge = graph();
     missing_edge.modules[1].dependencies.clear();
-    let code = &mut missing_edge.modules[1].code;
+    let code = &mut missing_edge.modules[1].chunk;
     code
       .constants
       .push(Constant::String("0\0value".to_string().into()));
@@ -893,7 +893,7 @@ mod tests {
         binding_id: 1,
       });
     binding_drift.modules[1].imports[0].binding_id = 1;
-    let code = &mut binding_drift.modules[1].code;
+    let code = &mut binding_drift.modules[1].chunk;
     code
       .constants
       .push(Constant::String("0\0value".to_string().into()));
@@ -905,7 +905,7 @@ mod tests {
     ));
 
     let mut foreign_write = graph();
-    let code = &mut foreign_write.modules[1].code;
+    let code = &mut foreign_write.modules[1].chunk;
     code
       .constants
       .push(Constant::String("0\0value".to_string().into()));
@@ -917,7 +917,7 @@ mod tests {
     ));
 
     let mut dynamic_import = graph();
-    let code = &mut dynamic_import.modules[1].code;
+    let code = &mut dynamic_import.modules[1].chunk;
     code
       .constants
       .push(Constant::String("dynamicImport".to_string().into()));

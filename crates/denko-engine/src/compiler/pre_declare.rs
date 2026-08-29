@@ -208,7 +208,7 @@ impl Compiler {
     func: &oast::Function<'_>,
   ) -> Result<usize, crate::errors::CompilerError> {
     let (proto, _env_len) = self.compile_function(name, None, func, None, false)?;
-    let idx = self.code.add_function(proto);
+    let idx = self.chunk.add_function(proto);
     self.emit(LoweringOpcode::MakeClosure, LINE);
     self.emit_function_index(idx, LINE);
     let slot = if let Some(s) = self.resolve_local(name) {
@@ -275,7 +275,7 @@ impl Compiler {
             } else {
               let fname = "default".to_string();
               let (proto, _env_len) = self.compile_function(&fname, None, f, None, false)?;
-              let idx = self.code.add_function(proto);
+              let idx = self.chunk.add_function(proto);
               self.emit(LoweringOpcode::MakeClosure, LINE);
               self.emit_function_index(idx, LINE);
               if self.current_module.is_some() {

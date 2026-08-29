@@ -703,7 +703,7 @@ mod test {
       proto.has_rest,
       proto.captures_this,
       proto.upvalues.len(),
-      proto.code.words
+      proto.chunk.words
     );
     assert!(optimized.caches.quickened.values().any(|plan| {
       plan.regions.iter().any(|region| {

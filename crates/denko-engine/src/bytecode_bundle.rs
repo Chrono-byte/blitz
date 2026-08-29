@@ -2,7 +2,7 @@
 //! Deterministic binary serialization for committed bytecode bundles.
 //!
 //! The on-disk format is a small versioned envelope around a Postcard payload.
-//! Source strings and nested codes are interned so shared [`Arc`] values are
+//! Source strings and nested chunks are interned so shared [`Arc`] values are
 //! not repeatedly stored. Decoding never executes bytecode and verifies every
 //! reconstructed code before returning it.
 
@@ -29,8 +29,8 @@ const MAX_CHUNK_DEPTH: usize = 256;
 pub struct NamedChunk {
   /// Stable module or entry-point name.
   pub name: String,
-  /// Compiled bytecode and all of its nested function codes.
-  pub code: Chunk,
+  /// Compiled bytecode and all of its nested function chunks.
+  pub chunk: Chunk,
 }
 
 /// Errors produced while encoding or decoding bytecode bundles.
@@ -72,7 +72,7 @@ pub enum BundleError {
   },
 }
 
-/// Encode named codes into the deterministic bytecode bundle format.
+/// Encode named chunks into the deterministic bytecode bundle format.
 ///
 /// Chunks are verified before encoding. The same logical input, including its
 /// entry order and `Arc` sharing, always produces the same bytes.
@@ -87,7 +87,7 @@ pub fn encode(entries: &[NamedChunk]) -> Result<Vec<u8>, BundleError> {
 
   for entry in entries {
     entry
-      .code
+      .chunk
       .verify()
       .map_err(|reason| BundleError::InvalidChunk {
         name: entry.name.clone(),
@@ -95,14 +95,14 @@ pub fn encode(entries: &[NamedChunk]) -> Result<Vec<u8>, BundleError> {
       })?;
     wire_entries.push(WireNamedChunk {
       name: entry.name.clone(),
-      code: encoder.add_root(&entry.code)?,
+      code: encoder.add_root(&entry.chunk)?,
     });
   }
 
   let bundle = WireBundle {
     sources: encoder.sources,
-    codes: encoder
-      .codes
+    chunks: encoder
+      .chunks
       .into_iter()
       .enumerate()
       .map(|(index, code)| {
@@ -117,7 +117,7 @@ pub fn encode(entries: &[NamedChunk]) -> Result<Vec<u8>, BundleError> {
   frame_payload(&payload)
 }
 
-/// Decode and verify named codes from a bytecode bundle.
+/// Decode and verify named chunks from a bytecode bundle.
 ///
 /// The decoder validates the signature, exact format version, payload length,
 /// checksum, all table references, nesting depth, portable integer widths, and
@@ -169,25 +169,25 @@ pub fn decode(bytes: &[u8]) -> Result<Vec<NamedChunk>, BundleError> {
   let wire: WireBundle = postcard::from_bytes(payload)?;
   let sources = wire.sources.into_iter().map(Arc::new).collect();
   let mut decoder = Decoder {
-    codes: wire.codes,
+    chunks: wire.chunks,
     sources,
     states: Vec::new(),
     decoded: Vec::new(),
   };
   decoder
     .states
-    .resize(decoder.codes.len(), DecodeState::New);
-  decoder.decoded.resize(decoder.codes.len(), None);
+    .resize(decoder.chunks.len(), DecodeState::New);
+  decoder.decoded.resize(decoder.chunks.len(), None);
 
-  for index in 0..decoder.codes.len() {
-    decoder.build_code(index, 0)?;
+  for index in 0..decoder.chunks.len() {
+    decoder.build_chunk(index, 0)?;
   }
 
   wire
     .entries
     .into_iter()
     .map(|entry| {
-      let index = index_from_u32(entry.code, decoder.decoded.len(), "entry code")?;
+      let index = index_from_u32(entry.code, decoder.decoded.len(), "entry chunk")?;
       let code = decoder.decoded[index]
         .as_ref()
         .ok_or_else(|| BundleError::InvalidData(format!("missing decoded code {index}")))?;
@@ -199,7 +199,7 @@ pub fn decode(bytes: &[u8]) -> Result<Vec<NamedChunk>, BundleError> {
         })?;
       Ok(NamedChunk {
         name: entry.name,
-        code: code.as_ref().clone(),
+        chunk: code.as_ref().clone(),
       })
     })
     .collect()
@@ -229,7 +229,7 @@ fn frame_payload(payload: &[u8]) -> Result<Vec<u8>, BundleError> {
 #[derive(Serialize, Deserialize)]
 struct WireBundle {
   sources: Vec<String>,
-  codes: Vec<WireChunk>,
+  chunks: Vec<WireChunk>,
   entries: Vec<WireNamedChunk>,
 }
 
@@ -407,8 +407,8 @@ enum WireBuiltinType {
 struct Encoder {
   sources: Vec<String>,
   source_ids: HashMap<usize, u32>,
-  codes: Vec<Option<WireChunk>>,
-  code_ids: HashMap<usize, u32>,
+  chunks: Vec<Option<WireChunk>>,
+  chunk_ids: HashMap<usize, u32>,
 }
 
 impl Encoder {
@@ -416,10 +416,10 @@ impl Encoder {
     &mut self,
     code: &Chunk,
   ) -> Result<u32, BundleError> {
-    let index = wire_index(self.codes.len(), "code")?;
-    self.codes.push(None);
-    let encoded = self.encode_code(code)?;
-    self.codes[index as usize] = Some(encoded);
+    let index = wire_index(self.chunks.len(), "code")?;
+    self.chunks.push(None);
+    let encoded = self.encode_chunk(code)?;
+    self.chunks[index as usize] = Some(encoded);
     Ok(index)
   }
 
@@ -428,14 +428,14 @@ impl Encoder {
     code: &Arc<Chunk>,
   ) -> Result<u32, BundleError> {
     let identity = Arc::as_ptr(code) as usize;
-    if let Some(index) = self.code_ids.get(&identity) {
+    if let Some(index) = self.chunk_ids.get(&identity) {
       return Ok(*index);
     }
-    let index = wire_index(self.codes.len(), "code")?;
-    self.code_ids.insert(identity, index);
-    self.codes.push(None);
-    let encoded = self.encode_code(code)?;
-    self.codes[index as usize] = Some(encoded);
+    let index = wire_index(self.chunks.len(), "code")?;
+    self.chunk_ids.insert(identity, index);
+    self.chunks.push(None);
+    let encoded = self.encode_chunk(code)?;
+    self.chunks[index as usize] = Some(encoded);
     Ok(index)
   }
 
@@ -453,7 +453,7 @@ impl Encoder {
     Ok(index)
   }
 
-  fn encode_code(
+  fn encode_chunk(
     &mut self,
     code: &Chunk,
   ) -> Result<WireChunk, BundleError> {
@@ -504,7 +504,7 @@ impl Encoder {
       span_end: function.span.end,
       arity: function.arity as u64,
       length: function.length as u64,
-      code: self.add_nested(&function.code)?,
+      code: self.add_nested(&function.chunk)?,
       slot_types: encode_optional_types(&function.slot_types),
       slot_names: function.slot_names.clone(),
       lexical_tdz: function.lexical_tdz.clone(),
@@ -549,14 +549,14 @@ enum DecodeState {
 }
 
 struct Decoder {
-  codes: Vec<WireChunk>,
+  chunks: Vec<WireChunk>,
   sources: Vec<Arc<String>>,
   states: Vec<DecodeState>,
   decoded: Vec<Option<Arc<Chunk>>>,
 }
 
 impl Decoder {
-  fn build_code(
+  fn build_chunk(
     &mut self,
     index: usize,
     depth: usize,
@@ -584,7 +584,7 @@ impl Decoder {
     }
 
     self.states[index] = DecodeState::Building;
-    let wire = self.codes[index].clone();
+    let wire = self.chunks[index].clone();
     let source_index = index_from_u32(wire.source, self.sources.len(), "source")?;
     let functions = wire
       .functions
@@ -643,13 +643,13 @@ impl Decoder {
     wire: WireFunctionProto,
     depth: usize,
   ) -> Result<Function, BundleError> {
-    let code_index = index_from_u32(wire.code, self.codes.len(), "nested code")?;
+    let chunk_index = index_from_u32(wire.code, self.chunks.len(), "nested code")?;
     Ok(Function {
       name: wire.name,
       span: Span::new(wire.span_start, wire.span_end),
       arity: usize_from_u64(wire.arity, "function arity")?,
       length: usize_from_u64(wire.length, "function length")?,
-      code: self.build_code(code_index, depth)?,
+      chunk: self.build_chunk(chunk_index, depth)?,
       slot_types: decode_optional_types(wire.slot_types)?,
       slot_names: wire.slot_names,
       lexical_tdz: wire.lexical_tdz,
@@ -1079,7 +1079,7 @@ mod tests {
       span: Span::new(0, 42),
       arity: 2,
       length: 1,
-      code: Arc::new(nested),
+      chunk: Arc::new(nested),
       slot_types: vec![
         Some(Type::Literal(LiteralType::String("x".into()))),
         None,
@@ -1114,7 +1114,7 @@ mod tests {
 
     vec![NamedChunk {
       name: "module.js".into(),
-      code: root,
+      chunk: root,
     }]
   }
 
@@ -1128,7 +1128,7 @@ mod tests {
     let decoded = decode_bytecode_bundle(&first).expect("decode bundle");
     assert_eq!(decoded.len(), 1);
     assert_eq!(decoded[0].name, "module.js");
-    let root = &decoded[0].code;
+    let root = &decoded[0].chunk;
     let function = &root.functions[0];
     assert_eq!(function.span, Span::new(0, 42));
     assert_eq!(function.arity, 2);
@@ -1137,10 +1137,10 @@ mod tests {
       function.upvalues[0].mirror_global_name.as_deref(),
       Some("global")
     );
-    assert_eq!(function.code.constants.len(), 8);
-    assert_eq!(function.code.value_spill_slot_count, 3);
-    assert_eq!(function.code.finally_handlers[0].did_return_slot, 3);
-    assert!(Arc::ptr_eq(&root.source_text, &function.code.source_text));
+    assert_eq!(function.chunk.constants.len(), 8);
+    assert_eq!(function.chunk.value_spill_slot_count, 3);
+    assert_eq!(function.chunk.finally_handlers[0].did_return_slot, 3);
+    assert!(Arc::ptr_eq(&root.source_text, &function.chunk.source_text));
     assert_eq!(
       encode_bytecode_bundle(&decoded).expect("re-encode decoded bundle"),
       first
@@ -1174,7 +1174,7 @@ mod tests {
     let bytes = encode_bytecode_bundle(&populated_bundle()).expect("encode bundle");
     let mut wire: WireBundle =
       postcard::from_bytes(&bytes[HEADER_LEN..]).expect("decode private wire payload");
-    wire.codes[0].code[0] = 0xff;
+    wire.chunks[0].code[0] = 0xff;
     let payload = postcard::to_allocvec(&wire).expect("encode private wire payload");
     let bytes = frame_payload(&payload).expect("frame private wire payload");
 

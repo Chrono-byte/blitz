@@ -9,7 +9,7 @@ use std::sync::Arc;
 /// Exception handler record.
 pub(crate) struct HandlerRecord {
   /// The code containing the handler code.
-  pub(crate) code: Arc<Chunk>,
+  pub(crate) chunk: Arc<Chunk>,
   /// The instruction pointer where the handler jumps to.
   pub(crate) handler_pc: InstructionIndex,
   /// The saved locals length for unwinding.

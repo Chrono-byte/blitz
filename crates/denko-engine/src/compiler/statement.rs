@@ -183,7 +183,7 @@ impl Compiler {
       }
 
       let (proto, _env_len) = self.compile_function(&fname, None, f, None, false)?;
-      let idx = self.code.add_function(proto);
+      let idx = self.chunk.add_function(proto);
       self.emit(LoweringOpcode::MakeClosure, LINE);
       self.emit_function_index(idx, LINE);
       let slot = if let Some(s) = self.resolve_local(&fname) {
@@ -313,7 +313,7 @@ impl Compiler {
             } else {
               let fname = "default".to_string();
               let (proto, _env_len) = self.compile_function(&fname, None, f, None, false)?;
-              let idx = self.code.add_function(proto);
+              let idx = self.chunk.add_function(proto);
               self.emit(LoweringOpcode::MakeClosure, LINE);
               self.emit_function_index(idx, LINE);
             }
@@ -1576,7 +1576,7 @@ impl Compiler {
             self.patch_jump_to_target(patch_pos, body_start);
           }
           self
-            .code
+            .chunk
             .finally_handlers
             .push(crate::bytecode::FinallyHandler {
               push_pc: push_handler_pc,

@@ -9,7 +9,7 @@ impl Vm {
     this_value: &Value,
     arguments: &[Value],
   ) -> Result<Option<Value>, RuntimeError> {
-    let function = self.function_id_for_chunk(&proto.code);
+    let function = self.function_id_for_chunk(&proto.chunk);
     if !self
       .profiling
       .functions
@@ -95,7 +95,7 @@ impl Vm {
         return Ok(Some(result));
       }
     }
-    let code = &proto.code;
+    let code = &proto.chunk;
     let parameter_count = proto.arity;
     let function = self.function_id_for_chunk(code);
     if arguments.len() >= 2
@@ -482,13 +482,13 @@ impl Vm {
   }
 
   pub(super) fn active_function_id(&mut self) -> crate::vm::jit::FunctionId {
-    let identity = Arc::as_ptr(&self.execution.active.code) as usize;
+    let identity = Arc::as_ptr(&self.execution.active.chunk) as usize;
     if self.profiling.active_function_identity == identity
       && let Some(function) = self.profiling.active_function_id
     {
       return function;
     }
-    let code = std::sync::Arc::clone(&self.execution.active.code);
+    let code = std::sync::Arc::clone(&self.execution.active.chunk);
     let function = self.function_id_for_chunk(&code);
     self.profiling.active_function_identity = identity;
     self.profiling.active_function_id = Some(function);
@@ -499,7 +499,7 @@ impl Vm {
     &mut self,
     pc: usize,
   ) {
-    let code_identity = Arc::as_ptr(&self.execution.active.code) as usize;
+    let code_identity = Arc::as_ptr(&self.execution.active.chunk) as usize;
     if self.profiling.last_hot_function == code_identity
       || self
         .profiling
@@ -523,14 +523,14 @@ impl Vm {
   }
 
   pub(super) fn site_action(&mut self) -> SiteAction {
-    let identity = Arc::as_ptr(&self.execution.active.code) as usize;
+    let identity = Arc::as_ptr(&self.execution.active.chunk) as usize;
     if self.caches.active_quickened_chunk != identity {
       let sites = if let Some(plan) = self.caches.quickened.get(&identity) {
         self.caches.active_direct_calls = Rc::clone(&plan.direct_calls);
         self.caches.active_regions = Arc::clone(&plan.regions);
         Arc::clone(&plan.sites)
       } else {
-        let code = Arc::clone(&self.execution.active.code);
+        let code = Arc::clone(&self.execution.active.chunk);
         let (sites, regions) = build_quickened_sites(&code, self.caches.native_regions_enabled);
         let sites = Arc::<[SiteAction]>::from(sites);
         let regions = Arc::<[crate::vm::region::NativeRegion]>::from(regions);

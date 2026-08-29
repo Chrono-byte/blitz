@@ -236,21 +236,21 @@ impl Vm {
         crate::trace::value_string("[trace]   callee", callee);
         let cur_pc = self.execution.active.pc.saturating_sub(1);
         let start = cur_pc.saturating_sub(16);
-        let end = (cur_pc + 16).min(self.execution.active.code.words.len());
+        let end = (cur_pc + 16).min(self.execution.active.chunk.words.len());
         eprintln!("[trace]   bytecode window ({}..{}):", start, end);
         for i in start..end {
-          let instr = self.execution.active.code.words[i];
+          let instr = self.execution.active.chunk.words[i];
           let b = (instr & 0xFF) as u8;
           eprintln!("[trace]     {:04} 0x{:02x}", i, b);
         }
         eprintln!(
           "[trace]   constants (len={}):",
-          self.execution.active.code.constants.len()
+          self.execution.active.chunk.constants.len()
         );
         for (i, constant) in self
           .execution
           .active
-          .code
+          .chunk
           .constants
           .iter()
           .enumerate()
@@ -880,7 +880,7 @@ impl Vm {
       }
     }
 
-    self.execution.active.code = Arc::clone(&proto.code);
+    self.execution.active.chunk = Arc::clone(&proto.chunk);
     self.execution.active.pc = 0;
     self.execution.active.active_function = Some(callee.clone());
     self.execution.active.closure_env = Some(closure_env.clone());
@@ -1080,7 +1080,7 @@ impl Vm {
     let caller_context = std::mem::replace(
       &mut self.execution.active,
       ExecutionContext {
-        code: Arc::clone(&proto.code),
+        chunk: Arc::clone(&proto.chunk),
         pc: 0,
         active_function: Some(callee.clone()),
         locals: Vec::new(),

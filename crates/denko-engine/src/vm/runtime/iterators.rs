@@ -464,7 +464,7 @@ impl Vm {
       .iter()
       .rposition(|handler| {
         handler.frame_count == self.execution.call_stack.len()
-          && Arc::ptr_eq(&handler.code, &self.execution.active.code)
+          && Arc::ptr_eq(&handler.chunk, &self.execution.active.chunk)
           && handler.finally.is_some()
       })
     else {

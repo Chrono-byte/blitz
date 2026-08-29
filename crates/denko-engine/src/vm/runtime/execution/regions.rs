@@ -429,7 +429,7 @@ impl Vm {
     let Some(crate::bytecode::Constant::String(method_key)) = self
       .execution
       .active
-      .code
+      .chunk
       .constants
       .get(region.method_key_constant)
     else {
@@ -606,7 +606,7 @@ impl Vm {
     let Some(crate::bytecode::Constant::String(method_key)) = self
       .execution
       .active
-      .code
+      .chunk
       .constants
       .get(region.method_key_constant)
     else {
@@ -632,7 +632,7 @@ impl Vm {
       return Ok(false);
     };
     let Some(crate::bytecode::Constant::String(property_key)) = proto
-      .code
+      .chunk
       .constants
       .get(read.property_key_constant)
     else {
@@ -789,7 +789,7 @@ impl Vm {
     let Some(crate::bytecode::Constant::String(method_key)) = self
       .execution
       .active
-      .code
+      .chunk
       .constants
       .get(region.method_key_constant)
     else {
@@ -820,7 +820,7 @@ impl Vm {
       return Ok(false);
     }
     let Some(crate::bytecode::Constant::String(property_key)) = proto
-      .code
+      .chunk
       .constants
       .get(effect.property_key_constant)
     else {
@@ -1005,7 +1005,7 @@ impl Vm {
     let Some(crate::bytecode::Constant::String(key)) = self
       .execution
       .active
-      .code
+      .chunk
       .constants
       .get(region.key_constant)
     else {
@@ -1223,7 +1223,7 @@ impl Vm {
         let Some(crate::bytecode::Constant::String(key)) = self
           .execution
           .active
-          .code
+          .chunk
           .constants
           .get(key_constant)
         else {

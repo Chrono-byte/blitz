@@ -343,14 +343,14 @@ fn compile_generator_non_simple_params_keep_later_params_tdz() {
 
   let mut ops = Vec::new();
   let mut pc = 0usize;
-  while pc < proto.code.words.len() && ops.len() < 16 {
-    let op = Opcode::from_byte((proto.code.words[pc] & 0xFF) as u8).expect("valid opcode");
+  while pc < proto.chunk.words.len() && ops.len() < 16 {
+    let op = Opcode::from_byte((proto.chunk.words[pc] & 0xFF) as u8).expect("valid opcode");
     let width = opcode_width(op);
     let operand = if matches!(
       op,
       Opcode::LoadLocal | Opcode::StoreLocal | Opcode::CloneLocalCell
     ) {
-      proto.code.words.get(pc + 1).copied()
+      proto.chunk.words.get(pc + 1).copied()
     } else {
       None
     };
@@ -372,7 +372,7 @@ fn compile_object_generator_method_emits_body() {
     code
       .functions
       .iter()
-      .map(|p| (p.name.clone(), p.code.words.len(), p.is_generator))
+      .map(|p| (p.name.clone(), p.chunk.words.len(), p.is_generator))
       .collect::<Vec<_>>()
   );
   let proto = code
@@ -383,15 +383,15 @@ fn compile_object_generator_method_emits_body() {
 
   eprintln!(
     "object generator proto: code_len={} consts={} slots={} tdz={:?}",
-    proto.code.words.len(),
-    proto.code.constants.len(),
+    proto.chunk.words.len(),
+    proto.chunk.constants.len(),
     proto.slot_names.len(),
     proto.lexical_tdz
   );
   let mut ops = Vec::new();
   let mut pc = 0usize;
-  while pc < proto.code.words.len() && ops.len() < 24 {
-    let op = Opcode::from_byte((proto.code.words[pc] & 0xFF) as u8).expect("valid opcode");
+  while pc < proto.chunk.words.len() && ops.len() < 24 {
+    let op = Opcode::from_byte((proto.chunk.words[pc] & 0xFF) as u8).expect("valid opcode");
     let width = opcode_width(op);
     ops.push(op.name());
     pc += width;
@@ -399,7 +399,7 @@ fn compile_object_generator_method_emits_body() {
   eprintln!("object generator proto ops: {:?}", ops);
 
   assert!(
-    !proto.code.words.is_empty(),
+    !proto.chunk.words.is_empty(),
     "object generator method should emit bytecode"
   );
 }
@@ -415,7 +415,7 @@ fn explicit_terminal_return_omits_unreachable_implicit_return() {
     .find(|proto| proto.name == "read")
     .expect("read method proto");
   let ops = proto
-    .code
+    .chunk
     .words
     .iter()
     .map(|word| Opcode::from_byte((word & 0xff) as u8).expect("valid opcode"))
@@ -444,7 +444,7 @@ fn strict_direct_return_calls_emit_tail_call() {
 
   assert!(
     proto
-      .code
+      .chunk
       .words
       .iter()
       .any(|word| { Opcode::from_byte((word & 0xFF) as u8) == Some(Opcode::TailCall) })
@@ -533,7 +533,7 @@ fn module_export_updates_follow_binding_identity() {
     .unwrap();
   let count_export_writes = |function: &crate::bytecode::Function| {
     function
-      .code
+      .chunk
       .words
       .iter()
       .filter(|word| Opcode::from_byte((*word & 0xff) as u8) == Some(Opcode::SetModuleExport))
@@ -658,7 +658,7 @@ fn compile_for_await_uses_async_iterator_acquisition() {
   let ops: Vec<_> = code
     .functions
     .iter()
-    .flat_map(|function| function.code.words.iter())
+    .flat_map(|function| function.chunk.words.iter())
     .filter_map(|word| Opcode::from_byte((*word & 0xFF) as u8))
     .collect();
   assert!(

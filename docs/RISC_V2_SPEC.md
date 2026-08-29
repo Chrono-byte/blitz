@@ -47,7 +47,7 @@ must not depend on whether a value resides in a register or slot.
 ## Instruction and metadata rules
 
 - `Function` is a compiled ECMAScript function with executable code and
-  function metadata. Its `code` field is a `Chunk` value.
+  function metadata. Its `chunk` field is a `Chunk` value.
 - `Instruction` is one decoded semantic instruction. A raw `u32` in
   `Chunk::words` is an instruction word.
 - `Opcode` is the serialized opcode enum.

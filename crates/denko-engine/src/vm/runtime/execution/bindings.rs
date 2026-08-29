@@ -30,7 +30,7 @@ impl Vm {
     let lexical = self
       .execution
       .active
-      .code
+      .chunk
       .root_lexical_tdz
       .clone();
     let mut global_env = self.realm_state.global_env.borrow_mut();
@@ -69,18 +69,28 @@ impl Vm {
   }
 
   pub(super) fn initialize_root_bindings(&mut self) {
-    let slot_names = self.execution.active.code.root_slot_names.clone();
+    let slot_names = self
+      .execution
+      .active
+      .chunk
+      .root_slot_names
+      .clone();
     let slot_tdz = self
       .execution
       .active
-      .code
+      .chunk
       .root_lexical_tdz
       .clone();
-    let slot_types = self.execution.active.code.root_slot_types.clone();
+    let slot_types = self
+      .execution
+      .active
+      .chunk
+      .root_slot_types
+      .clone();
     let slot_immutable = self
       .execution
       .active
-      .code
+      .chunk
       .root_slot_immutable
       .clone();
     let slot_sloppy_immutable_silent = vec![false; slot_names.len()];

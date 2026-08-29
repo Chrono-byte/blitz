@@ -12,7 +12,7 @@ fn replace_debug_source(
 ) {
   code.source_text = Arc::clone(debug_source);
   for function in &mut code.functions {
-    replace_debug_source(Arc::make_mut(&mut function.code), debug_source);
+    replace_debug_source(Arc::make_mut(&mut function.chunk), debug_source);
   }
 }
 

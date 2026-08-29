@@ -1577,7 +1577,7 @@ mod tests {
         assert!(!matches!(word & 0xff, 50..=53));
       }
       for function in &code.functions {
-        assert_risc(&function.code);
+        assert_risc(&function.chunk);
       }
     }
     assert_risc(&code);

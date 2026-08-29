@@ -196,8 +196,8 @@ fn encode_module(
     writer.string(&import.local_name, StringKind::Name)?;
     writer.u32(import.binding_id);
   }
-  writer.string(&module.code.source_text, StringKind::Source)?;
-  encode_code(writer, &module.code, &module.code.source_text, 0)
+  writer.string(&module.chunk.source_text, StringKind::Source)?;
+  encode_chunk(writer, &module.chunk, &module.chunk.source_text, 0)
 }
 
 fn decode_graph(reader: &mut Reader<'_>) -> Result<PrelinkedModuleGraph, PrelinkedGraphCodecError> {
@@ -268,7 +268,7 @@ fn decode_module(reader: &mut Reader<'_>) -> Result<PrelinkedModule, PrelinkedGr
   } else {
     None
   };
-  let code = decode_code(reader, 0, module_source.as_ref())?;
+  let code = decode_chunk(reader, 0, module_source.as_ref())?;
   Ok(PrelinkedModule {
     specifier,
     module_index,
@@ -276,11 +276,11 @@ fn decode_module(reader: &mut Reader<'_>) -> Result<PrelinkedModule, PrelinkedGr
     dependencies,
     exports,
     imports,
-    code,
+    chunk: code,
   })
 }
 
-fn encode_code(
+fn encode_chunk(
   writer: &mut Writer,
   code: &Chunk,
   module_source: &str,
@@ -290,7 +290,7 @@ fn encode_code(
     return Err(invalid("code nesting exceeds the supported depth"));
   }
   if code.source_text.as_str() != module_source {
-    return Err(invalid("all codes in a module must share source text"));
+    return Err(invalid("all chunks in a module must share source text"));
   }
   writer.u8(code.version as u8);
   writer.vector_len(code.words.len(), MAX_VECTOR_ITEMS, "instruction count")?;
@@ -332,7 +332,7 @@ fn encode_code(
   Ok(())
 }
 
-fn decode_code(
+fn decode_chunk(
   reader: &mut Reader<'_>,
   depth: usize,
   module_source: Option<&Arc<String>>,
@@ -340,12 +340,12 @@ fn decode_code(
   if depth > MAX_CHUNK_DEPTH {
     return Err(invalid("code nesting exceeds the supported depth"));
   }
-  reader.codes = reader
-    .codes
+  reader.chunks = reader
+    .chunks
     .checked_add(1)
     .ok_or_else(|| invalid("code count overflow"))?;
-  if reader.codes > MAX_CHUNKS {
-    return Err(limit("code count", reader.codes, MAX_CHUNKS));
+  if reader.chunks > MAX_CHUNKS {
+    return Err(limit("code count", reader.chunks, MAX_CHUNKS));
   }
   let version = decode_bytecode_version(reader.u8()?)?;
   let code_count = reader.vector_len(MAX_VECTOR_ITEMS, "instruction count")?;
@@ -443,7 +443,7 @@ fn encode_function(
     u64::try_from(function.length)
       .map_err(|_| invalid("function length does not fit portable u64"))?,
   );
-  encode_code(writer, &function.code, module_source, depth)?;
+  encode_chunk(writer, &function.chunk, module_source, depth)?;
   encode_optional_types(writer, &function.slot_types, 0)?;
   encode_optional_strings(writer, &function.slot_names)?;
   encode_bools(writer, &function.lexical_tdz)?;
@@ -494,7 +494,7 @@ fn decode_function(
   if length > MAX_FUNCTION_ARITY {
     return Err(limit("function length", length, MAX_FUNCTION_ARITY));
   }
-  let code = Arc::new(decode_code(reader, depth, module_source)?);
+  let code = Arc::new(decode_chunk(reader, depth, module_source)?);
   let slot_types = decode_optional_types(reader, 0)?;
   let slot_names = decode_optional_strings(reader)?;
   let lexical_tdz = decode_bools(reader)?;
@@ -543,7 +543,7 @@ fn decode_function(
     span: Span::new(span_start, span_end),
     arity,
     length,
-    code,
+    chunk: code,
     slot_types,
     slot_names,
     lexical_tdz,
@@ -1262,7 +1262,7 @@ struct Reader<'a> {
   bytecode_bytes: usize,
   dependency_count: usize,
   binding_count: usize,
-  codes: usize,
+  chunks: usize,
 }
 
 impl<'a> Reader<'a> {
@@ -1279,7 +1279,7 @@ impl<'a> Reader<'a> {
       bytecode_bytes: 0,
       dependency_count: 0,
       binding_count: 0,
-      codes: 0,
+      chunks: 0,
     }
   }
 
@@ -1567,7 +1567,7 @@ mod tests {
       span: Span::new(0, 24),
       arity: 2,
       length: 1,
-      code: Arc::new(nested),
+      chunk: Arc::new(nested),
       slot_types: vec![
         Some(Type::Literal(LiteralType::String("x".into()))),
         None,
@@ -1616,7 +1616,7 @@ mod tests {
             binding_id: 0,
           }],
           imports: vec![],
-          code: Chunk::new(Arc::new(
+          chunk: Chunk::new(Arc::new(
             crate::js!(module, "export const value = 1;").into(),
           )),
         },
@@ -1633,7 +1633,7 @@ mod tests {
             local_name: "value".into(),
             binding_id: 0,
           }],
-          code: root,
+          chunk: root,
         },
       ],
       binding_count: 1,
@@ -1662,27 +1662,27 @@ mod tests {
     assert_eq!(decoded.modules[1].imports[0].binding_id, 0);
     assert!(decoded.modules.iter().all(|module| {
       module
-        .code
+        .chunk
         .functions
         .iter()
-        .all(|function| Arc::ptr_eq(&module.code.source_text, &function.code.source_text))
+        .all(|function| Arc::ptr_eq(&module.chunk.source_text, &function.chunk.source_text))
     }));
     assert_eq!(
-      decoded.modules[1].code.source_text.as_str(),
+      decoded.modules[1].chunk.source_text.as_str(),
       "export const value = 1;"
     );
     assert_eq!(
-      decoded.modules[1].code.functions[0]
-        .code
+      decoded.modules[1].chunk.functions[0]
+        .chunk
         .value_spill_slot_count,
       3
     );
-    assert_eq!(decoded.modules[1].code.constants.len(), 0);
-    assert_eq!(decoded.modules[1].code.functions[0].arity, 2);
-    assert_eq!(decoded.modules[1].code.functions[0].length, 1);
+    assert_eq!(decoded.modules[1].chunk.constants.len(), 0);
+    assert_eq!(decoded.modules[1].chunk.functions[0].arity, 2);
+    assert_eq!(decoded.modules[1].chunk.functions[0].length, 1);
     assert_eq!(
-      decoded.modules[1].code.functions[0]
-        .code
+      decoded.modules[1].chunk.functions[0]
+        .chunk
         .constants
         .len(),
       3
@@ -1692,7 +1692,7 @@ mod tests {
   #[test]
   fn rejects_mixed_sources_within_a_module() {
     let mut graph = graph();
-    Arc::make_mut(&mut graph.modules[1].code.functions[0].code).source_text =
+    Arc::make_mut(&mut graph.modules[1].chunk.functions[0].chunk).source_text =
       Arc::new(crate::js!("function nested() {}").into());
     assert!(
       matches!(encode(&graph), Err(PrelinkedGraphCodecError::InvalidData(message)) if message.contains("share source text"))
@@ -1748,7 +1748,7 @@ mod tests {
   #[test]
   fn rejects_function_arity_that_would_force_an_unbounded_frame() {
     let mut graph = graph();
-    graph.modules[1].code.functions[0].arity = MAX_FUNCTION_ARITY + 1;
+    graph.modules[1].chunk.functions[0].arity = MAX_FUNCTION_ARITY + 1;
     assert!(matches!(
       encode(&graph),
       Err(PrelinkedGraphCodecError::LimitExceeded {

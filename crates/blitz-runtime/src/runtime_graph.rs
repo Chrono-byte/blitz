@@ -1511,7 +1511,7 @@ mod tests {
           binding_id: 0,
         }],
         imports: Vec::new(),
-        code: chunk,
+        chunk,
       }],
       binding_count: 1,
       public_roots: vec![0],
@@ -1611,7 +1611,10 @@ mod tests {
     assert_eq!(decoded.manifest, bundle.manifest);
     assert_eq!(decoded.graph.modules[0].source_sha256, [3; 32]);
     assert_eq!(
-      decoded.graph.modules[0].code.source_text.as_str(),
+      decoded.graph.modules[0]
+        .chunk
+        .source_text
+        .as_str(),
       "debug source"
     );
     assert_eq!(decoded.encode().expect("re-encode bundle"), first);

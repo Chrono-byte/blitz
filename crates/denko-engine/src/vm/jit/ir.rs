@@ -290,7 +290,7 @@ mod tests {
       .expect("source parses");
     let code = compiler::compile_session(&session).expect("source compiles");
     let proto = &code.functions[0];
-    FunctionSnapshot::from_code(&proto.code, proto.arity).expect("snapshot")
+    FunctionSnapshot::from_code(&proto.chunk, proto.arity).expect("snapshot")
   }
 
   #[test]
@@ -357,7 +357,7 @@ mod tests {
     let code = compiler::compile_session(&session).expect("source compiles");
     let proto = &code.functions[0];
     assert_eq!(
-      FunctionSnapshot::from_code(&proto.code, proto.arity),
+      FunctionSnapshot::from_code(&proto.chunk, proto.arity),
       Err(IrError::TooManyParameters)
     );
   }

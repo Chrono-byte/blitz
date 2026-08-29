@@ -20,7 +20,7 @@ use worker::{
 };
 
 struct BaselineCompiler<'a> {
-  code: &'a Chunk,
+  chunk: &'a Chunk,
 }
 
 impl<'a> BaselineCompiler<'a> {
@@ -28,7 +28,7 @@ impl<'a> BaselineCompiler<'a> {
     &self,
     parameter_count: usize,
   ) -> Result<(NativeCode, DirectLeaf), String> {
-    let Some([load, return_word]) = self.code.words.get(..2) else {
+    let Some([load, return_word]) = self.chunk.words.get(..2) else {
       return Err("direct leaf requires a load and return".to_string());
     };
     let load_register = (load >> 8) & 0xf;
@@ -39,7 +39,7 @@ impl<'a> BaselineCompiler<'a> {
     }
     if (*load & 0xff) as u8 == Opcode::Const as u8 {
       let Constant::Number(value) = self
-        .code
+        .chunk
         .constants
         .get(((load >> 16) & 0xffff) as usize)
         .ok_or_else(|| "constant index out of bounds".to_string())?
@@ -65,28 +65,28 @@ impl<'a> BaselineCompiler<'a> {
   }
 
   fn compile_const_prefix(self) -> Result<NativeCode, String> {
-    if self.code.words.is_empty() {
+    if self.chunk.words.is_empty() {
       return Err("baseline requires at least one instruction".to_string());
     }
     let mut registers = [None; 16];
-    let mut visited = vec![false; self.code.words.len()];
+    let mut visited = vec![false; self.chunk.words.len()];
     let mut pc = 0;
     loop {
-      if pc >= self.code.words.len() {
+      if pc >= self.chunk.words.len() {
         return Err("baseline control flow left the code".to_string());
       }
       if visited[pc] {
         return self.resume_materialized(&registers, pc);
       }
       visited[pc] = true;
-      let word = self.code.words[pc];
+      let word = self.chunk.words[pc];
       let op = (word & 0xff) as u8;
       let rd = ((word >> 8) & 0xf) as usize;
       let rs = ((word >> 12) & 0xf) as usize;
       if op == Opcode::Const as u8 {
         let constant_index = ((word >> 16) & 0xffff) as usize;
         let Constant::Number(value) = self
-          .code
+          .chunk
           .constants
           .get(constant_index)
           .ok_or_else(|| "constant index out of bounds".to_string())?
@@ -147,13 +147,13 @@ impl<'a> BaselineCompiler<'a> {
     let mut local_registers = [None; 16];
     let mut pc = block.start_pc;
     while pc < block.end_pc {
-      let word = self.code.words[pc];
+      let word = self.chunk.words[pc];
       let op = (word & 0xff) as u8;
       let rd = ((word >> 8) & 0xf) as usize;
       let rs = ((word >> 12) & 0xf) as usize;
       if op == Opcode::Const as u8 {
         let Constant::Number(value) = self
-          .code
+          .chunk
           .constants
           .get(((word >> 16) & 0xffff) as usize)
           .ok_or_else(|| "constant index out of bounds".to_string())?
@@ -608,7 +608,7 @@ impl JitRuntime {
     parameter_count: usize,
   ) -> Result<CodeVersionId, String> {
     let blocks = discover_blocks(code)?;
-    let compiler = BaselineCompiler { code };
+    let compiler = BaselineCompiler { chunk: code };
     let direct_call = compiler
       .compile_direct_leaf(parameter_count)
       .ok()
@@ -1334,7 +1334,7 @@ mod tests {
     conditional.write_instr(Opcode::Return as u32, 0);
 
     for code in [&jump, &conditional] {
-      let native_code = BaselineCompiler { code }
+      let native_code = BaselineCompiler { chunk: code }
         .compile_const_prefix()
         .expect("baseline compile");
       let mut result = Value::Undefined;
@@ -1364,7 +1364,7 @@ mod tests {
     code.write_instr(Opcode::Const as u32 | (3 << 8), 0);
     code.write_instr(Opcode::Move as u32 | (7 << 8) | (3 << 12), 0);
     code.write_instr(Opcode::Return as u32 | (7 << 8), 0);
-    let code = BaselineCompiler { code: &code }
+    let code = BaselineCompiler { chunk: &code }
       .compile_const_prefix()
       .expect("baseline compile");
     let mut result = Value::Undefined;
@@ -1390,7 +1390,7 @@ mod tests {
     code.constants.push(Constant::Number(42.0));
     code.write_instr(Opcode::Const as u32, 0);
     code.write_instr(Opcode::Neg as u32, 0);
-    let code = BaselineCompiler { code: &code }
+    let code = BaselineCompiler { chunk: &code }
       .compile_const_prefix()
       .expect("baseline compile");
     let mut registers: [Value; 16] = std::array::from_fn(|_| Value::Undefined);

@@ -750,7 +750,7 @@ impl DenseMaskedReadRegion {
 
 impl NumericBinaryParameters {
   pub(super) fn decode(proto: &Function) -> Option<Self> {
-    let [left, right, add, return_word] = proto.code.words.as_slice() else {
+    let [left, right, add, return_word] = proto.chunk.words.as_slice() else {
       return None;
     };
     let left_slot = decode_aux16(*left) as usize;
@@ -915,7 +915,7 @@ impl OwnMethodBinaryLoopRegion {
 
 impl ReceiverNumericRead {
   pub(super) fn decode(proto: &Function) -> Option<Self> {
-    let words = proto.code.words.as_slice();
+    let words = proto.chunk.words.as_slice();
     let [get_this, key, get_property, return_word, ..] = words else {
       return None;
     };
@@ -944,7 +944,7 @@ impl ReceiverNumericRead {
       return None;
     }
     let property_key_constant = decode_aux16(*key) as usize;
-    match proto.code.constants.get(property_key_constant) {
+    match proto.chunk.constants.get(property_key_constant) {
       Some(crate::bytecode::Constant::String(_)) => Some(Self {
         property_key_constant,
       }),
@@ -1102,8 +1102,8 @@ impl ReceiverNumericEffect {
       Opcode::Undefined,
       Opcode::Return,
     ];
-    let words = proto.code.words.get(..OPS.len())?;
-    if proto.code.words.len() != OPS.len()
+    let words = proto.chunk.words.get(..OPS.len())?;
+    if proto.chunk.words.len() != OPS.len()
       || proto.arity < 1
       || proto.has_rest
       || proto.captures_this
@@ -1152,7 +1152,7 @@ impl ReceiverNumericEffect {
       return None;
     }
     let property_key_constant = decode_aux16(words[2]) as usize;
-    match proto.code.constants.get(property_key_constant) {
+    match proto.chunk.constants.get(property_key_constant) {
       Some(crate::bytecode::Constant::String(_)) => Some(Self {
         property_key_constant,
         argument_slot: 0,

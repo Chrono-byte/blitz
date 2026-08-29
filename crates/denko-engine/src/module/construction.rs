@@ -62,10 +62,12 @@ impl ModuleLoader {
           })?;
       let (bytecode, module_index) = match &module.source {
         VirtualModuleSource::JavaScript(_) => (None, None),
-        VirtualModuleSource::Bytecode(code) => (Some(code.clone()), None),
+        VirtualModuleSource::Bytecode(chunk) => (Some(chunk.clone()), None),
         VirtualModuleSource::Precompiled {
-          code, module_index, ..
-        } => (Some(code.clone()), Some(*module_index)),
+          chunk,
+          module_index,
+          ..
+        } => (Some(chunk.clone()), Some(*module_index)),
       };
       let virtual_path = virtual_module_path(&canonical);
       let mut record = ModuleRecord::new_source(

@@ -8,7 +8,7 @@ impl Vm {
     registers: &mut [Value; 16],
   ) -> Result<bool, RuntimeError> {
     let pc = self.execution.active.pc;
-    let words = &self.execution.active.code.words[pc..pc + 3];
+    let words = &self.execution.active.chunk.words[pc..pc + 3];
     let left_register = decode_rd(words[0]) as usize;
     let right_register = decode_rd(words[1]) as usize;
     let (condition, _, _, offset) = decode_compare_jump(words[2]);
@@ -29,7 +29,7 @@ impl Vm {
     let Some(crate::bytecode::Constant::Number(right)) = self
       .execution
       .active
-      .code
+      .chunk
       .constants
       .get(decode_aux16(words[1]) as usize)
     else {
@@ -64,7 +64,7 @@ impl Vm {
     registers: &mut [Value; 16],
   ) -> Result<bool, RuntimeError> {
     let pc = self.execution.active.pc;
-    let words = &self.execution.active.code.words[pc..pc + 12];
+    let words = &self.execution.active.chunk.words[pc..pc + 12];
     let receiver_register = decode_rd(words[0]) as usize;
     let callee_register = decode_rd(words[3]) as usize;
     let argument_register = decode_rd(words[6]) as usize;
@@ -113,7 +113,7 @@ impl Vm {
     let Some(crate::bytecode::Constant::String(key)) = self
       .execution
       .active
-      .code
+      .chunk
       .constants
       .get(decode_aux16(words[4]) as usize)
     else {
@@ -186,7 +186,7 @@ impl Vm {
     registers: &mut [Value; 16],
   ) -> Result<bool, RuntimeError> {
     let pc = self.execution.active.pc;
-    let words = &self.execution.active.code.words[pc..pc + 9];
+    let words = &self.execution.active.chunk.words[pc..pc + 9];
     let accumulator_register = decode_rd(words[0]) as usize;
     let property_register = decode_rd(words[1]) as usize;
     let key_register = decode_rd(words[2]) as usize;
@@ -243,7 +243,7 @@ impl Vm {
     let Some(crate::bytecode::Constant::String(key)) = self
       .execution
       .active
-      .code
+      .chunk
       .constants
       .get(decode_aux16(words[2]) as usize)
     else {
@@ -284,7 +284,7 @@ impl Vm {
     registers: &mut [Value; 16],
   ) -> Result<bool, RuntimeError> {
     let pc = self.execution.active.pc;
-    let words = &self.execution.active.code.words[pc..pc + 10];
+    let words = &self.execution.active.chunk.words[pc..pc + 10];
     let source_register = decode_rd(words[0]) as usize;
     let constant_register = decode_rd(words[3]) as usize;
     let result_register = decode_rd(words[4]) as usize;
@@ -328,7 +328,7 @@ impl Vm {
     let Some(crate::bytecode::Constant::Number(constant)) = self
       .execution
       .active
-      .code
+      .chunk
       .constants
       .get(decode_aux16(words[3]) as usize)
     else {
@@ -354,7 +354,7 @@ impl Vm {
     registers: &mut [Value; 16],
   ) -> Result<bool, RuntimeError> {
     let pc = self.execution.active.pc;
-    let words = &self.execution.active.code.words[pc..pc + 4];
+    let words = &self.execution.active.chunk.words[pc..pc + 4];
     let left_register = decode_rd(words[0]) as usize;
     let right_register = decode_rd(words[1]) as usize;
 

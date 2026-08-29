@@ -278,7 +278,7 @@ impl super::Compiler {
       OExpr::ArrowFunctionExpression(a) => {
         let name = "<arrow>";
         let (proto, _env_len) = self.compile_arrow_function(name, a, None)?;
-        let idx = self.code.add_function(proto);
+        let idx = self.chunk.add_function(proto);
         self.emit(LoweringOpcode::MakeClosure, LINE);
         self.emit_function_index(idx, LINE);
       }
@@ -286,7 +286,7 @@ impl super::Compiler {
         let self_name = f.id.as_ref().map(|id| id.name.as_str());
         let name = self_name.unwrap_or("<anonymous>");
         let (proto, _env_len) = self.compile_function(name, self_name, f, None, false)?;
-        let idx = self.code.add_function(proto);
+        let idx = self.chunk.add_function(proto);
         self.emit(LoweringOpcode::MakeClosure, LINE);
         self.emit_function_index(idx, LINE);
       }
@@ -385,7 +385,7 @@ impl super::Compiler {
                   self.compile_function(&method_name, None, function, None, true)?;
                 proto.has_prototype_property = proto.is_generator;
                 proto.is_constructor = false;
-                let index = self.code.add_function(proto);
+                let index = self.chunk.add_function(proto);
                 self.emit(LoweringOpcode::MakeClosure, LINE);
                 self.emit_function_index(index, LINE);
                 self.emit_set_method_home_object(home_object_slot)?;
@@ -479,7 +479,7 @@ impl super::Compiler {
                   self.compile_function(&method_name, None, f, None, true)?;
                 proto.has_prototype_property = proto.is_generator;
                 proto.is_constructor = false;
-                let idx = self.code.add_function(proto);
+                let idx = self.chunk.add_function(proto);
                 self.emit(LoweringOpcode::MakeClosure, LINE);
                 self.emit_function_index(idx, LINE);
                 self.emit_set_method_home_object(home_object_slot)?;

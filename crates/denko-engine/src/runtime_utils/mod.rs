@@ -97,7 +97,7 @@ const MAX_ARRAY_LENGTH_F: f64 = 4294967295.0_f64;
 const MAX_SAFE_INTEGER_F: f64 = 9007199254740991.0_f64;
 
 /// Clears the slot types in chunk and its nested functions.
-pub fn clear_slot_types_in_code(code: bytecode::Chunk) -> bytecode::Chunk {
+pub fn clear_slot_types_in_chunk(code: bytecode::Chunk) -> bytecode::Chunk {
   fn rebuild(
     rc_chunk: &Arc<bytecode::Chunk>,
     visited: &mut HashMap<*const bytecode::Chunk, Arc<bytecode::Chunk>>,
@@ -116,11 +116,11 @@ pub fn clear_slot_types_in_code(code: bytecode::Chunk) -> bytecode::Chunk {
 
     let mut new_funcs = Vec::new();
     for f in &rc_chunk.functions {
-      let nested = rebuild(&f.code, visited);
+      let nested = rebuild(&f.chunk, visited);
       let mut nf = f.clone();
       nf.slot_types = nf.slot_types.iter().map(|_| None).collect();
       nf.return_type = None;
-      nf.code = nested;
+      nf.chunk = nested;
       new_funcs.push(nf);
     }
     new_chunk.functions = new_funcs;

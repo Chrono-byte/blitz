@@ -804,7 +804,7 @@ impl super::Compiler {
     self.emit_slot(return_slot, LINE);
     self.emit(LoweringOpcode::Return, LINE);
     self
-      .code
+      .chunk
       .finally_handlers
       .push(crate::bytecode::FinallyHandler {
         push_pc: push_handler_pc,

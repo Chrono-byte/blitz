@@ -336,7 +336,7 @@ impl ModuleLoader {
                     crate::errors::RuntimeError::from(format!("Compile failed: {error}"))
                   })?
               };
-              crate::runtime_utils::clear_slot_types_in_code(code)
+              crate::runtime_utils::clear_slot_types_in_chunk(code)
             }
           };
           vm.set_current_module_specifier(Some(rec.specifier.clone()));
@@ -411,7 +411,7 @@ impl ModuleLoader {
                 |error| crate::errors::RuntimeError::from(format!("Compile failed: {error}")),
               )?
             };
-            crate::runtime_utils::clear_slot_types_in_code(code)
+            crate::runtime_utils::clear_slot_types_in_chunk(code)
           }
         };
         vm.set_current_module_specifier(Some(rec.specifier.clone()));

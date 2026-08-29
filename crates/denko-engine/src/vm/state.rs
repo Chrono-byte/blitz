@@ -174,7 +174,7 @@ pub(crate) struct ArgumentsState {
 
 #[derive(Clone)]
 pub(crate) struct ExecutionContext {
-  pub(crate) code: Arc<Chunk>,
+  pub(crate) chunk: Arc<Chunk>,
   pub(crate) pc: InstructionIndex,
   pub(crate) active_function: Option<Value>,
   pub(crate) locals: Vec<BindingCell>,

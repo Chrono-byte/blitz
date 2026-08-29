@@ -127,7 +127,7 @@ impl Vm {
     let proto = self
       .execution
       .active
-      .code
+      .chunk
       .functions
       .get(idx)
       .cloned()
@@ -349,7 +349,7 @@ impl Vm {
           "[trace] make_closure: created Closure props_ptr={:p} proto_idx={} proto_chunk_ptr={:p} pc={}",
           Rc::as_ptr(props),
           idx,
-          Arc::as_ptr(&closure_proto.code),
+          Arc::as_ptr(&closure_proto.chunk),
           self.execution.active.pc.saturating_sub(1)
         );
       }

@@ -186,7 +186,7 @@ impl Compiler {
     self.emit_constant(Value::String("value".to_string().into()), LINE);
     if let Some(initializer) = initializer {
       let proto = self.compile_static_field_initializer(initializer)?;
-      let function_index = self.code.add_function(proto);
+      let function_index = self.chunk.add_function(proto);
       self.emit(LoweringOpcode::LoadLocal, LINE);
       self.emit_slot(target_slot, LINE);
       self.emit(LoweringOpcode::MakeClosure, LINE);
@@ -279,7 +279,7 @@ impl Compiler {
     proto.is_strict = true;
     proto.has_prototype_property = proto.is_generator;
     proto.is_constructor = false;
-    let fidx = self.code.add_function(proto);
+    let fidx = self.chunk.add_function(proto);
     let computed_key_slot = if md.computed {
       Some(self.alloc_temp_local("class_computed_method_key"))
     } else {
@@ -395,8 +395,8 @@ impl Compiler {
   ) -> Result<Function, crate::errors::CompilerError> {
     let outer_bindings = self.visible_bindings_snapshot();
     let mut inner = Compiler {
-      code: Chunk::new(Arc::clone(&self.source_text)),
-      risc: super::bytecode::Lowering::new(),
+      chunk: Chunk::new(Arc::clone(&self.source_text)),
+      lowering: super::bytecode::Lowering::new(),
       source_text: Arc::clone(&self.source_text),
       locals: Vec::new(),
       local_types: Vec::new(),
@@ -436,12 +436,12 @@ impl Compiler {
       pending_instance_fields: Vec::new(),
       emission_error: None,
     };
-    inner.code.allow_super = true;
+    inner.chunk.allow_super = true;
     inner.compile_expr_oast(initializer)?;
     inner.emit(LoweringOpcode::Return, LINE);
     let code = super::bytecode::Lowering::finish(
-      std::mem::take(&mut inner.code),
-      std::mem::take(&mut inner.risc),
+      std::mem::take(&mut inner.chunk),
+      std::mem::take(&mut inner.lowering),
     )?;
     let slot_names = inner.environment_slot_names();
     Ok(Function {
@@ -449,7 +449,7 @@ impl Compiler {
       span: initializer.span(),
       arity: 0,
       length: 0,
-      code: Arc::new(code),
+      chunk: Arc::new(code),
       slot_types: inner.local_types,
       slot_names,
       lexical_tdz: inner.local_tdz,
@@ -478,8 +478,8 @@ impl Compiler {
   ) -> Result<Function, crate::errors::CompilerError> {
     let outer_bindings = self.visible_bindings_snapshot();
     let mut inner = Compiler {
-      code: Chunk::new(Arc::clone(&self.source_text)),
-      risc: super::bytecode::Lowering::new(),
+      chunk: Chunk::new(Arc::clone(&self.source_text)),
+      lowering: super::bytecode::Lowering::new(),
       source_text: Arc::clone(&self.source_text),
       locals: Vec::new(),
       local_types: Vec::new(),
@@ -519,7 +519,7 @@ impl Compiler {
       pending_instance_fields: Vec::new(),
       emission_error: None,
     };
-    inner.code.allow_super = true;
+    inner.chunk.allow_super = true;
     inner.pre_declare_variables_oast_stmts(&block.body);
     inner.pre_declare_functions_oast_stmts(&block.body);
     inner.emit_hoisted_function_decls_oast_stmts(&block.body)?;
@@ -530,8 +530,8 @@ impl Compiler {
     }
     inner.emit_fallthrough_return(LINE);
     let code = super::bytecode::Lowering::finish(
-      std::mem::take(&mut inner.code),
-      std::mem::take(&mut inner.risc),
+      std::mem::take(&mut inner.chunk),
+      std::mem::take(&mut inner.lowering),
     )?;
     let slot_names = inner.environment_slot_names();
     Ok(Function {
@@ -539,7 +539,7 @@ impl Compiler {
       span: block.span,
       arity: 0,
       length: 0,
-      code: Arc::new(code),
+      chunk: Arc::new(code),
       slot_types: inner.local_types,
       slot_names,
       lexical_tdz: inner.local_tdz,
@@ -675,8 +675,8 @@ impl Compiler {
         ctor_chunk.allow_new_target = true;
         ctor_chunk.allow_super = true;
         let mut inner = Compiler {
-          code: ctor_chunk,
-          risc: super::bytecode::Lowering::new(),
+          chunk: ctor_chunk,
+          lowering: super::bytecode::Lowering::new(),
           source_text: Arc::clone(&self.source_text),
           locals: Vec::new(),
           local_types: Vec::new(),
@@ -731,15 +731,15 @@ impl Compiler {
         inner.emit(LoweringOpcode::GetThis, LINE);
         inner.emit(LoweringOpcode::Return, LINE);
         ctor_chunk = super::bytecode::Lowering::finish(
-          std::mem::take(&mut inner.code),
-          std::mem::take(&mut inner.risc),
+          std::mem::take(&mut inner.chunk),
+          std::mem::take(&mut inner.lowering),
         )?;
         Function {
           name: class_name.clone(),
           span: c.span,
           arity: 0,
           length: 0,
-          code: Arc::new(ctor_chunk),
+          chunk: Arc::new(ctor_chunk),
           slot_types: inner.local_types,
           slot_names: inner.locals.into_iter().map(Some).collect(),
           lexical_tdz: inner.local_tdz,
@@ -772,15 +772,15 @@ impl Compiler {
         inner.emit(LoweringOpcode::GetThis, LINE);
         inner.emit(LoweringOpcode::Return, LINE);
         let ctor_chunk = super::bytecode::Lowering::finish(
-          std::mem::take(&mut inner.code),
-          std::mem::take(&mut inner.risc),
+          std::mem::take(&mut inner.chunk),
+          std::mem::take(&mut inner.lowering),
         )?;
         Function {
           name: class_name.clone(),
           span: c.span,
           arity: 0,
           length: 0,
-          code: Arc::new(ctor_chunk),
+          chunk: Arc::new(ctor_chunk),
           slot_types: inner.local_types,
           slot_names: inner.locals.into_iter().map(Some).collect(),
           lexical_tdz: inner.local_tdz,
@@ -804,7 +804,7 @@ impl Compiler {
       }
     };
 
-    let idx = self.code.add_function(proto);
+    let idx = self.chunk.add_function(proto);
     self.emit(LoweringOpcode::MakeClosure, LINE);
     self.emit_function_index(idx, LINE);
     if let Some(super_class) = &c.super_class {
@@ -879,7 +879,7 @@ impl Compiler {
         }
         oast::ClassElement::StaticBlock(block) => {
           let proto = self.compile_static_block_function(block)?;
-          let function_index = self.code.add_function(proto);
+          let function_index = self.chunk.add_function(proto);
           self.emit(LoweringOpcode::LoadLocal, LINE);
           self.emit_slot(ctor_slot, LINE);
           self.emit(LoweringOpcode::MakeClosure, LINE);

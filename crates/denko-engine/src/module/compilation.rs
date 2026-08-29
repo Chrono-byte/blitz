@@ -49,7 +49,7 @@ pub(super) fn compile_modules_parallel(
                     Some(&job.context),
                     &job.source,
                   )
-                  .map(crate::runtime_utils::clear_slot_types_in_code)
+                  .map(crate::runtime_utils::clear_slot_types_in_chunk)
                   .map_err(|error| format!("Compile failed: {error}"))
                 })
             }))
@@ -225,7 +225,7 @@ pub fn evaluate_entry_shared(
               namespace_exports: rec.namespace_exports.clone(),
             };
             let code = if let Some(code) = rec.bytecode.clone() {
-              crate::runtime_utils::clear_slot_types_in_code(code)
+              crate::runtime_utils::clear_slot_types_in_chunk(code)
             } else if let Some(code) = compiled.remove(&path) {
               code
             } else {
@@ -235,7 +235,7 @@ pub fn evaluate_entry_shared(
                   .map_err(|error| {
                     crate::errors::RuntimeError::from(format!("Compile failed: {error}"))
                   })?;
-              crate::runtime_utils::clear_slot_types_in_code(code)
+              crate::runtime_utils::clear_slot_types_in_chunk(code)
             };
             rec.bytecode = Some(code.clone());
             code
