@@ -447,6 +447,11 @@ impl Compiler {
         self.exit_scope();
       }
       OStmt::IfStatement(i) => {
+        if let Some(slot) = completion_slot {
+          self.emit(LoweringOpcode::Undefined, LINE);
+          self.emit(LoweringOpcode::StoreLocal, LINE);
+          self.emit_slot(slot, LINE);
+        }
         if let Some(jump_over) = self.try_emit_compare_jump_if_false(&i.test)? {
           self.compile_statement_oast_with_mode(&i.consequent, false, completion_slot)?;
           if let Some(alt) = &i.alternate {
@@ -690,6 +695,11 @@ impl Compiler {
       }
       OStmt::ForStatement(f) => {
         use oxc_ast::ast::ForStatementInit as OForInit;
+        if let Some(slot) = completion_slot {
+          self.emit(LoweringOpcode::Undefined, LINE);
+          self.emit(LoweringOpcode::StoreLocal, LINE);
+          self.emit_slot(slot, LINE);
+        }
         self.enter_block_scope();
         self.loop_depth += 1;
         self.continue_patches.push(Vec::new());
@@ -749,6 +759,8 @@ impl Compiler {
                   }
                   if let Some(initializer) = &declaration.init {
                     self.compile_expr_oast(initializer)?;
+                  } else if matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var) {
+                    continue;
                   } else {
                     self.emit(LoweringOpcode::Undefined, LINE);
                   }

@@ -182,6 +182,7 @@ pub(crate) struct ExecutionContext {
   pub(crate) closure_env: Option<crate::closure_environment::ClosureEnvironment>,
   pub(crate) slots: Option<SlotMetadata>,
   pub(crate) lexical_env: Rc<RefCell<EnvironmentRecord>>,
+  pub(crate) variable_env: Rc<RefCell<EnvironmentRecord>>,
   pub(crate) yield_star: Option<YieldStarState>,
   pub(crate) arguments: ArgumentsState,
   pub(crate) strict: bool,

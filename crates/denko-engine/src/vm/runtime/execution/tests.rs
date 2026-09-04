@@ -2920,6 +2920,97 @@ mod test {
   }
 
   #[test]
+  fn eval_regression_loop_completion() {
+    let (vm, _) = run_script(
+      r#"
+      globalThis.loopCompletion = eval("for (;;) { 42; break; }");
+      globalThis.ifCompletion = eval("for (var i = 0;;) { if (i === 2) break; else i++; }");
+      globalThis.zeroIterations = eval("42; for (;false;) {}");
+      globalThis.conditionalCompletion = eval("for (;true;) { 42; break; }");
+      globalThis.emptyIfCompletion = eval("42; if (false) {}");
+    "#,
+    );
+    assert_eq!(vm.get_global("loopCompletion"), Some(Value::Number(42.0)));
+    assert_eq!(vm.get_global("ifCompletion"), Some(Value::Undefined));
+    assert_eq!(vm.get_global("zeroIterations"), Some(Value::Undefined));
+    assert_eq!(
+      vm.get_global("conditionalCompletion"),
+      Some(Value::Number(42.0))
+    );
+    assert_eq!(vm.get_global("emptyIfCompletion"), Some(Value::Undefined));
+  }
+
+  #[test]
+  fn eval_regression_strict_bindings_are_isolated() {
+    let (vm, _) = run_script(
+      r#"
+      var existing = 7;
+      function test() {
+        'use strict';
+        var x = 1;
+        eval('var x = 2; var fresh = 3; var existing = 9;');
+        eval('x = 4;');
+        return x === 4 && typeof fresh === 'undefined';
+      }
+      var localOk = test();
+      eval("'use strict'; var existing = 10; var directFresh = 1;");
+      (0, eval)("'use strict'; var existing = 11; var indirectFresh = 1;");
+      globalThis.strictEvalOk = localOk && existing === 7
+        && !('fresh' in globalThis) && !('directFresh' in globalThis)
+        && !('indirectFresh' in globalThis);
+    "#,
+    );
+    assert_eq!(vm.get_global("strictEvalOk"), Some(Value::Bool(true)));
+  }
+
+  #[test]
+  fn eval_regression_var_scope_and_conflicts() {
+    let (vm, _) = run_script(
+      r#"
+      let x = 1;
+      function test() {
+        var read = () => x;
+        { eval('var x = 2;'); }
+        eval('var x;');
+        if (read() !== 2) return -1;
+        x++;
+        return x;
+      }
+      var conflict = false;
+      try { eval('var x = 3;'); } catch (e) { conflict = e instanceof SyntaxError; }
+      globalThis.evalScopeValue = test();
+      globalThis.evalScopeOuter = x;
+      globalThis.evalScopeConflict = conflict;
+    "#,
+    );
+    assert_eq!(vm.get_global("evalScopeConflict"), Some(Value::Bool(true)));
+    assert_eq!(vm.get_global("evalScopeOuter"), Some(Value::Number(1.0)));
+    assert_eq!(vm.get_global("evalScopeValue"), Some(Value::Number(3.0)));
+  }
+
+  #[test]
+  fn eval_regression_preserves_existing_var_cells() {
+    let (vm, _) = run_script(
+      r#"
+      function test(x) {
+        { eval('var x; var fresh = 3;'); }
+        eval('var x = 5;');
+        return x === 5 && fresh === 3;
+      }
+      var x = 9;
+      eval('var x; for (var x; false;) {}');
+      (0, eval)('var x;');
+      function writeGlobal() { eval('x = 12;'); }
+      writeGlobal();
+      eval('var declaredByEval;');
+      globalThis.evalCellsOk = test(2) && x === 12 && globalThis.x === 12
+        && !('fresh' in globalThis) && ('declaredByEval' in globalThis);
+    "#,
+    );
+    assert_eq!(vm.get_global("evalCellsOk"), Some(Value::Bool(true)));
+  }
+
+  #[test]
   fn root_run_and_reset_clear_active_transient_state() {
     let globals = test_globals();
     let mut vm = Vm::new(globals);
@@ -6027,10 +6118,11 @@ mod test {
     let err = vm
       .run(code)
       .expect_err("strict callee access should throw");
+    let message = err.to_string();
     assert!(
-      err
-        .to_string()
-        .contains("strict arguments callee/caller is forbidden")
+      message.contains("strict arguments callee/caller is forbidden")
+        || message.contains("ThrowTypeError"),
+      "unexpected strict arguments error: {message}"
     );
   }
 

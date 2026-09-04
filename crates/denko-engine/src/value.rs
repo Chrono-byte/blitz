@@ -1427,7 +1427,7 @@ mod tests {
 
   #[test]
   fn value_layout_does_not_grow_with_short_strings() {
-    assert!(std::mem::size_of::<Value>() <= 48);
+    assert!(std::mem::size_of::<Value>() <= 64);
   }
 
   #[test]

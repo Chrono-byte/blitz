@@ -143,6 +143,8 @@ impl Compiler {
       loop_depth: 0,
       with_depth: 0,
       may_capture_with: self.with_depth > 0 || self.may_capture_with,
+      eval_scopes: Arc::clone(&self.eval_scopes),
+      dynamic_outer_bindings: self.dynamic_outer_bindings,
       handler_depth: 0,
       continue_patches: Vec::new(),
       break_patches: Vec::new(),
@@ -163,6 +165,11 @@ impl Compiler {
       emission_error: None,
     };
     inner.strict_context = function_is_strict;
+    inner.dynamic_outer_bindings |= !function_is_strict
+      && func
+        .scope_id
+        .get()
+        .is_some_and(|id| self.eval_scopes.contains(&id));
     inner.chunk.allow_new_target = inner.allow_new_target;
     inner.chunk.allow_super = inner.allow_super;
     if !has_simple_parameter_list && !function_is_strict {
@@ -422,6 +429,8 @@ impl Compiler {
       loop_depth: 0,
       with_depth: 0,
       may_capture_with: self.with_depth > 0 || self.may_capture_with,
+      eval_scopes: Arc::clone(&self.eval_scopes),
+      dynamic_outer_bindings: self.dynamic_outer_bindings,
       handler_depth: 0,
       continue_patches: Vec::new(),
       break_patches: Vec::new(),
@@ -442,6 +451,11 @@ impl Compiler {
       emission_error: None,
     };
     inner.strict_context = function_is_strict;
+    inner.dynamic_outer_bindings |= !function_is_strict
+      && func
+        .scope_id
+        .get()
+        .is_some_and(|id| self.eval_scopes.contains(&id));
     inner.chunk.allow_new_target = inner.allow_new_target;
     inner.chunk.allow_super = inner.allow_super;
 

@@ -166,6 +166,16 @@ impl Compiler {
     ctx: Option<&ModuleContext>,
     repl_mode: bool,
   ) -> Result<Chunk, crate::errors::CompilerError> {
+    let semantic = oxc_semantic::SemanticBuilder::new()
+      .build(program)
+      .semantic;
+    let scoping = semantic.scoping();
+    self.eval_scopes = Arc::new(
+      scoping
+        .scope_descendants_from_root()
+        .filter(|id| scoping.scope_flags(*id).contains_direct_eval())
+        .collect(),
+    );
     if let Some(cctx) = ctx {
       self.current_module = Some(cctx.clone());
     } else {

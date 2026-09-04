@@ -78,6 +78,9 @@ pub(crate) struct Compiler {
   pub with_depth: usize,
   /// Whether this compilation unit can close over an outer `with` environment.
   pub may_capture_with: bool,
+  /// Scopes whose sloppy eval may introduce bindings at runtime.
+  pub eval_scopes: Arc<HashSet<oxc_syntax::scope::ScopeId>>,
+  pub dynamic_outer_bindings: bool,
   /// Active bytecode exception handlers that must survive a call.
   pub handler_depth: usize,
   /// Stack of continue patch sites for nested loops. Each entry holds a list
@@ -336,6 +339,8 @@ impl Compiler {
       loop_depth: 0,
       with_depth: 0,
       may_capture_with: false,
+      eval_scopes: Arc::new(HashSet::new()),
+      dynamic_outer_bindings: false,
       handler_depth: 0,
       continue_patches: Vec::new(),
       break_patches: Vec::new(),
@@ -1315,6 +1320,9 @@ impl Compiler {
     &mut self,
     name: &str,
   ) -> Option<u16> {
+    if self.dynamic_outer_bindings {
+      return None;
+    }
     if let Some(&idx) = self.upvalue_indices.get(name) {
       return Some(idx);
     }

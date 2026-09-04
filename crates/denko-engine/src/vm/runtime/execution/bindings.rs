@@ -68,7 +68,10 @@ impl Vm {
     }
   }
 
-  pub(super) fn initialize_root_bindings(&mut self) {
+  pub(super) fn initialize_root_bindings(
+    &mut self,
+    publish_globals: bool,
+  ) {
     let slot_names = self
       .execution
       .active
@@ -141,7 +144,7 @@ impl Vm {
             initialized,
           );
         }
-        if initialized && self.current_module_specifier().is_none() {
+        if initialized && publish_globals && self.current_module_specifier().is_none() {
           let value = self.execution.active.locals[idx].value();
           self
             .realm_state

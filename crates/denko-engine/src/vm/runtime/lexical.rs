@@ -24,8 +24,8 @@ impl Vm {
 
   /// Check if any root-level slot names in a code conflict with the current lexical environment.
   ///
-  /// Used during direct eval to detect whether any declarations in the code being evaluated
-  /// would shadow existing lexical bindings, which is disallowed in strict mode.
+  /// Sloppy eval var declarations may not cross lexical bindings on the way
+  /// to the caller's variable environment. Outer function scopes may be shadowed.
   ///
   /// # Errors
   ///
@@ -48,9 +48,6 @@ impl Vm {
       }
       let mut env = Some(Rc::clone(&self.execution.active.lexical_env));
       while let Some(current) = env {
-        if Rc::ptr_eq(&current, &self.realm_state.global_env) {
-          break;
-        }
         let (conflict, outer) = {
           let borrowed = current.borrow();
           (
@@ -60,6 +57,9 @@ impl Vm {
         };
         if conflict {
           return Some(name.to_string());
+        }
+        if Rc::ptr_eq(&current, &self.execution.active.variable_env) {
+          break;
         }
         env = outer;
       }
@@ -116,7 +116,10 @@ impl Vm {
   }
 
   pub(crate) fn direct_eval_uses_global_var_environment(&self) -> bool {
-    self.execution.active.closure_env.is_none()
+    Rc::ptr_eq(
+      &self.execution.active.variable_env,
+      &self.realm_state.global_env,
+    )
   }
 
   /// Replace the current lexical environment.
@@ -133,6 +136,7 @@ impl Vm {
     parent: &Vm,
   ) {
     self.set_lexical_env(Rc::clone(&parent.execution.active.lexical_env));
+    self.execution.active.variable_env = Rc::clone(&parent.execution.active.variable_env);
   }
 
   pub(super) fn is_unscopable_binding(
@@ -425,13 +429,21 @@ impl Vm {
             return Ok(true);
           }
         }
-        let outer_env = outer;
         let result = current
           .borrow_mut()
           .set_mutable_binding(name, value.clone());
-        let should_sync_global = outer_env
-          .as_ref()
-          .is_none_or(|outer_rc| Rc::ptr_eq(outer_rc, &self.realm_state.global_env));
+        let should_sync_global = {
+          let global_env = self.realm_state.global_env.borrow();
+          !global_env.has_lexical_binding(name)
+            && global_env
+              .own_binding_cell(name)
+              .is_some_and(|global_cell| {
+                current
+                  .borrow()
+                  .own_binding_cell(name)
+                  .is_some_and(|cell| cell.same_storage(&global_cell))
+              })
+        };
         if should_sync_global {
           self.sync_named_binding_to_global_and_frames(name, &value);
         }
@@ -697,6 +709,7 @@ impl Vm {
     value: Value,
   ) -> Result<(), RuntimeError> {
     let is_root_binding = self.execution.call_stack.is_empty()
+      && self.direct_eval_uses_global_var_environment()
       && self.execution.direct_eval_outer.is_none()
       && !self
         .execution

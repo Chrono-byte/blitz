@@ -448,6 +448,8 @@ impl super::Compiler {
           self.emit(LoweringOpcode::Call, LINE);
           self.emit_byte(2, LINE);
         }
+      } else if matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var) {
+        continue;
       } else {
         self.emit(LoweringOpcode::Undefined, LINE);
       }

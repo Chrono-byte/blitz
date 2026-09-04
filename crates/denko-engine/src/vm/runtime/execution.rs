@@ -100,6 +100,7 @@ impl Vm {
     self.memory.temporary.clear();
     self.memory.kept_alive.clear();
     self.execution.active.lexical_env = Rc::clone(&self.realm_state.global_env);
+    self.execution.active.variable_env = Rc::clone(&self.realm_state.global_env);
     self.execution.active.yield_star = None;
     self.execution.generator_return_frame_count = None;
     self.construction.new_target = None;
@@ -119,7 +120,7 @@ impl Vm {
         _ => None,
       })
       .unwrap_or(Value::Undefined);
-    self.initialize_root_bindings();
+    self.initialize_root_bindings(true);
     if self.current_module_specifier().is_none() {
       self.persist_root_bindings();
     }
@@ -1697,6 +1698,7 @@ impl Vm {
     self.execution.active.strict = self.execution.active.chunk.root_strict;
     if !direct_eval {
       self.execution.active.lexical_env = Rc::clone(&self.realm_state.global_env);
+      self.execution.active.variable_env = Rc::clone(&self.realm_state.global_env);
     }
     self.execution.active.yield_star = None;
     if !direct_eval {
@@ -1710,9 +1712,13 @@ impl Vm {
       .root_slot_names
       .is_empty()
     {
-      self.initialize_root_bindings();
+      self.initialize_root_bindings(false);
     }
-    if direct_eval {
+    if self.execution.active.strict {
+      self.execution.active.variable_env = Rc::clone(&self.execution.active.lexical_env);
+    }
+    if !self.execution.active.strict {
+      let variable_env = Rc::clone(&self.execution.active.variable_env);
       let names = self
         .execution
         .active
@@ -1735,23 +1741,23 @@ impl Vm {
         let Some(eval_cell) = self.execution.active.locals.get(index).cloned() else {
           continue;
         };
-        let target_cell = saved_context
-          .lexical_env
+        let target_cell = variable_env
           .borrow()
           .own_binding_cell(&name)
           .unwrap_or_else(|| eval_cell.clone());
-        if !saved_context
-          .lexical_env
-          .borrow()
-          .has_binding(&name)
-        {
-          saved_context
-            .lexical_env
+        if !variable_env.borrow().has_binding(&name) {
+          variable_env
             .borrow_mut()
             .create_mutable_binding(name.clone(), target_cell.clone(), true);
         }
-        if !target_cell.same_storage(&eval_cell) {
-          target_cell.set(eval_cell.value());
+        if Rc::ptr_eq(&variable_env, &self.realm_state.global_env) {
+          self
+            .realm_state
+            .globals
+            .borrow_mut()
+            .properties
+            .entry(PropertyKey::String(name.clone().into()))
+            .or_insert_with(|| PropertyDescriptor::ordinary_data(target_cell.value()));
         }
         self.execution.active.locals[index] = target_cell.clone();
         self
@@ -1780,7 +1786,7 @@ impl Vm {
     let result = self.run_loop(true);
     let nested_thrown = self.exceptions.last_uncaught.take();
 
-    if !direct_eval {
+    if !direct_eval && !self.execution.active.strict {
       self.persist_root_var_bindings();
     }
 

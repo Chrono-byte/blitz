@@ -68,7 +68,8 @@ impl Vm {
           this_value: Value::Object(globals),
           closure_env: None,
           slots: None,
-          lexical_env: global_env,
+          lexical_env: Rc::clone(&global_env),
+          variable_env: global_env,
           yield_star: None,
           arguments: ArgumentsState {
             object: None,
@@ -177,6 +178,7 @@ impl Vm {
           closure_env: None,
           slots: None,
           lexical_env: Rc::clone(&self.execution.active.lexical_env),
+          variable_env: Rc::clone(&self.execution.active.variable_env),
           yield_star: None,
           arguments: ArgumentsState {
             object: None,
@@ -1149,6 +1151,7 @@ impl Vm {
     self.execution.pending_closure_env = None;
     self.memory.temporary.clear();
     self.execution.active.lexical_env = Rc::clone(&self.realm_state.global_env);
+    self.execution.active.variable_env = Rc::clone(&self.realm_state.global_env);
     self.execution.active.yield_star = None;
     self.execution.generator_return_frame_count = None;
     self.construction.new_target = None;

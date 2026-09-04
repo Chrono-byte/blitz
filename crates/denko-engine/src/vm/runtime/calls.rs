@@ -957,6 +957,7 @@ impl Vm {
         }
       }
     }
+    self.execution.active.variable_env = Rc::clone(&fn_env);
     self.execution.active.lexical_env = fn_env;
     if crate::trace::enabled() && proto.is_generator && !proto.has_simple_parameter_list {
       for (idx, slot) in self.execution.active.locals.iter().enumerate() {
@@ -1087,6 +1088,7 @@ impl Vm {
         this_value: this_value.clone(),
         closure_env: None,
         slots: None,
+        variable_env: Rc::clone(&lexical_env),
         lexical_env,
         yield_star: None,
         arguments: ArgumentsState {
