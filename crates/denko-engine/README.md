@@ -24,3 +24,16 @@ Denko uses the repository's dedicated Test262 runner:
 ```sh
 cargo run -p blitz-test262 --bin test262
 ```
+
+Map and WeakMap are native engine builtins, including `getOrInsert` and
+`getOrInsertComputed`. They do not depend on Blitz runtime facades. Map retains
+its keys and values; WeakMap entries do not keep otherwise unreachable keys
+alive.
+
+Run the collection behavior and garbage-collection tests, then the vendored
+Map/WeakMap conformance cases:
+
+```sh
+cargo test -p denko-engine --lib map_ --locked
+cargo run -p blitz-test262 --bin test262 -- --filter built-ins/Map/,built-ins/WeakMap/ --workers 2 --batch-size 1 --quiet
+```

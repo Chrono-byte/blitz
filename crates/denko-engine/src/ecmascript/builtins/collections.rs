@@ -552,7 +552,7 @@ pub(crate) fn install_map_set_constructors(
       .get(static_builtin_arg_offset(vm, args, "Map"))
       .cloned()
       .unwrap_or(Value::Undefined);
-    if matches!(iterable, Value::Undefined) {
+    if matches!(iterable, Value::Undefined | Value::Null) {
       return Ok(receiver);
     }
     let adder = vm.get_property_host(&receiver, &PKey::String("set".to_string().into()))?;
@@ -688,6 +688,67 @@ pub(crate) fn install_map_set_constructors(
     PKey::String("get".to_string().into()),
     PropertyDescriptor::builtin_data(map_get),
   );
+
+  for (name, computed) in [("getOrInsert", false), ("getOrInsertComputed", true)] {
+    let map_data = map_data_key;
+    let upsert = method(
+      Rc::new(move |vm, args| {
+        let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+        let entries = require_state(vm, &receiver, map_data, name)?;
+        let value_or_callback = args.get(2).cloned().unwrap_or(Value::Undefined);
+        if computed && !crate::vm::Vm::is_callable_value(&value_or_callback) {
+          return Err(
+            vm.throw_type_error("Map.prototype.getOrInsertComputed callback is not callable"),
+          );
+        }
+        let key =
+          canonicalize_keyed_collection_value(args.get(1).cloned().unwrap_or(Value::Undefined));
+        let Value::Array(entries, _) = entries else {
+          unreachable!("validated Map data is an array");
+        };
+        for entry in entries.borrow().iter().flatten() {
+          if let Some((entry_key, value)) = pair_values(entry)
+            && same_value_zero(&entry_key, &key)
+          {
+            return Ok(value);
+          }
+        }
+        let value = if computed {
+          vm.call_value_with_this(
+            &value_or_callback,
+            &Value::Undefined,
+            std::slice::from_ref(&key),
+          )?
+        } else {
+          value_or_callback
+        };
+        // The callback may have inserted this key. Update that entry without
+        // changing its position, even if it stored a different value.
+        if computed {
+          for entry in entries.borrow().iter().flatten() {
+            if let Some((entry_key, _)) = pair_values(entry)
+              && same_value_zero(&entry_key, &key)
+              && let Value::Array(pair, _) = entry
+            {
+              pair.borrow_mut()[1] = Some(value.clone());
+              return Ok(value);
+            }
+          }
+        }
+        entries
+          .borrow_mut()
+          .push(Some(array_from_values(vec![key, value.clone()])));
+        Ok(value)
+      }),
+      function_proto_map,
+      name,
+      2.0,
+    );
+    map_proto.borrow_mut().properties.insert(
+      PKey::String(name.into()),
+      PropertyDescriptor::builtin_data(upsert),
+    );
+  }
 
   let map_data = map_data_key;
   let map_has = method(

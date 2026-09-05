@@ -5448,6 +5448,105 @@ mod test {
   }
 
   #[test]
+  fn map_upsert_methods_preserve_presence_and_callback_mutations() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        let checks = 0;
+        for (const Constructor of [Map, WeakMap]) {
+          const map = new Constructor(null);
+          const key = {};
+          map.set(key, undefined);
+          if (map.getOrInsert(key, 1) !== undefined) throw new Error('presence');
+          let calls = 0;
+          map.getOrInsertComputed(key, () => { calls++; });
+          if (calls !== 0) throw new Error('existing callback');
+          let rejected = false;
+          try { map.getOrInsertComputed(key, null); }
+          catch (error) { rejected = error instanceof TypeError; }
+          if (!rejected) throw new Error('callback validation before lookup');
+          map.delete(key);
+          const computed = map.getOrInsertComputed(key, function(actual) {
+            'use strict';
+            if (this !== undefined || actual !== key || arguments.length !== 1)
+              throw new Error('callback arguments');
+            map.set(key, 2);
+            return 3;
+          });
+          if (computed !== 3 || map.get(key) !== 3) throw new Error('overwrite');
+          map.delete(key);
+          const sentinel = {};
+          try {
+            map.getOrInsertComputed(key, () => { map.set(key, 4); throw sentinel; });
+          } catch (error) {
+            if (error !== sentinel) throw error;
+          }
+          if (map.get(key) !== 4) throw new Error('abrupt callback mutation');
+          for (const receiver of [{}, new Proxy(map, {})]) {
+            for (const method of ['getOrInsert', 'getOrInsertComputed']) {
+              let branded = false;
+              try { Constructor.prototype[method].call(receiver, key, () => 5); }
+              catch (error) { branded = error instanceof TypeError; }
+              if (!branded) throw new Error('receiver brand');
+            }
+          }
+          checks++;
+        }
+        const map = new Map();
+        const iterator = map.keys();
+        map.getOrInsertComputed(-0, key => {
+          if (!Object.is(key, 0)) throw new Error('canonical zero');
+          map.set('first', 1);
+          map.set(key, 2);
+          return 3;
+        });
+        if (iterator.next().value !== 'first' || !Object.is(iterator.next().value, 0)
+            || map.size !== 2 || map.get(-0) !== 3) throw new Error('insertion order');
+        globalThis.map_upsert_checks = checks;
+      "#
+    ));
+    assert_eq!(vm.get_global("map_upsert_checks"), Some(Value::Number(2.0)));
+  }
+
+  #[test]
+  fn map_strong_keys_keep_weak_map_values_alive_until_deleted() {
+    let (mut vm, _) = run_script(crate::js!(
+      r#"
+        globalThis.strong = new Map();
+        globalThis.weak = new WeakMap();
+        let key = {};
+        strong.set(key, 1);
+        weak.set(key, { key });
+        key = null;
+      "#
+    ));
+    let Value::Object(weak) = vm.get_global("weak").expect("weak map global") else {
+      panic!("WeakMap object");
+    };
+    vm.collect_garbage_prototype();
+    assert_eq!(
+      weak
+        .borrow()
+        .weak_map_entries
+        .as_ref()
+        .expect("weak entries")
+        .len(),
+      1
+    );
+    let session = Parser::parse_source("strong.clear();").expect("parse clear");
+    vm.run(compiler::compile_session(&session).expect("compile clear"))
+      .expect("clear map");
+    vm.collect_garbage_prototype();
+    assert!(
+      weak
+        .borrow()
+        .weak_map_entries
+        .as_ref()
+        .expect("weak entries")
+        .is_empty()
+    );
+  }
+
+  #[test]
   fn weak_map_supports_symbol_keys_and_upsert_methods() {
     let (vm, _) = run_script(crate::js!(
       r#"
