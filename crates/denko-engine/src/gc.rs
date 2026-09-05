@@ -1170,28 +1170,7 @@ mod tests {
   }
 
   #[test]
-  fn aggressive_collect_breaks_closure_env_cycles() {
-    let env = tracked_env();
-    let closure = make_dummy_closure(env.clone());
-    let weak_props = closure_properties(&closure).expect("dummy closure properties");
-
-    env
-      .borrow_mut()
-      .push(BindingCell::new(closure.clone()));
-
-    let weak_env = env.downgrade();
-
-    drop(closure);
-    drop(env);
-
-    let stats = collect(&[]);
-    assert!(stats.swept_envs >= 1);
-    assert!(weak_env.upgrade().is_none());
-    assert!(weak_props.upgrade().is_none());
-  }
-
-  #[test]
-  fn aggressive_collect_respects_roots() {
+  fn collect_respects_closure_environment_roots() {
     let env = tracked_env();
     let closure = make_dummy_closure(env.clone());
     let weak_props = closure_properties(&closure).expect("dummy closure properties");

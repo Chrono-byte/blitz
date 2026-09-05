@@ -8,7 +8,7 @@ use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
 use std::cell::RefCell;
 use std::rc::Rc;
 
-fn run(source: &str) {
+fn run(source: &str) -> Vm {
   let session = Parser::parse_source(source).expect("ECMAScript correctness fixture must parse");
   let code = compiler::compile_session(&session).expect("fixture must compile");
   let globals = Rc::new(RefCell::new(ObjectData::new()));
@@ -20,6 +20,7 @@ fn run(source: &str) {
   let mut vm = Vm::new(globals);
   vm.run(code)
     .expect("ECMAScript correctness fixture failed");
+  vm
 }
 
 fn rejects(source: &str) {
@@ -567,7 +568,7 @@ fn completed_generator_throw_uses_a_javascript_throw_completion() {
 
 #[test]
 fn await_suspends_until_a_later_microtask() {
-  run(&format!(
+  let mut vm = run(&format!(
     r#"
       {ASSERT}
       let order = "";
@@ -581,15 +582,22 @@ fn await_suspends_until_a_later_microtask() {
       order += "c";
       assert(order === "ac", "await suspends the async function");
       promise.then(() => {{
-        assert(order === "acb", "await resumes from a promise reaction");
+        globalThis.resumedOrder = order;
       }});
     "#
   ));
+  vm.flush_microtasks()
+    .expect("flush await reactions");
+  assert_eq!(
+    vm.get_global("resumedOrder"),
+    Some(Value::String("acb".into())),
+    "await must resume and its fulfillment reaction must run"
+  );
 }
 
 #[test]
 fn await_resumes_after_later_fulfillment_and_rejection() {
-  run(&format!(
+  let mut vm = run(&format!(
     r#"
       {ASSERT}
       let resolvePending;
@@ -609,21 +617,23 @@ fn await_resumes_after_later_fulfillment_and_rejection() {
         }}
       }}
 
-      let fulfillment;
-      let rejection;
-      fulfillLater().then((value) => {{ fulfillment = value; }});
-      catchRejection().then((value) => {{ rejection = value; }});
+      fulfillLater().then((value) => {{ globalThis.fulfillment = value; }});
+      catchRejection().then((value) => {{ globalThis.rejection = value; }});
       Promise.resolve().then(() => {{ resolvePending(5); }});
-      Promise.resolve().then(() => {{
-        Promise.resolve().then(() => {{
-          Promise.resolve().then(() => {{
-            assert(fulfillment === 7, "later fulfillment resumes through both awaits");
-            assert(rejection === 10, "await rejection resumes through the active catch");
-          }});
-        }});
-      }});
     "#
   ));
+  vm.flush_microtasks()
+    .expect("flush await reactions");
+  assert_eq!(
+    vm.get_global("fulfillment"),
+    Some(Value::Number(7.0)),
+    "later fulfillment resumes through both awaits"
+  );
+  assert_eq!(
+    vm.get_global("rejection"),
+    Some(Value::Number(10.0)),
+    "await rejection resumes through the active catch"
+  );
 }
 
 #[test]
