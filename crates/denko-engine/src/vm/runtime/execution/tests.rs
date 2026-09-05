@@ -1076,6 +1076,36 @@ mod test {
   }
 
   #[test]
+  fn capture_free_closures_share_an_environment_across_gc() {
+    let (mut vm, _) = run_script(crate::js!(
+      r#"
+      globalThis.closures = [];
+      for (let index = 0; index < 500; index++) {
+        globalThis.closures.push(function () { return 42; });
+      }
+      function total() {
+        let sum = 0;
+        for (let index = 0; index < globalThis.closures.length; index++) sum += globalThis.closures[index]();
+        return sum;
+      }
+    "#
+    ));
+    assert_eq!(
+      vm.memory_snapshot()
+        .allocated_closure_environments,
+      1
+    );
+    vm.collect_garbage_prototype();
+    let total = vm.get_global("total").expect("total function");
+    assert_eq!(
+      vm.call_with_this(&total, &Value::Undefined, &[])
+        .expect("call after GC"),
+      Value::Number(21_000.0)
+    );
+    assert_eq!(vm.memory_snapshot().live_closure_environments, 1);
+  }
+
+  #[test]
   fn registers_keep_new_closure_environments_alive_during_gc() {
     let (vm, _) = run_script(crate::js!(
       r#"
@@ -2572,6 +2602,51 @@ mod test {
       vm.get_global("nested_new_target_is_undefined"),
       Some(Value::Bool(true))
     );
+  }
+
+  #[test]
+  fn uncaught_diagnostics_preserve_the_throw_without_running_user_code() {
+    for source in [
+      crate::js!("var sentinel = null; throw sentinel;"),
+      crate::js!("var sentinel = undefined; throw sentinel;"),
+      crate::js!(
+        r#"
+        var calls = 0;
+        var sentinel = {
+          get name() { calls++; throw new TypeError('name'); },
+          get message() { calls++; throw new TypeError('message'); },
+          [Symbol.toPrimitive]() { calls++; throw new TypeError('coercion'); }
+        };
+        throw sentinel;
+      "#
+      ),
+      crate::js!(
+        r#"
+        var calls = 0;
+        var sentinel = new Proxy({}, {
+          get() { calls++; throw new TypeError('get'); },
+          ownKeys() { calls++; throw new TypeError('ownKeys'); },
+          getPrototypeOf() { calls++; throw new TypeError('prototype'); }
+        });
+        throw sentinel;
+      "#
+      ),
+    ] {
+      let session = Parser::parse_source(source).expect("parse throw fixture");
+      let code = compiler::compile_session(&session).expect("compile throw fixture");
+      let mut vm = Vm::new(test_globals());
+      vm.run(code).expect_err("uncaught throw");
+      let sentinel = vm
+        .get_global("sentinel")
+        .expect("original sentinel");
+      assert!(strict_equal(
+        vm.uncaught_exception().expect("original throw"),
+        &sentinel
+      ));
+      if let Some(calls) = vm.get_global("calls") {
+        assert_eq!(calls, Value::Number(0.0));
+      }
+    }
   }
 
   #[test]

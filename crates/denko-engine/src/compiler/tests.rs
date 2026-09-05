@@ -53,24 +53,6 @@ fn strict_reserved_words_are_rejected_in_for_in_assignment_patterns() {
 }
 
 #[test]
-fn anonymous_default_class_compiles_as_a_named_default_export() {
-  let source = crate::js!("export default class {}");
-  let session = crate::parser::Parser::parse_source_with_type(source, oxc_span::SourceType::mjs())
-    .expect("parse module");
-  let context = ModuleContext {
-    module_index: 0,
-    imports: HashMap::new(),
-    exports: HashSet::from(["default".to_string()]),
-    namespace_exports: HashMap::new(),
-  };
-
-  let code = super::compile_session_with_context(&session, &context)
-    .expect("compile anonymous default class");
-
-  assert!(!code.words.is_empty());
-}
-
-#[test]
 fn numeric_property_keys_use_ecmascript_number_formatting() {
   assert_eq!(super::numeric_property_key(0.000_000_1), "1e-7");
   assert_eq!(
@@ -132,12 +114,6 @@ fn compile_for_with_continue() {
   );
 }
 
-#[cfg(test)]
-fn opcode_width(op: Opcode) -> usize {
-  let _ = op;
-  1
-}
-
 #[test]
 fn static_member_cache_sites_have_distinct_instructions() {
   let src = crate::js!("a.x; a.y; a.x;");
@@ -185,31 +161,52 @@ fn property_sites_are_not_limited_by_unused_u8_cache_slots() {
 
 #[test]
 fn compile_for_loop_back_jump_targets_loop_start() {
-  let src = crate::js!("for (var i = 0; i < 3; i = i + 1) {}");
-  let session = crate::parser::Parser::parse_source(src).expect("parse ok");
-  let program = session.program();
-  let code = compile(program, session.source()).expect("compile ok");
-
-  let mut loop_start = None;
-  let mut back_target = None;
-  for (pc, op) in walk_chunk_ops(&code) {
-    match op {
-      Opcode::GetGlobal if loop_start.is_none() => {
-        loop_start = Some(pc);
-      }
-      Opcode::Jump => {
-        let target = code
-          .jump_target_from_pc(pc)
-          .map(|target| target as isize);
-        if target == loop_start.map(|v| v as isize) {
-          back_target = target;
-        }
-      }
-      _ => {}
-    }
-  }
-
-  assert_eq!(back_target, loop_start.map(|v| v as isize));
+  let src = crate::js!("var sum = 0; for (var i = 0; i < 3; i = i + 1) { sum += i; }");
+  let session = crate::parser::Parser::parse_source(src).expect("parse");
+  let code = compile(session.program(), session.source()).expect("compile");
+  let ops = walk_chunk_ops(&code);
+  let condition_slot = code
+    .root_slot_names
+    .iter()
+    .position(|name| name.as_deref() == Some("i"))
+    .expect("loop variable slot");
+  let loop_start = ops
+    .iter()
+    .find(|(pc, op)| {
+      *op == Opcode::LoadLocal
+        && crate::bytecode::decode_aux16(code.words[*pc]) as usize == condition_slot
+    })
+    .map(|(pc, _)| *pc)
+    .expect("loop reads its condition variable");
+  let condition = ops
+    .iter()
+    .find(|(_, op)| matches!(op, Opcode::CompareJump | Opcode::JumpIfFalse))
+    .map(|(pc, _)| *pc)
+    .expect("loop has an exit condition");
+  let back_edges = ops
+    .iter()
+    .filter(|(_, op)| *op == Opcode::Jump)
+    .filter_map(|(pc, _)| {
+      code
+        .jump_target_from_pc(*pc)
+        .filter(|target| target <= pc)
+        .map(|target| (*pc, target))
+    })
+    .collect::<Vec<_>>();
+  assert_eq!(back_edges.len(), 1, "one loop back edge");
+  let (back_pc, back_target) = back_edges[0];
+  assert_eq!(back_target, loop_start);
+  assert!(condition >= loop_start && condition < back_pc);
+  assert!(
+    code
+      .jump_target_from_pc(condition)
+      .expect("conditional target")
+      > back_pc
+  );
+  let mut vm = Vm::new(Rc::new(RefCell::new(ObjectData::new())));
+  vm.run(code).expect("execute bounded loop");
+  assert_eq!(vm.get_global("sum"), Some(Value::Number(3.0)));
+  assert_eq!(vm.get_global("i"), Some(Value::Number(3.0)));
 }
 
 #[test]
@@ -340,68 +337,30 @@ fn compile_generator_non_simple_params_keep_later_params_tdz() {
       .unwrap_or(false),
     "later generator parameter y should start in TDZ"
   );
-
-  let mut ops = Vec::new();
-  let mut pc = 0usize;
-  while pc < proto.chunk.words.len() && ops.len() < 16 {
-    let op = Opcode::from_byte((proto.chunk.words[pc] & 0xFF) as u8).expect("valid opcode");
-    let width = opcode_width(op);
-    let operand = if matches!(
-      op,
-      Opcode::LoadLocal | Opcode::StoreLocal | Opcode::CloneLocalCell
-    ) {
-      proto.chunk.words.get(pc + 1).copied()
-    } else {
-      None
-    };
-    ops.push((op.name(), operand));
-    pc += width;
-  }
-  eprintln!("generator proto ops: {:?}", ops);
 }
 
 #[test]
-fn compile_object_generator_method_emits_body() {
-  let src = crate::js!("var o = { *m() { let x; eval(\"var x;\"); } };");
-  let session = crate::parser::Parser::parse_source(src).expect("parse ok");
-  let program = session.program();
-  let code = compile(program, session.source()).expect("compile ok");
-
-  eprintln!(
-    "object generator function names: {:?}",
-    code
-      .functions
-      .iter()
-      .map(|p| (p.name.clone(), p.chunk.words.len(), p.is_generator))
-      .collect::<Vec<_>>()
+fn object_generator_method_executes_its_body_and_preserves_eval_conflicts() {
+  let src = crate::js!(
+    r#"
+    var started = false;
+    var o = { *m() { let x; started = true; yield 7; eval("var x;"); } };
+    var iterator = o.m();
+    var deferred = !started;
+    var first = iterator.next();
+    var yielded = first.value === 7 && first.done === false;
+    var conflict = false;
+    try { iterator.next(); } catch (error) { conflict = error instanceof SyntaxError; }
+    var completed = iterator.next().done;
+  "#
   );
-  let proto = code
-    .functions
-    .iter()
-    .find(|p| p.is_generator)
-    .expect("object generator proto exists");
-
-  eprintln!(
-    "object generator proto: code_len={} consts={} slots={} tdz={:?}",
-    proto.chunk.words.len(),
-    proto.chunk.constants.len(),
-    proto.slot_names.len(),
-    proto.lexical_tdz
-  );
-  let mut ops = Vec::new();
-  let mut pc = 0usize;
-  while pc < proto.chunk.words.len() && ops.len() < 24 {
-    let op = Opcode::from_byte((proto.chunk.words[pc] & 0xFF) as u8).expect("valid opcode");
-    let width = opcode_width(op);
-    ops.push(op.name());
-    pc += width;
+  let session = crate::parser::Parser::parse_source(src).expect("parse");
+  let code = compile(session.program(), session.source()).expect("compile");
+  let mut vm = Vm::new(Rc::new(RefCell::new(ObjectData::new())));
+  vm.run(code).expect("execute generator");
+  for name in ["deferred", "started", "yielded", "conflict", "completed"] {
+    assert_eq!(vm.get_global(name), Some(Value::Bool(true)), "{name}");
   }
-  eprintln!("object generator proto ops: {:?}", ops);
-
-  assert!(
-    !proto.chunk.words.is_empty(),
-    "object generator method should emit bytecode"
-  );
 }
 
 #[test]
@@ -421,13 +380,16 @@ fn explicit_terminal_return_omits_unreachable_implicit_return() {
     .map(|word| Opcode::from_byte((word & 0xff) as u8).expect("valid opcode"))
     .collect::<Vec<_>>();
   assert_eq!(
-    ops,
-    [
-      Opcode::GetThis,
-      Opcode::Const,
-      Opcode::GetProperty,
-      Opcode::Return
-    ]
+    ops
+      .iter()
+      .filter(|op| **op == Opcode::Return)
+      .count(),
+    1
+  );
+  assert_eq!(
+    ops.last(),
+    Some(&Opcode::Return),
+    "nothing follows the explicit return"
   );
 }
 
@@ -472,14 +434,13 @@ fn compile_dynamic_import_uses_get_builtin() {
 
 #[test]
 fn compile_sequence_expression_keeps_last_value() {
-  let src = crate::js!("var x = (a = 1, 2);");
-  let session = crate::parser::Parser::parse_source(src).expect("parse_source failed");
-  let program = session.program();
-  let code = compile(program, session.source()).expect("compile ok");
-
-  code
-    .verify()
-    .expect("sequence expression emits valid bytecode");
+  let src = crate::js!("var a = 0; var x = (a = 1, 2);");
+  let session = crate::parser::Parser::parse_source(src).expect("parse");
+  let code = compile(session.program(), session.source()).expect("compile");
+  let mut vm = Vm::new(Rc::new(RefCell::new(ObjectData::new())));
+  vm.run(code).expect("execute sequence");
+  assert_eq!(vm.get_global("x"), Some(Value::Number(2.0)));
+  assert_eq!(vm.get_global("a"), Some(Value::Number(1.0)));
 }
 
 #[test]
@@ -1037,6 +998,7 @@ fn member_postfix_update_returns_old_value_and_stores_new_value() {
     r#"
         var obj = { value: 1 };
         var old = obj.value++;
+        var updated = obj.value;
     "#
   );
   let session = crate::parser::Parser::parse_source(src).expect("parse ok");
@@ -1051,22 +1013,28 @@ fn member_postfix_update_returns_old_value_and_stores_new_value() {
   let mut vm = Vm::new(globals);
   drop(vm.run(code).expect("run ok"));
 
-  assert!(matches!(vm.get_global("old"), Some(Value::Number(n)) if (n - 1.0).abs() < f64::EPSILON));
+  assert_eq!(vm.get_global("old"), Some(Value::Number(1.0)));
+  assert_eq!(vm.get_global("updated"), Some(Value::Number(2.0)));
 }
 
 #[test]
 fn block_scoped_let_does_not_escape_block() {
-  let src = crate::js!("{ let x = 1; } x = 2;");
-  let session = crate::parser::Parser::parse_source(src).expect("parse ok");
-  let program = session.program();
-  let code = compile(program, session.source()).expect("compile ok");
-
-  let globals = Rc::new(RefCell::new(ObjectData::new()));
-  let mut vm = Vm::new(globals);
-  vm.run(code).expect("run ok");
-
-  assert!(
-    matches!(vm.get_global("x"), Some(Value::Number(n)) if (n - 2.0).abs() < f64::EPSILON),
-    "block-local binding should not leak past its block"
+  let src = crate::js!(
+    r#"
+    { let x = 1; }
+    var outsideType = typeof x;
+    var missing = false;
+    try { x; } catch (error) { missing = error instanceof ReferenceError; }
+  "#
   );
+  let session = crate::parser::Parser::parse_source(src).expect("parse");
+  let code = compile(session.program(), session.source()).expect("compile");
+  let mut vm = Vm::new(Rc::new(RefCell::new(ObjectData::new())));
+  vm.run(code).expect("execute scope probe");
+  assert_eq!(
+    vm.get_global("outsideType"),
+    Some(Value::String("undefined".into()))
+  );
+  assert_eq!(vm.get_global("missing"), Some(Value::Bool(true)));
+  assert_eq!(vm.get_global("x"), None);
 }

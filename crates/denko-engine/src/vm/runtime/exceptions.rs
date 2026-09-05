@@ -7,6 +7,12 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 impl Vm {
+  /// The original value of the most recent uncaught JavaScript exception.
+  /// This is populated by JavaScript throws, not synthesized from host errors.
+  pub fn uncaught_exception(&self) -> Option<&Value> {
+    self.exceptions.last_uncaught.as_ref()
+  }
+
   /// Run a host-side spec operation behind a completion boundary.
   ///
   /// JavaScript calls made by the operation must not unwind into handlers
@@ -111,32 +117,31 @@ impl Vm {
   }
 
   pub(super) fn format_uncaught_thrown_value(
-    &mut self,
+    &self,
     thrown: &Value,
   ) -> String {
-    let name: Option<String> = self
-      .get_property_value(thrown, &PropertyKey::String("name".to_string().into()))
-      .ok()
-      .and_then(|value| match value {
-        Value::String(s) => Some(s.to_string_lossy()),
-        _ => None,
-      });
-    let message: Option<String> = self
-      .get_property_value(thrown, &PropertyKey::String("message".to_string().into()))
-      .ok()
-      .and_then(|value| match value {
-        Value::String(s) => Some(s.to_string_lossy()),
-        _ => None,
-      });
+    // Read data descriptors only. Diagnostics must not replace the exception
+    // by executing an accessor, proxy trap, or coercion hook on the thrown value.
+    let name: Option<String> =
+      super::property::get_property(thrown, &PropertyKey::String("name".into()), 0)
+        .ok()
+        .and_then(|value| match value {
+          Value::String(s) => Some(s.to_string_lossy()),
+          _ => None,
+        });
+    let message: Option<String> =
+      super::property::get_property(thrown, &PropertyKey::String("message".into()), 0)
+        .ok()
+        .and_then(|value| match value {
+          Value::String(s) => Some(s.to_string_lossy()),
+          _ => None,
+        });
 
     match (name, message) {
       (Some(name), Some(message)) if !message.is_empty() => format!("{name}: {message}"),
       (Some(name), _) => name,
       (None, Some(message)) if !message.is_empty() => message,
-      _ => self
-        .to_string(thrown)
-        .unwrap_or_else(|_| format!("{}", thrown).into())
-        .to_string(),
+      _ => crate::inspect::inspect(thrown),
     }
   }
 

@@ -74,11 +74,6 @@ impl NativeArtifact {
   }
 
   #[cfg(test)]
-  pub(crate) fn bytes(&self) -> &[u8] {
-    &self.bytes
-  }
-
-  #[cfg(test)]
   pub(crate) fn relocations(&self) -> &[ArtifactRelocation] {
     &self.relocations
   }
@@ -287,15 +282,6 @@ mod tests {
 
   #[cfg(all(unix, target_arch = "x86_64"))]
   #[test]
-  fn emits_inert_numeric_add_artifact() {
-    let artifact = artifact();
-    assert!(!artifact.bytes().is_empty());
-    assert!(artifact.relocations().is_empty());
-    assert!(artifact.validate().is_ok());
-  }
-
-  #[cfg(all(unix, target_arch = "x86_64"))]
-  #[test]
   fn validation_rejects_overlapping_relocations() {
     let mut artifact = artifact();
     artifact.relocations = vec![
@@ -326,7 +312,9 @@ mod tests {
       CompactDirectCallFrame, JIT_EXIT_INTERPRETER, JIT_EXIT_RETURN, NativeCode,
     };
 
-    let code = NativeCode::install_artifact(artifact().validate().expect("valid artifact"))
+    let artifact = artifact();
+    assert!(artifact.relocations().is_empty());
+    let code = NativeCode::install_artifact(artifact.validate().expect("valid artifact"))
       .expect("native installation");
     let numbers = NumericArguments::from_values(&[Value::Number(2.0), Value::Number(3.0)]);
     let mut frame = CompactDirectCallFrame {
@@ -400,16 +388,34 @@ mod tests {
   #[cfg(all(unix, target_arch = "x86_64"))]
   #[test]
   fn guard_branch_supports_large_displacement() {
-    let mut code = ShortBranchCode::default();
-    code
-      .guard_branch(0x72)
-      .expect("known guard opcode"); // jb
-    code.emit(&[0x90; 200]); // nop
-    code
-      .bind_guard_failure()
-      .expect("large guard should succeed with rel32");
-    assert!(code.bytes.len() > 200);
-    let typed_artifact = artifact();
-    assert!(typed_artifact.validate().is_ok());
+    use crate::vm::jit::native::NativeCode;
+    for (carry, expected) in [(0xF8, 7), (0xF9, 42)] {
+      // clc / stc
+      let mut code = ShortBranchCode::default();
+      code.emit(&[carry]);
+      code.guard_branch(0x72).expect("jb guard");
+      code.emit(&[0x90; 200]);
+      code.emit(&[0xB8, 7, 0, 0, 0, 0xC3]); // return 7 on fallthrough
+      let target = code.bytes.len();
+      code
+        .bind_guard_failure()
+        .expect("patch rel32 guard");
+      code.emit(&[0xB8, 42, 0, 0, 0, 0xC3]); // return 42 on guard failure
+      assert_eq!(&code.bytes[1..3], &[0x0F, 0x82]);
+      let displacement = i32::from_le_bytes(code.bytes[3..7].try_into().expect("rel32"));
+      assert!(displacement > i8::MAX.into());
+      assert_eq!(7 + displacement as usize, target);
+      let artifact = NativeArtifact {
+        target: TargetIsa::SysVx86_64,
+        abi: NATIVE_ARTIFACT_ABI,
+        entry: CodeOffset(0),
+        bytes: code.finish().into_boxed_slice(),
+        relocations: Box::new([]),
+      };
+      let native = NativeCode::install_artifact(artifact.validate().expect("valid guard artifact"))
+        .expect("install guard artifact");
+      // The artifact uses no arguments or memory and returns a u64 in rax.
+      assert_eq!(unsafe { native.call_u64() }, expected);
+    }
   }
 }

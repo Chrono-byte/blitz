@@ -235,7 +235,7 @@ pub(crate) struct Lowering {
   pub(crate) max_values: usize,
   pub(crate) branch_values: HashMap<usize, Vec<VirtualValue>>,
   #[cfg(debug_assertions)]
-  entry_values: HashMap<usize, Vec<VirtualValue>>,
+  entry_values: Vec<Vec<VirtualValue>>,
   pub(crate) reachable: bool,
 }
 
@@ -348,7 +348,7 @@ impl Lowering {
         }
       } else {
         #[cfg(debug_assertions)]
-        if let Some(entry) = self.entry_values.get(&target) {
+        if let Some(entry) = self.entry_values.get(target) {
           assert!(
             entry.starts_with(&edge) || edge.starts_with(entry),
             "conflicting explicit value homes at branch merge"
@@ -403,7 +403,7 @@ impl Lowering {
       .max(self.values.len());
     let index = self.instructions.len();
     #[cfg(debug_assertions)]
-    self.entry_values.insert(index, entry_values);
+    self.entry_values.push(entry_values);
     self.instructions.push(VirtualInstruction {
       opcode: op,
       payload,
@@ -1584,7 +1584,7 @@ mod tests {
   }
 
   #[test]
-  fn catch_destructuring_consumes_the_thrown_value_once() {
+  fn catch_destructuring_emits_verified_bytecode() {
     for source in [
       "try { throw [1]; } catch ([value]) { value; }",
       "try { throw { value: 1 }; } catch ({ value }) { value; }",

@@ -241,15 +241,17 @@ mod tests {
   }
 
   #[test]
-  fn serve_is_only_a_lazy_rust_configuration() {
+  fn serve_preserves_the_requested_configuration() {
     let router = Router::new();
     let app = App::make(router);
     let config = app.serve(ServeOptions {
       hostname: "127.0.0.1".to_string(),
-      port: 0,
-      rpc_path: "/rpc".to_string(),
+      port: 4321,
+      rpc_path: "/custom".to_string(),
     });
-    assert_eq!(config.options().port, 0);
+    assert_eq!(config.options().port, 4321);
+    assert_eq!(config.options().hostname, "127.0.0.1");
+    assert_eq!(config.options().rpc_path, "/custom");
     assert!(config.app().layers().is_empty());
   }
 

@@ -9,19 +9,28 @@ interface Clock {
 }
 
 const Clock = Context.GenericTag<"fixture/Clock", Clock>("fixture/Clock");
+declare const open: Effect.Effect<number, never, "fixture/Clock">;
+declare const fiber: Fiber.Fiber<number, string>;
+
+// @case tag-identity
 const wrongTag: Context.Tag<"fixture/Other", Clock> = Clock;
-const open =
-  null as unknown as Effect.Effect<number, never, "fixture/Clock">;
+
+// @case open-requirements
 Effect.runSync(open);
+
+// @case failing-finalizer
 const badFinalizer = Effect.acquireRelease(
   Effect.succeed("resource"),
   () => Effect.fail("release failed"),
 );
-const fiber = null as unknown as Fiber.Fiber<number, string>;
+
+// @case fiber-await-exit
 const wrongAwait: Effect.Effect<number, string> = Fiber.await(fiber);
+
+// @case stream-collection
 const wrongCollection: Effect.Effect<ReadonlyArray<number>> =
   Stream.runCollect(Stream.make(1, 2));
+
+// @case layer-identity
 const wrongLayer: Layer.Layer<"fixture/Other"> =
   Layer.succeed(Clock, { now: 1 });
-
-void [wrongTag, badFinalizer, wrongAwait, wrongCollection, wrongLayer];

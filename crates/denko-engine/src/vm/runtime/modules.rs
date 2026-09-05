@@ -12,6 +12,60 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 impl Vm {
+  pub(super) fn read_module_export_cached(
+    &mut self,
+    index: usize,
+  ) -> Result<Value, crate::RuntimeError> {
+    let chunk = &self.execution.active.chunk;
+    if self
+      .caches
+      .active_module_reads
+      .as_ref()
+      .is_none_or(|cache| !std::sync::Arc::ptr_eq(&cache.chunk, chunk))
+    {
+      let cache = self
+        .caches
+        .module_reads
+        .entry(std::sync::Arc::as_ptr(chunk) as usize)
+        .or_insert_with(|| {
+          Rc::new(crate::vm::state::ModuleReadCache {
+            chunk: std::sync::Arc::clone(chunk),
+            cells: RefCell::new(vec![None; chunk.constants.len()]),
+          })
+        });
+      self.caches.active_module_reads = Some(Rc::clone(cache));
+    }
+    let cache = Rc::clone(
+      self
+        .caches
+        .active_module_reads
+        .as_ref()
+        .expect("active module cache"),
+    );
+    let cached = cache.cells.borrow()[index].clone();
+    let cell = if let Some(cell) = cached {
+      Some(cell)
+    } else {
+      let (module, name) = self.module_export_descriptor(index)?;
+      let cell = self
+        .modules
+        .table
+        .get(module)
+        .and_then(|exports| exports.get(&name))
+        .cloned();
+      cache.cells.borrow_mut()[index] = cell.clone();
+      cell
+    };
+    let value = cell.map_or(Value::Undefined, |cell| cell.value());
+    if matches!(value, Value::Uninitialized) {
+      let (_, name) = self.module_export_descriptor(index)?;
+      return Err(
+        self.throw_reference_error(&format!("Cannot access '{name}' before initialization")),
+      );
+    }
+    Ok(value)
+  }
+
   /// Provide mutable access to the per-VM module loader, creating it if missing.
   ///
   /// # Panics
@@ -187,6 +241,8 @@ impl Vm {
     while self.modules.table.len() <= module_index {
       self.modules.table.push(HashMap::new());
     }
+    self.caches.module_reads.clear();
+    self.caches.active_module_reads = None;
     self.modules.table[module_index] = exports;
   }
 
@@ -259,4 +315,54 @@ pub(crate) fn build_module_namespace_object(exports: &HashMap<String, BindingCel
   );
   namespace.borrow_mut().extensible = false;
   Value::Object(namespace)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::bytecode::{Chunk, Constant};
+  use std::sync::Arc;
+
+  #[test]
+  fn cached_imports_preserve_live_cells_tdz_and_export_replacement() {
+    let mut vm = Vm::new(Rc::new(RefCell::new(ObjectData::new())));
+    let mut chunk = Chunk::new(Arc::new(String::new()));
+    let index = chunk.add_constant(Constant::String("0\0value".into()));
+    vm.execution.active.chunk = Arc::new(chunk);
+    assert_eq!(
+      vm.read_module_export_cached(index)
+        .expect("missing export"),
+      Value::Undefined
+    );
+
+    let cell = BindingCell::new(Value::Uninitialized);
+    vm.install_module_exports(0, HashMap::from([("value".into(), cell.clone())]));
+    assert!(
+      vm.read_module_export_cached(index).is_err(),
+      "uninitialized import must throw"
+    );
+    cell.set(Value::Number(41.0));
+    assert_eq!(
+      vm.read_module_export_cached(index)
+        .expect("initialized import"),
+      Value::Number(41.0)
+    );
+    cell.set(Value::Number(42.0));
+    vm.collect_garbage_prototype();
+    assert_eq!(
+      vm.read_module_export_cached(index)
+        .expect("live import after GC"),
+      Value::Number(42.0)
+    );
+
+    vm.install_module_exports(
+      0,
+      HashMap::from([("value".into(), BindingCell::new(Value::Number(7.0)))]),
+    );
+    assert_eq!(
+      vm.read_module_export_cached(index)
+        .expect("replaced exports"),
+      Value::Number(7.0)
+    );
+  }
 }

@@ -131,9 +131,22 @@ setTimeout(() => {
   else fail(new Error("unpipe lifecycle"));
 }, 200);
 
-const promisePipelineSink = new Writable({ write(_chunk, _encoding, callback) { callback(); } });
+let promisePipelineValue = "";
+let promiseWriteCompleted = false;
+const promisePipelineSink = new Writable({ write(chunk, _encoding, callback) {
+  setTimeout(() => {
+    promisePipelineValue += chunk;
+    promiseWriteCompleted = true;
+    callback();
+  }, 1);
+} });
   const promisePipelineResult = promisePipeline(Readable.from(["promise"]), promisePipelineSink);
-  promisePipelineResult.then(() => { flags.promisePipeline = true; }, error => { console.log("promisePipeline failure", error && error.message); fail(error); });
+  promisePipelineResult.then(() => {
+    try {
+      assert(promiseWriteCompleted && promisePipelineValue === "promise", "promise pipeline resolved before transferring its data");
+      flags.promisePipeline = true;
+    } catch (error) { fail(error); }
+  }, fail);
   const promiseTarget = new Writable({ write(_chunk, _encoding, callback) { callback(); } });
   const promiseFinishedResult = promiseFinished(promiseTarget, { readable: false });
   promiseFinishedResult.then(() => { flags.promiseFinished = true; }, error => { console.log("promiseFinished failure", error && error.message); fail(error); });

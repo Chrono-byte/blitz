@@ -551,7 +551,7 @@ pub(crate) fn install_string_boolean_symbol_builtins(
       let from_char_code = builtin_object(
         Rc::new(|vm, args| {
           let off = static_builtin_arg_offset(vm, args, "String");
-          let mut out = JsStringBuilder::new();
+          let mut out = JsStringBuilder::with_capacity(args.len().saturating_sub(off));
           for arg in args.iter().skip(off) {
             let n = vm.to_number_value(arg)?;
             let int = if n.is_nan() || !n.is_finite() {

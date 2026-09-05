@@ -27,15 +27,12 @@ fn constant_fold(
   {
     return 0;
   }
-  let mut value_to_const: HashMap<usize, Option<f64>> = HashMap::new();
+  let mut value_to_const = vec![None::<f64>; builder.max_values];
   let mut folded = 0;
 
   for idx in 0..builder.instructions.len() {
     let op = builder.instructions[idx].opcode;
-    let inputs = builder.instructions[idx]
-      .inputs
-      .as_slice()
-      .to_vec();
+    let inputs = builder.instructions[idx].inputs.as_slice();
     let output = builder.instructions[idx].output;
 
     let folded_value = match op {
@@ -43,8 +40,8 @@ fn constant_fold(
         if inputs.len() != 2 {
           None
         } else {
-          let left = value_to_const.get(&inputs[0].0).and_then(|v| *v);
-          let right = value_to_const.get(&inputs[1].0).and_then(|v| *v);
+          let left = value_to_const[inputs[0].0];
+          let right = value_to_const[inputs[1].0];
           match (left, right) {
             (Some(l), Some(r)) => match op {
               LoweringOpcode::Sub => Some(l - r),
@@ -60,10 +57,7 @@ fn constant_fold(
         if inputs.len() != 1 {
           None
         } else {
-          value_to_const
-            .get(&inputs[0].0)
-            .and_then(|v| *v)
-            .map(|x| -x)
+          value_to_const[inputs[0].0].map(|x| -x)
         }
       }
       _ => None,
@@ -78,7 +72,7 @@ fn constant_fold(
       else {
         code.constants.pop();
         if let Some(out) = output {
-          value_to_const.insert(out.0, None);
+          value_to_const[out.0] = None;
         }
         continue;
       };
@@ -87,7 +81,7 @@ fn constant_fold(
       inst.payload = payload;
       inst.inputs = VirtualInputs::None;
       if let Some(out) = output {
-        value_to_const.insert(out.0, Some(result));
+        value_to_const[out.0] = Some(result);
       }
       folded += 1;
     } else {
@@ -102,7 +96,7 @@ fn constant_fold(
         } else {
           None
         };
-        value_to_const.insert(out.0, const_val);
+        value_to_const[out.0] = const_val;
       }
     }
   }
@@ -294,12 +288,9 @@ fn dead_code_elimination(
       worklist.push(handler.finalizer_pc);
     }
   }
-  let mut visited = HashSet::new();
+  let mut visited = vec![false; len];
   while let Some(pc) = worklist.pop() {
-    if !visited.insert(pc) {
-      continue;
-    }
-    if pc >= len {
+    if pc >= len || std::mem::replace(&mut visited[pc], true) {
       continue;
     }
     let inst = &builder.instructions[pc];

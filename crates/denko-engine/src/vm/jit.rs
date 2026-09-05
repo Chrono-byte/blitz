@@ -268,6 +268,10 @@ impl FunctionId {
     Self(value)
   }
 
+  pub(crate) const fn index(self) -> usize {
+    (self.0 - 1) as usize
+  }
+
   const fn get(self) -> u64 {
     self.0
   }
@@ -511,7 +515,7 @@ impl DirectCallTarget {
 
 #[derive(Default)]
 pub(crate) struct JitRuntime {
-  pub(crate) code: HashMap<FunctionId, Vec<JitCode>>,
+  pub(crate) code: Vec<Vec<JitCode>>,
   next_version: u64,
   numeric_regions: [NumericRegionCode; 5],
   dense_array_push_region: NumericRegionCode,
@@ -596,6 +600,17 @@ pub(crate) enum NumericRegionExecution {
 }
 
 impl JitRuntime {
+  fn versions_mut(
+    &mut self,
+    function: FunctionId,
+  ) -> &mut Vec<JitCode> {
+    let index = function.index();
+    if self.code.len() <= index {
+      self.code.resize_with(index + 1, Vec::new);
+    }
+    &mut self.code[index]
+  }
+
   pub(crate) fn allocate_version(&mut self) -> CodeVersionId {
     self.next_version = self.next_version.saturating_add(1);
     CodeVersionId(self.next_version)
@@ -645,16 +660,12 @@ impl JitRuntime {
       });
     }
     let version = self.allocate_version();
-    self
-      .code
-      .entry(function)
-      .or_default()
-      .push(JitCode {
-        version,
-        state: JitCodeState::Valid,
-        native_blocks,
-        direct_call,
-      });
+    self.versions_mut(function).push(JitCode {
+      version,
+      state: JitCodeState::Valid,
+      native_blocks,
+      direct_call,
+    });
     Ok(version)
   }
 
@@ -664,7 +675,7 @@ impl JitRuntime {
   ) -> Option<DirectCallTarget> {
     self
       .code
-      .get(&function)?
+      .get(function.index())?
       .iter()
       .find(|code| code.state == JitCodeState::Valid)
       .and_then(|code| code.direct_call.clone())
@@ -751,7 +762,7 @@ impl JitRuntime {
   ) -> Option<DirectCallTarget> {
     self
       .code
-      .get(&function)?
+      .get(function.index())?
       .iter()
       .find(|code| code.version == version && code.state == JitCodeState::Valid)?
       .direct_call
@@ -815,16 +826,12 @@ impl JitRuntime {
                 arguments: DirectArgumentUse::NumericPair,
               },
             };
-            self
-              .code
-              .entry(key.function)
-              .or_default()
-              .push(JitCode {
-                version,
-                state: JitCodeState::Valid,
-                native_blocks: HashMap::new(),
-                direct_call: Some(target),
-              });
+            self.versions_mut(key.function).push(JitCode {
+              version,
+              state: JitCodeState::Valid,
+              native_blocks: HashMap::new(),
+              direct_call: Some(target),
+            });
             self
               .optimizing
               .states
@@ -1035,20 +1042,18 @@ impl JitRuntime {
       locals: locals.as_mut_ptr(),
       local_count: locals.len(),
     };
-    let code = self.code.get(&function).and_then(|versions| {
-      versions
-        .iter()
-        .find(|code| code.state == JitCodeState::Valid && !code.native_blocks.is_empty())
-    });
+    let code = self
+      .code
+      .get(function.index())
+      .and_then(|versions| {
+        versions
+          .iter()
+          .find(|code| code.state == JitCodeState::Valid && !code.native_blocks.is_empty())
+      });
     let Some(code) = code else {
       return Ok(BaselineOutcome::Unavailable);
     };
     let mut block_pc = frame.resume_pc;
-    if !code.native_blocks.contains_key(&block_pc) {
-      return Ok(BaselineOutcome::Interpret {
-        resume_pc: frame.resume_pc,
-      });
-    }
     let exit = loop {
       let Some(block) = code.native_blocks.get(&block_pc) else {
         frame.resume_pc = block_pc;
@@ -1084,7 +1089,7 @@ impl JitRuntime {
   ) -> Result<(), String> {
     let code = self
       .code
-      .get_mut(&function)
+      .get_mut(function.index())
       .and_then(|versions| {
         versions
           .iter_mut()
@@ -1199,7 +1204,12 @@ mod tests {
     runtime
       .install_const_prefix(function, &code, 0)
       .expect("install blocks");
-    assert!(runtime.code[&function][0].native_blocks.len() >= 2);
+    assert!(
+      runtime.code[function.index()][0]
+        .native_blocks
+        .len()
+        >= 2
+    );
     let mut registers: [Value; 16] = std::array::from_fn(|_| Value::Undefined);
     assert_eq!(
       invoke(&runtime, function, &mut registers),
@@ -1214,30 +1224,27 @@ mod tests {
     let version = CodeVersionId(1);
     let (source_code, site) = NativeCode::patchable_jump().expect("source block");
     let mut runtime = JitRuntime::default();
-    runtime.code.insert(
-      function,
-      vec![JitCode {
-        version,
-        state: JitCodeState::Valid,
-        native_blocks: HashMap::from([
-          (
-            0,
-            NativeBlock {
-              code: source_code,
-              direct_exit: Some(site),
-            },
-          ),
-          (
-            1,
-            NativeBlock {
-              code: NativeCode::return_number(42.0).expect("target"),
-              direct_exit: None,
-            },
-          ),
-        ]),
-        direct_call: None,
-      }],
-    );
+    *runtime.versions_mut(function) = vec![JitCode {
+      version,
+      state: JitCodeState::Valid,
+      native_blocks: HashMap::from([
+        (
+          0,
+          NativeBlock {
+            code: source_code,
+            direct_exit: Some(site),
+          },
+        ),
+        (
+          1,
+          NativeBlock {
+            code: NativeCode::return_number(42.0).expect("target"),
+            direct_exit: None,
+          },
+        ),
+      ]),
+      direct_call: None,
+    }];
     runtime
       .link_direct(function, version, 0, 1)
       .expect("link blocks");
@@ -1252,30 +1259,27 @@ mod tests {
   fn dispatches_between_independently_owned_native_blocks() {
     let function = FunctionId::new(1);
     let mut runtime = JitRuntime::default();
-    runtime.code.insert(
-      function,
-      vec![JitCode {
-        version: CodeVersionId(1),
-        state: JitCodeState::Valid,
-        native_blocks: HashMap::from([
-          (
-            0,
-            NativeBlock {
-              code: NativeCode::next_block(1).expect("block zero"),
-              direct_exit: None,
-            },
-          ),
-          (
-            1,
-            NativeBlock {
-              code: NativeCode::return_number(42.0).expect("block one"),
-              direct_exit: None,
-            },
-          ),
-        ]),
-        direct_call: None,
-      }],
-    );
+    *runtime.versions_mut(function) = vec![JitCode {
+      version: CodeVersionId(1),
+      state: JitCodeState::Valid,
+      native_blocks: HashMap::from([
+        (
+          0,
+          NativeBlock {
+            code: NativeCode::next_block(1).expect("block zero"),
+            direct_exit: None,
+          },
+        ),
+        (
+          1,
+          NativeBlock {
+            code: NativeCode::return_number(42.0).expect("block one"),
+            direct_exit: None,
+          },
+        ),
+      ]),
+      direct_call: None,
+    }];
     assert_eq!(
       invoke(&runtime, function, &mut []),
       BaselineOutcome::Returned(Value::Number(42.0))

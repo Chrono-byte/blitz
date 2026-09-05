@@ -56,13 +56,15 @@ const temporary = mkdtempSync(join(ROOT, ".punycode-smoke-"));
 try {
   const script = join(temporary, "fixture.js");
   writeFileSync(script, fixture("../src/facades/node-punycode.js"), "utf8");
-  const nodeResult = run(process.execPath, [script], temporary);
+  const reference = join(temporary, "reference.mjs");
+  writeFileSync(reference, fixture("node:punycode"), "utf8");
+  const nodeResult = run(process.execPath, [reference], temporary);
 
   const { command, args } = blitzCommand(["--module", script]);
   const blitzResult = run(command, args, REPOSITORY);
 
   if (JSON.stringify(blitzResult) !== JSON.stringify(nodeResult)) {
-    throw new Error(`Node 24 and Blitz punycode results differ:\nNode: ${JSON.stringify(nodeResult)}\nBlitz: ${JSON.stringify(blitzResult)}`);
+    throw new Error(`Native Node and Blitz punycode results differ:\nNode: ${JSON.stringify(nodeResult)}\nBlitz: ${JSON.stringify(blitzResult)}`);
   }
   console.log("node:punycode differential smoke passed against local Node and Blitz.");
 } finally {

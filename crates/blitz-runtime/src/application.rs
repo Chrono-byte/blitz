@@ -130,7 +130,24 @@ impl HostedApplication {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::host::{NodeCompatProfile, RuntimeOptions};
+  use crate::host::{NodeCompatProfile, OutputStream, RuntimeOptions};
+
+  #[derive(Default)]
+  struct CapturedOutput(RefCell<Vec<(OutputStream, String)>>);
+
+  impl Output for CapturedOutput {
+    fn write_line(
+      &self,
+      stream: OutputStream,
+      line: &str,
+    ) -> Result<(), denko::errors::RuntimeError> {
+      self
+        .0
+        .borrow_mut()
+        .push((stream, line.to_string()));
+      Ok(())
+    }
+  }
 
   #[test]
   fn runs_a_package_scoped_esm_entry_through_one_application_operation() {
@@ -145,11 +162,16 @@ mod tests {
     std::fs::create_dir_all(&root).expect("project");
     std::fs::write(root.join("package.json"), r#"{"type":"module"}"#).expect("manifest");
     let entry = root.join("main.js");
-    std::fs::write(&entry, "globalThis.applicationResult = 42;").expect("entry");
+    std::fs::write(
+      &entry,
+      denko::js!(module, "export const answer = 42; console.log(answer);"),
+    )
+    .expect("entry");
     let mut options = RuntimeOptions::from_host(vec!["blitz".to_string()]);
     options.node_compat = NodeCompatProfile::Off;
 
-    let outcome = HostedApplication::new(options)
+    let output = Rc::new(CapturedOutput::default());
+    let outcome = HostedApplication::with_output(options, output.clone())
       .run(ApplicationRequest {
         entry: ApplicationEntry::File {
           path: entry,
@@ -161,6 +183,10 @@ mod tests {
 
     assert_eq!(outcome.exit.code, 0);
     assert_eq!(outcome.completion, None);
+    assert_eq!(
+      *output.0.borrow(),
+      [(OutputStream::Stdout, "42".to_string())]
+    );
     std::fs::remove_dir_all(root).expect("remove project");
   }
 }

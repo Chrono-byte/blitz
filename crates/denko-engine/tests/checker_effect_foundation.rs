@@ -64,14 +64,43 @@ fn checked_in_effect_foundation_declarations_accept_the_positive_fixture() {
 
 #[test]
 fn checked_in_effect_foundation_declarations_reject_the_negative_fixture() {
-  let result = check_source(
-    include_str!("../../../tools/effect-assets/fixtures/effect-foundation-blitz-negative.ts"),
-    "effect-foundation-blitz-negative.ts",
-    &curated_effect_declarations(),
-  );
+  let fixture =
+    include_str!("../../../tools/effect-assets/fixtures/effect-foundation-blitz-negative.ts");
+  let mut sections = fixture.split("// @case ");
+  let prelude = sections.next().expect("shared declarations");
+  let declarations = curated_effect_declarations();
+  check_source(prelude, "negative-prelude.ts", &declarations)
+    .expect("the shared declarations must not supply an unrelated error");
+  let mut tested = Vec::new();
+  let mut accepted = Vec::new();
+  for section in sections {
+    let (name, source) = section
+      .split_once('\n')
+      .expect("named negative case");
+    let result = check_source(
+      &format!("{prelude}\n{source}"),
+      "negative-case.ts",
+      &declarations,
+    );
+    if result.is_ok() {
+      accepted.push(name);
+    }
+    tested.push(name);
+  }
   assert!(
-    result.is_err(),
-    "negative Effect fixture unexpectedly passed"
+    accepted.is_empty(),
+    "negative cases unexpectedly accepted: {accepted:?}"
+  );
+  assert_eq!(
+    tested,
+    [
+      "tag-identity",
+      "open-requirements",
+      "failing-finalizer",
+      "fiber-await-exit",
+      "stream-collection",
+      "layer-identity"
+    ]
   );
 }
 

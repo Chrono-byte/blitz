@@ -2391,6 +2391,7 @@ fn run_test_file(
     }
     typecheck::set_strict_override(Some(is_strict));
 
+    let mut runtime_thrown = None;
     let run_result = if is_module {
       if let Some(m) = &meta
         && let Some(neg) = &m.negative
@@ -2445,7 +2446,10 @@ fn run_test_file(
       }
       match denko::module::evaluate_entry_shared(&loader_handle, path, &mut vm, false) {
         Ok(()) => Ok(Value::Undefined),
-        Err(e) => Err(e.to_string()),
+        Err(e) => {
+          runtime_thrown = vm.uncaught_exception().cloned();
+          Err(e.to_string())
+        }
       }
     } else {
       let mut run_src = String::new();
@@ -2513,7 +2517,10 @@ fn run_test_file(
         }
       };
 
-      vm.run(chunk).map_err(|e| e.to_string())
+      vm.run(chunk).map_err(|e| {
+        runtime_thrown = vm.uncaught_exception().cloned();
+        e.to_string()
+      })
     };
 
     let run_result = if is_async {
@@ -2521,6 +2528,7 @@ fn run_test_file(
         Err(e) => Err(e),
         Ok(v) => {
           if let Err(e) = vm.flush_microtasks() {
+            runtime_thrown = vm.uncaught_exception().cloned();
             Err(e.to_string())
           } else {
             let start = Instant::now();
@@ -2531,6 +2539,7 @@ fn run_test_file(
 
             loop {
               if let Err(e) = vm.flush_microtasks() {
+                runtime_thrown = vm.uncaught_exception().cloned();
                 break Err(e.to_string());
               }
 
@@ -2582,13 +2591,30 @@ fn run_test_file(
       match &run_result {
         Err(e) => {
           if let Some(expected) = &neg.ty {
-            let err_str = e.to_string();
-            if !err_str.contains(expected) {
+            let actual = runtime_thrown
+              .as_ref()
+              .filter(|thrown| thrown.is_object())
+              .and_then(|thrown| {
+                let constructor = vm
+                  .get_property_host(thrown, &PropertyKey::String("constructor".into()))
+                  .ok()?;
+                match vm
+                  .get_property_host(&constructor, &PropertyKey::String("name".into()))
+                  .ok()?
+                {
+                  Value::String(name) => Some(name),
+                  _ => None,
+                }
+              });
+            if actual
+              .as_ref()
+              .is_none_or(|name| name != expected.as_str())
+            {
               return Err(
                 Test262Error::new(
                   path,
                   mode_name,
-                  format!("expected error type {expected}, got {err_str}"),
+                  format!("expected error constructor {expected}, got {actual:?}: {e}"),
                 )
                 .into_string(),
               );
@@ -3179,6 +3205,48 @@ mod tests {
       fs::create_dir_all(parent).expect("create parent dirs");
     }
     fs::write(path, contents).expect("write file");
+  }
+
+  #[test]
+  fn runtime_negative_tests_check_the_thrown_constructor_in_scripts_and_modules() {
+    let root = TempDirGuard(temp_dir("negative-constructors"));
+    let globals = make_test_globals();
+    for flags in ["raw", "raw, module"] {
+      for (source, passes) in [
+        (denko::js!("throw new TypeError('sentinel');"), true),
+        (denko::js!("throw new Error('TypeError');"), false),
+        (denko::js!("throw new Error('sentinel');"), false),
+        (denko::js!("throw 'TypeError';"), false),
+        (denko::js!("throw null;"), false),
+        (
+          denko::js!("var e = new Error(); e.name = 'TypeError'; throw e;"),
+          false,
+        ),
+        (
+          denko::js!("var e = new TypeError(); e.name = 'Error'; throw e;"),
+          true,
+        ),
+        (
+          denko::js!("class OtherError extends TypeError {} throw new OtherError();"),
+          false,
+        ),
+        (
+          denko::js!("throw new ($262.createRealm().global.TypeError)('foreign');"),
+          true,
+        ),
+        (denko::js!("void 0;"), false),
+      ] {
+        let path = root.0.join("case.js");
+        write_file(
+          &path,
+          &format!(
+            "/*---\nflags: [{flags}]\nnegative:\n  phase: runtime\n  type: TypeError\n---*/\n{source}"
+          ),
+        );
+        let result = run_test_file(&path, &root.0, &globals, &HashMap::new(), None);
+        assert_eq!(result.is_ok(), passes, "{flags}: {source}: {result:?}");
+      }
+    }
   }
 
   #[test]

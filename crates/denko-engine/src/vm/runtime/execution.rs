@@ -92,7 +92,10 @@ impl Vm {
     self.exceptions.pending = None;
     self.exceptions.pending_frame_count = None;
     self.exceptions.unwound_register_state = None;
+    self.caches.module_reads.clear();
+    self.caches.active_module_reads = None;
     self.caches.property_get.clear();
+    self.caches.active_property_get = None;
     self.execution.active.slots = None;
     self.execution.direct_eval_outer = None;
     self.execution.active.closure_env = None;
@@ -139,12 +142,15 @@ impl Vm {
     _root_execution: bool,
   ) -> Result<Value, RuntimeError> {
     let function_id = self.active_function_id();
-    self
-      .profiling
-      .functions
-      .entry(function_id)
-      .or_default()
-      .record_call();
+    let profile = &mut self.profiling.functions[function_id.index()];
+    let was_cold = profile.baseline == crate::vm::jit::BaselineState::Cold;
+    profile.record_call();
+    if was_cold && profile.baseline == crate::vm::jit::BaselineState::Requested {
+      self
+        .profiling
+        .pending_baseline
+        .push_back(function_id);
+    }
     let mut state = RegisterState::new(
       self.execution.active.this_value.clone(),
       &[],
@@ -763,19 +769,7 @@ impl Vm {
             registers[rd] = value;
           }
           Opcode::GetModuleExport => {
-            let (module_index, name) = self.module_export_descriptor(decode_aux16(word) as usize)?;
-            let value = self
-              .modules
-              .table
-              .get(module_index)
-              .and_then(|module| module.get(&name).cloned())
-              .map_or(Value::Undefined, |slot| slot.value());
-            if matches!(value, Value::Uninitialized) {
-              return Err(
-                self
-                  .throw_reference_error(&format!("Cannot access '{name}' before initialization")),
-              );
-            }
+            let value = self.read_module_export_cached(decode_aux16(word) as usize)?;
             registers[rd] = value;
           }
           Opcode::SetModuleExport => {
@@ -1908,7 +1902,7 @@ impl Vm {
   }
 
   #[inline(always)]
-  fn module_export_descriptor(
+  pub(super) fn module_export_descriptor(
     &self,
     index: usize,
   ) -> Result<(usize, String), RuntimeError> {

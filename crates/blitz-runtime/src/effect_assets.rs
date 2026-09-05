@@ -1216,6 +1216,11 @@ mod tests {
 
   #[test]
   fn app_transport_is_lazy_typed_and_private() {
+    let reservation = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve lazy server port");
+    let address = reservation
+      .local_addr()
+      .expect("reserved address");
+    drop(reservation);
     run_effect_compatibility_entry(
       denko::js!(
         module,
@@ -1226,7 +1231,11 @@ mod tests {
         import { App } from 'blitz:app';
 
         const app = App.make({ rpc: { _tag: 'BlitzRouter' } });
-        const lazyServe = app.serve({ hostname: '127.0.0.1', port: 0 });
+        let optionReads = 0;
+        const lazyServe = app.serve({
+          get hostname() { optionReads++; return '127.0.0.1'; },
+          port: Number('LAZY_TEST_PORT')
+        });
         const invalid = Effect.runSyncExit(
           app.serve({ hostname: '127.0.0.1', port: 0, rpcPath: '/' })
         );
@@ -1234,7 +1243,7 @@ mod tests {
           ? Cause.failureOption(invalid.cause)
           : { _tag: 'None' };
 
-        globalThis.app_serve_is_lazy_effect = typeof lazyServe.pipe === 'function';
+        globalThis.app_serve_is_lazy_effect = typeof lazyServe.pipe === 'function' && optionReads === 0;
         globalThis.app_transport_invalid_is_typed =
           invalidFailure._tag === 'Some' &&
           invalidFailure.value._tag === 'ServeError' &&
@@ -1242,8 +1251,9 @@ mod tests {
         globalThis.app_host_bridge_is_hidden =
           !Object.getOwnPropertyNames(globalThis).includes('__blitz_host_v1');
       "#
-      ),
-      |vm| {
+      ).replace("LAZY_TEST_PORT", &address.port().to_string()),
+      move |vm| {
+        let _listener = std::net::TcpListener::bind(address).expect("constructing serve must leave its port available");
         assert_eq!(
           vm.get_global("app_serve_is_lazy_effect"),
           Some(Value::Bool(true))
@@ -1435,10 +1445,30 @@ mod tests {
       .iter()
       .find(|module| module.specifier == "blitz:match")
       .expect("generated stdlib manifest contains blitz:match");
-
     assert_eq!(facade.visibility, "public");
-    assert!(facade.source.contains("effect/Match"));
     assert!(facade.declaration.is_some());
-    assert!(BLITZ_MATCH_SUPPORTED_EXPORTS.contains(&"exhaustive"));
+    run_effect_compatibility_entry(
+      denko::js!(
+        module,
+        r#"
+        import * as Match from 'blitz:match';
+        import * as Upstream from 'effect/Match';
+        globalThis.matchIdentity = Object.keys(Upstream).length > 0 &&
+          Object.keys(Match).length === Object.keys(Upstream).length &&
+          Object.keys(Upstream).every(name => Match[name] === Upstream[name]);
+        globalThis.matchValue = Match.value(42).pipe(
+          Match.when(value => value === 42, () => 'answer'),
+          Match.exhaustive
+        );
+      "#
+      ),
+      |vm| {
+        assert_eq!(vm.get_global("matchIdentity"), Some(Value::Bool(true)));
+        assert_eq!(
+          vm.get_global("matchValue"),
+          Some(Value::String("answer".into()))
+        );
+      },
+    );
   }
 }

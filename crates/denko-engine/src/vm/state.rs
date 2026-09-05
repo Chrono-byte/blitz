@@ -268,8 +268,23 @@ pub(super) struct DirectCallSite {
   pub(super) target: crate::vm::jit::DirectCallTarget,
 }
 
+/// VM-owned per-chunk storage. Retaining the chunk prevents pointer-key reuse.
+pub(super) struct PropertyGetCache {
+  pub(super) chunk: Arc<Chunk>,
+  pub(super) site_indices: Vec<u32>,
+  pub(super) entries: RefCell<Vec<Option<PropertyGetIcEntry>>>,
+}
+
+pub(super) struct ModuleReadCache {
+  pub(super) chunk: Arc<Chunk>,
+  pub(super) cells: RefCell<Vec<Option<BindingCell>>>,
+}
+
 pub(super) struct CacheState {
-  pub(super) property_get: HashMap<(usize, usize), PropertyGetIcEntry>,
+  pub(super) module_reads: HashMap<usize, Rc<ModuleReadCache>>,
+  pub(super) active_module_reads: Option<Rc<ModuleReadCache>>,
+  pub(super) property_get: HashMap<usize, Rc<PropertyGetCache>>,
+  pub(super) active_property_get: Option<Rc<PropertyGetCache>>,
   /// O(1) invalidation boundary for mutation-opaque native callbacks.
   pub(super) property_get_epoch: u64,
   /// VM-local quickened plans keyed by portable code identity.
@@ -289,11 +304,12 @@ pub(super) struct ProfilingState {
   pub(super) opcode_counts: [u64; OP_COUNT],
   pub(super) run_started_at: Option<Instant>,
   /// Feedback keyed by stable portable code identity, never native code.
-  pub(super) functions: HashMap<crate::vm::jit::FunctionId, crate::vm::jit::FunctionProfile>,
+  pub(super) functions: Vec<crate::vm::jit::FunctionProfile>,
+  pub(super) pending_baseline: VecDeque<crate::vm::jit::FunctionId>,
   /// Temporary identity bridge until executable code owns a stable ID. The
   /// retained Arc intentionally prevents pointer reuse during this phase.
   pub(super) chunk_ids: HashMap<usize, crate::vm::jit::FunctionId>,
-  pub(super) chunk_refs: HashMap<usize, Arc<Chunk>>,
+  pub(super) chunk_refs: Vec<Arc<Chunk>>,
   pub(super) next_function_id: u64,
   pub(super) active_function_identity: usize,
   pub(super) active_function_id: Option<crate::vm::jit::FunctionId>,

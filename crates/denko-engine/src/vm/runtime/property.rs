@@ -58,12 +58,52 @@ impl Vm {
     let Some((receiver_identity, receiver_generation)) = receiver else {
       return self.get_property_value(obj, key);
     };
-    let site = (
-      std::sync::Arc::as_ptr(&self.execution.active.chunk) as usize,
-      instruction_pc,
+    let chunk = &self.execution.active.chunk;
+    if self
+      .caches
+      .active_property_get
+      .as_ref()
+      .is_none_or(|cache| !std::sync::Arc::ptr_eq(&cache.chunk, chunk))
+    {
+      let cache = self
+        .caches
+        .property_get
+        .entry(std::sync::Arc::as_ptr(chunk) as usize)
+        .or_insert_with(|| {
+          let mut count = 0u32;
+          let site_indices = chunk
+            .words
+            .iter()
+            .map(|word| {
+              if crate::bytecode::opcode_from_word(*word)
+                == crate::bytecode::Opcode::GetProperty as u8
+              {
+                let index = count;
+                count += 1;
+                index
+              } else {
+                u32::MAX
+              }
+            })
+            .collect();
+          std::rc::Rc::new(crate::vm::state::PropertyGetCache {
+            chunk: std::sync::Arc::clone(chunk),
+            site_indices,
+            entries: std::cell::RefCell::new(vec![None; count as usize]),
+          })
+        });
+      self.caches.active_property_get = Some(std::rc::Rc::clone(cache));
+    }
+    // Keep this site's storage across reentrant getters and host callbacks.
+    let cache = std::rc::Rc::clone(
+      self
+        .caches
+        .active_property_get
+        .as_ref()
+        .expect("active property cache"),
     );
-
-    if let Some(entry) = self.caches.property_get.get(&site)
+    let site = cache.site_indices[instruction_pc] as usize;
+    if let Some(entry) = cache.entries.borrow()[site].as_ref()
       && entry.epoch == self.caches.property_get_epoch
       && entry.receiver_identity == receiver_identity
       && entry.receiver_generation == receiver_generation
@@ -77,18 +117,16 @@ impl Vm {
       own_property_descriptor(obj, key),
       Some(PropertyDescriptor::Data { .. })
     ) {
-      self.caches.property_get.insert(
-        site,
-        PropertyGetIcEntry {
-          epoch: self.caches.property_get_epoch,
-          receiver_identity,
-          receiver_generation,
-          key: key.clone(),
-          value: value.clone(),
-        },
-      );
+      let updated = PropertyGetIcEntry {
+        epoch: self.caches.property_get_epoch,
+        receiver_identity,
+        receiver_generation,
+        key: key.clone(),
+        value: value.clone(),
+      };
+      cache.entries.borrow_mut()[site] = Some(updated);
     } else {
-      self.caches.property_get.remove(&site);
+      cache.entries.borrow_mut()[site] = None;
     }
     Ok(value)
   }

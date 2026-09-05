@@ -109,7 +109,10 @@ impl Vm {
         unhandled_rejection_hook: None,
       },
       caches: CacheState {
+        module_reads: HashMap::new(),
+        active_module_reads: None,
         property_get: HashMap::new(),
+        active_property_get: None,
         property_get_epoch: 0,
         quickened: HashMap::new(),
         active_quickened_chunk: 0,
@@ -125,9 +128,10 @@ impl Vm {
           .is_some_and(|v| v != "0" && !v.eq_ignore_ascii_case("false")),
         opcode_counts: [0; OP_COUNT],
         run_started_at: None,
-        functions: HashMap::new(),
+        functions: Vec::new(),
+        pending_baseline: VecDeque::new(),
         chunk_ids: HashMap::new(),
-        chunk_refs: HashMap::new(),
+        chunk_refs: Vec::new(),
         next_function_id: 0,
         active_function_identity: 0,
         active_function_id: None,
@@ -218,7 +222,10 @@ impl Vm {
         unhandled_rejection_hook: self.jobs.unhandled_rejection_hook.clone(),
       },
       caches: CacheState {
+        module_reads: HashMap::new(),
+        active_module_reads: None,
         property_get: HashMap::new(),
+        active_property_get: None,
         property_get_epoch: 0,
         quickened: HashMap::new(),
         active_quickened_chunk: 0,
@@ -232,9 +239,10 @@ impl Vm {
         enabled: self.profiling.enabled,
         opcode_counts: [0; OP_COUNT],
         run_started_at: None,
-        functions: HashMap::new(),
+        functions: Vec::new(),
+        pending_baseline: VecDeque::new(),
         chunk_ids: HashMap::new(),
-        chunk_refs: HashMap::new(),
+        chunk_refs: Vec::new(),
         next_function_id: 0,
         active_function_identity: 0,
         active_function_id: None,
@@ -709,13 +717,16 @@ impl Vm {
     roots.extend(self.memory.temporary.iter().cloned());
     roots.extend(self.memory.kept_alive.iter().cloned());
     self.memory.append_host_roots(&mut roots);
-    roots.extend(
-      self
-        .caches
-        .property_get
-        .values()
-        .map(|entry| entry.value.clone()),
-    );
+    for cache in self.caches.property_get.values() {
+      roots.extend(
+        cache
+          .entries
+          .borrow()
+          .iter()
+          .flatten()
+          .map(|entry| entry.value.clone()),
+      );
+    }
     self
       .execution
       .active
@@ -1162,7 +1173,10 @@ impl Vm {
     self.execution.active.arguments.mapped_count = 0;
     self.execution.active.pc = 0;
     self.execution.active.chunk = Arc::new(Chunk::new(Arc::new(String::new())));
+    self.caches.module_reads.clear();
+    self.caches.active_module_reads = None;
     self.caches.property_get.clear();
+    self.caches.active_property_get = None;
     gc::reset_allocation_pressure();
     let mut g = self.realm_state.globals.borrow_mut();
     g.properties.retain(

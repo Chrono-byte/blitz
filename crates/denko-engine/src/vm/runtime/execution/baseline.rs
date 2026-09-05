@@ -13,7 +13,7 @@ impl Vm {
     if !self
       .profiling
       .functions
-      .get(&function)
+      .get(function.index())
       .is_some_and(|profile| matches!(profile.baseline, crate::vm::jit::BaselineState::Ready(_)))
     {
       return Ok(None);
@@ -140,18 +140,14 @@ impl Vm {
         return Ok(Some(result));
       }
     }
-    let profile = self
-      .profiling
-      .functions
-      .entry(function)
-      .or_default();
+    let profile = &mut self.profiling.functions[function.index()];
     profile.parameter_count = parameter_count;
     profile.record_call();
     self.process_baseline_request(function);
     if !self
       .profiling
       .functions
-      .get(&function)
+      .get(function.index())
       .is_some_and(|profile| matches!(profile.baseline, crate::vm::jit::BaselineState::Ready(_)))
     {
       return Ok(None);
@@ -267,18 +263,13 @@ impl Vm {
   ) -> Result<Option<Value>, RuntimeError> {
     let function = self.active_function_id();
     if record_call {
-      self
-        .profiling
-        .functions
-        .entry(function)
-        .or_default()
-        .record_call();
+      self.profiling.functions[function.index()].record_call();
       self.process_baseline_request(function);
     }
     if !self
       .profiling
       .functions
-      .get(&function)
+      .get(function.index())
       .is_some_and(|profile| matches!(profile.baseline, crate::vm::jit::BaselineState::Ready(_)))
     {
       return Ok(None);
@@ -336,30 +327,21 @@ impl Vm {
     if !self
       .profiling
       .functions
-      .get(&function)
+      .get(function.index())
       .is_some_and(|profile| profile.baseline == crate::vm::jit::BaselineState::Requested)
     {
       return;
     }
-    self
-      .profiling
-      .functions
-      .entry(function)
-      .or_default()
-      .baseline = crate::vm::jit::BaselineState::Compiling;
+    self.profiling.functions[function.index()].baseline = crate::vm::jit::BaselineState::Compiling;
     let code = self
       .profiling
-      .chunk_ids
-      .iter()
-      .find_map(|(identity, id)| {
-        (*id == function)
-          .then(|| self.profiling.chunk_refs.get(identity).cloned())
-          .flatten()
-      });
+      .chunk_refs
+      .get(function.index())
+      .cloned();
     let parameter_count = self
       .profiling
       .functions
-      .get(&function)
+      .get(function.index())
       .map_or(0, |profile| profile.parameter_count);
     let state = code
       .as_deref()
@@ -374,24 +356,11 @@ impl Vm {
         crate::vm::jit::BaselineState::Disabled,
         crate::vm::jit::BaselineState::Ready,
       );
-    self
-      .profiling
-      .functions
-      .entry(function)
-      .or_default()
-      .baseline = state;
+    self.profiling.functions[function.index()].baseline = state;
   }
 
   pub(super) fn process_baseline_requests(&mut self) {
-    let requested: Vec<_> = self
-      .profiling
-      .functions
-      .iter()
-      .filter_map(|(function, profile)| {
-        (profile.baseline == crate::vm::jit::BaselineState::Requested).then_some(*function)
-      })
-      .collect();
-    for function in requested {
+    while let Some(function) = self.profiling.pending_baseline.pop_front() {
       self.process_baseline_request(function);
     }
   }
@@ -404,7 +373,7 @@ impl Vm {
     let baseline_ready = self
       .profiling
       .functions
-      .get(&function)
+      .get(function.index())
       .is_some_and(|profile| matches!(profile.baseline, crate::vm::jit::BaselineState::Ready(_)));
     if !baseline_ready {
       return Ok(None);
@@ -476,7 +445,8 @@ impl Vm {
     self
       .profiling
       .chunk_refs
-      .insert(chunk_identity, std::sync::Arc::clone(code));
+      .push(std::sync::Arc::clone(code));
+    self.profiling.functions.push(Default::default());
     self
       .profiling
       .chunk_ids
@@ -513,13 +483,13 @@ impl Vm {
       return;
     }
     let function_id = self.active_function_id();
-    let profile = self
-      .profiling
-      .functions
-      .entry(function_id)
-      .or_default();
+    let profile = &mut self.profiling.functions[function_id.index()];
     profile.record_backedge(pc);
     if matches!(profile.baseline, crate::vm::jit::BaselineState::Requested) {
+      self
+        .profiling
+        .pending_baseline
+        .push_back(function_id);
       self
         .profiling
         .hot_functions

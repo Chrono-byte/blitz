@@ -13,6 +13,7 @@ pub(crate) struct VmMemory {
   /// Objects returned from WeakRef.prototype.deref until the current job ends.
   pub(crate) kept_alive: Vec<Value>,
   host: Rc<RefCell<GenerationArena<Value>>>,
+  empty_closure_environment: Option<crate::closure_environment::WeakClosureEnvironment>,
   closure_environments: Rc<RefCell<GenerationArena<Vec<BindingCell>>>>,
 }
 
@@ -20,6 +21,7 @@ impl VmMemory {
   pub(crate) fn new() -> Self {
     Self {
       temporary: Vec::new(),
+      empty_closure_environment: None,
       kept_alive: Vec::new(),
       host: Rc::new(RefCell::new(GenerationArena::new())),
       closure_environments: Rc::new(RefCell::new(GenerationArena::new())),
@@ -29,6 +31,7 @@ impl VmMemory {
   pub(crate) fn fork(&self) -> Self {
     Self {
       temporary: Vec::new(),
+      empty_closure_environment: self.empty_closure_environment.clone(),
       kept_alive: Vec::new(),
       host: Rc::clone(&self.host),
       closure_environments: Rc::clone(&self.closure_environments),
@@ -53,8 +56,20 @@ impl VmMemory {
     &mut self,
     cells: Vec<BindingCell>,
   ) -> ClosureEnvironment {
+    if cells.is_empty()
+      && let Some(environment) = self
+        .empty_closure_environment
+        .as_ref()
+        .and_then(|env| env.upgrade())
+    {
+      return environment;
+    }
+    let empty = cells.is_empty();
     let environment = ClosureEnvironment::allocate(Rc::clone(&self.closure_environments), cells);
     crate::gc::register_closure_environment(&environment);
+    if empty {
+      self.empty_closure_environment = Some(environment.downgrade());
+    }
     environment
   }
 
@@ -151,3 +166,23 @@ pub struct HostRoot(pub(crate) ArenaHandle);
 /// allocation generation remains live.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WeakHostRoot(pub(crate) WeakArenaHandle);
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn empty_environment_cache_recovers_after_reclamation_in_a_fork() {
+    let mut memory = VmMemory::new();
+    let first = memory.allocate_closure_environment(Vec::new());
+    let mut fork = memory.fork();
+    let shared = fork.allocate_closure_environment(Vec::new());
+    assert_eq!(first.identity(), shared.identity());
+    first.reclaim();
+    let replacement = fork.allocate_closure_environment(Vec::new());
+    assert_ne!(replacement.identity(), first.identity());
+    assert!(replacement.borrow().is_empty());
+    let parent_replacement = memory.allocate_closure_environment(Vec::new());
+    assert!(parent_replacement.borrow().is_empty());
+  }
+}
