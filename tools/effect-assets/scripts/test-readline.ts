@@ -1,10 +1,11 @@
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { blitzCommand } from "./blitz-command.ts";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const ROOT = new URL("..", import.meta.url).pathname;
 const REPOSITORY = new URL("../..", import.meta.url).pathname;
-const blitzBinary = join(REPOSITORY, "target/debug/blitz");
+
 
 const fixture = `
 import EventEmitter from "node:events";
@@ -69,11 +70,9 @@ const temporary = mkdtempSync(join(ROOT, ".readline-smoke-"));
 try {
   const script = join(temporary, "fixture.mjs");
   writeFileSync(script, fixture, "utf8");
-  const command = existsSync(blitzBinary) ? blitzBinary : "cargo";
-  const args = command === blitzBinary
-    ? ["--node-compat", "tooling", "--module", script]
-    : ["run", "-q", "-p", "blitz-cli", "--", "--node-compat", "tooling", "--module", script];
+  const { command, args } = blitzCommand(["--node-compat", "tooling", "--module", script]);
   const result = spawnSync(command, args, { cwd: REPOSITORY, encoding: "utf8" });
+  if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`${command} failed:\n${result.stdout}\n${result.stderr}`);
   if (!result.stdout.includes("readline smoke passed")) throw new Error("Blitz readline smoke produced no success marker");
   console.log("Blitz node:readline and node:readline/promises smoke passed.");

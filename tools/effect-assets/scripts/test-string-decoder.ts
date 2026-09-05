@@ -1,10 +1,10 @@
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { blitzCommand } from "./blitz-command.ts";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const REPOSITORY = resolve(ROOT, "../..");
-const blitzBinary = join(REPOSITORY, "target/debug/blitz");
 
 const fixture = `
 import stringDecoder, { StringDecoder } from "../src/facades/node-string-decoder.js";
@@ -21,8 +21,14 @@ const state = decoder => ({
 });
 const decoder = new StringDecoder("UTF-8");
 const chunks = [new Uint8Array([0xf0]), new Uint8Array([0x9f, 0x92]), new Uint8Array([0xa9])];
-const writes = chunks.map(chunk => decoder.write(chunk));
-const states = chunks.map(() => state(decoder));
+const steps = chunks.map(chunk => {
+  const output = decoder.write(chunk);
+  return { output, state: state(decoder) };
+});
+const writes = steps.map(step => step.output);
+const states = steps.map(step => step.state);
+assert(JSON.stringify(states.map(value => value.need)) === "[3,1,0]", "per-write pending byte counts");
+assert(JSON.stringify(states.map(value => value.total)) === "[4,4,0]", "per-write sequence lengths");
 const ended = decoder.end();
 
 const pending = new StringDecoder();
@@ -58,9 +64,10 @@ console.log(JSON.stringify({ writes, states, ended, pendingWrite, pendingState, 
 
 const run = (command: string, args: readonly string[], cwd: string) => {
   const result = spawnSync(command, [...args], { cwd, encoding: "utf8" });
+  if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`${command} failed:\n${result.stdout}\n${result.stderr}`);
   const line = result.stdout.trim().split("\n").at(-1);
-  if (line === undefined) throw new Error(`${command} produced no JSON output`);
+  if (!line) throw new Error(`${command} produced no JSON output`);
   return JSON.parse(line) as unknown;
 };
 
@@ -69,9 +76,8 @@ try {
   const script = join(temporary, "fixture.mjs");
   writeFileSync(script, fixture, "utf8");
   const nodeResult = run(process.execPath, [script], temporary);
-  const blitzResult = existsSync(blitzBinary)
-    ? run(blitzBinary, ["--module", script], REPOSITORY)
-    : run("cargo", ["run", "-q", "-p", "blitz-cli", "--", "--module", script], REPOSITORY);
+  const { command, args } = blitzCommand(["--module", script]);
+  const blitzResult = run(command, args, REPOSITORY);
 
   if (JSON.stringify(blitzResult) !== JSON.stringify(nodeResult)) {
     throw new Error(`Node and Blitz string_decoder results differ:\nNode: ${JSON.stringify(nodeResult)}\nBlitz: ${JSON.stringify(blitzResult)}`);

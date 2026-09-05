@@ -1,10 +1,11 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { blitzCommand } from "./blitz-command.ts";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const REPOSITORY = resolve(ROOT, "../..");
-const blitzBinary = join(REPOSITORY, "target/debug/blitz");
+
 const sourceRoot = join(ROOT, "src/facades");
 
 const fixture = `
@@ -168,11 +169,10 @@ try {
   const entry = join(temporary, "fixture.mjs");
   writeFileSync(entry, fixture, "utf8");
 
-  const command = existsSync(blitzBinary) ? blitzBinary : "cargo";
-  const args = existsSync(blitzBinary)
-    ? ["--module", entry]
-    : ["run", "-q", "-p", "blitz-cli", "--", "--module", entry];
-  const result = spawnSync(command, args, { cwd: REPOSITORY, encoding: "utf8", timeout: 30_000 });
+  const { command, args } = blitzCommand(["--module", entry]);
+  // A clean Cargo target also needs time to compile the executable.
+  const result = spawnSync(command, args, { cwd: REPOSITORY, encoding: "utf8", timeout: command === "cargo" ? 300_000 : 30_000 });
+  if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`${command} failed:\n${result.stdout}\n${result.stderr}`);
   if (!result.stdout.includes("Blitz node stream smoke passed")) {
     throw new Error(`Blitz stream smoke produced no success marker:\n${result.stdout}\n${result.stderr}`);

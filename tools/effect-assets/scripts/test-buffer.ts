@@ -1,10 +1,11 @@
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { blitzCommand } from "./blitz-command.ts";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const REPOSITORY = resolve(ROOT, "../..");
-const blitzBinary = join(REPOSITORY, "target/debug/blitz");
+
 const fixture = `
 import bufferModule, { Buffer } from "node:buffer";
 import { randomFillSync, timingSafeEqual } from "node:crypto";
@@ -41,9 +42,10 @@ console.log(JSON.stringify(output));
 
 const run = (command: string, args: readonly string[], cwd: string) => {
   const result = spawnSync(command, [...args], { cwd, encoding: "utf8" });
+  if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`${command} failed:\n${result.stdout}\n${result.stderr}`);
   const line = result.stdout.trim().split("\n").at(-1);
-  if (line === undefined) throw new Error(`${command} produced no JSON output`);
+  if (!line) throw new Error(`${command} produced no JSON output`);
   return JSON.parse(line) as unknown;
 };
 
@@ -52,9 +54,8 @@ try {
   const script = join(temporary, "fixture.mjs");
   writeFileSync(script, fixture, "utf8");
   const nodeResult = run(process.execPath, [script], temporary);
-  const blitzResult = existsSync(blitzBinary)
-    ? run(blitzBinary, ["--node-compat", "tooling", "--module", script], REPOSITORY)
-    : run("cargo", ["run", "-q", "-p", "blitz-cli", "--", "--node-compat", "tooling", "--module", script], REPOSITORY);
+  const { command, args } = blitzCommand(["--node-compat", "tooling", "--module", script]);
+  const blitzResult = run(command, args, REPOSITORY);
   if (JSON.stringify(blitzResult) !== JSON.stringify(nodeResult)) {
     throw new Error(`Node and Blitz Buffer results differ:\nNode: ${JSON.stringify(nodeResult)}\nBlitz: ${JSON.stringify(blitzResult)}`);
   }

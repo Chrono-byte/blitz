@@ -1,10 +1,10 @@
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { blitzCommand } from "./blitz-command.ts";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const REPOSITORY = resolve(ROOT, "../..");
-const blitzBinary = join(REPOSITORY, "target/debug/blitz");
 
 const fixture = (specifier: string) => `
 import * as p from ${JSON.stringify(specifier)};
@@ -45,9 +45,10 @@ console.log(JSON.stringify(result));
 
 const run = (command: string, args: readonly string[], cwd: string) => {
   const result = spawnSync(command, [...args], { cwd, encoding: "utf8" });
+  if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`${command} failed:\n${result.stdout}\n${result.stderr}`);
   const line = result.stdout.trim().split("\n").at(-1);
-  if (line === undefined) throw new Error(`${command} produced no JSON output`);
+  if (!line) throw new Error(`${command} produced no JSON output`);
   return JSON.parse(line) as unknown;
 };
 
@@ -57,9 +58,8 @@ try {
   writeFileSync(script, fixture("../src/facades/node-punycode.js"), "utf8");
   const nodeResult = run(process.execPath, [script], temporary);
 
-  const blitzResult = existsSync(blitzBinary)
-    ? run(blitzBinary, ["--module", script], REPOSITORY)
-    : run("cargo", ["run", "-q", "-p", "blitz-cli", "--", "--module", script], REPOSITORY);
+  const { command, args } = blitzCommand(["--module", script]);
+  const blitzResult = run(command, args, REPOSITORY);
 
   if (JSON.stringify(blitzResult) !== JSON.stringify(nodeResult)) {
     throw new Error(`Node 24 and Blitz punycode results differ:\nNode: ${JSON.stringify(nodeResult)}\nBlitz: ${JSON.stringify(blitzResult)}`);

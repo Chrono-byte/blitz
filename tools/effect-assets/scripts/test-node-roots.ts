@@ -1,11 +1,10 @@
+import { blitzCommand } from "./blitz-command.ts";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const REPOSITORY = resolve(ROOT, "../..");
-const blitzBinary = join(REPOSITORY, "target/debug/blitz");
 
 const fixture = `
 import constants, * as namedConstants from "../src/facades/node-constants.js";
@@ -80,11 +79,9 @@ const temporary = mkdtempSync(join(ROOT, ".node-roots-smoke-"));
 try {
   const script = join(temporary, "fixture.mjs");
   writeFileSync(script, fixture, "utf8");
-  const command = existsSync(blitzBinary) ? blitzBinary : "cargo";
-  const args = existsSync(blitzBinary)
-    ? ["--node-compat", "full", "--module", script]
-    : ["run", "-q", "-p", "blitz-cli", "--", "--node-compat", "full", "--module", script];
+  const { command, args } = blitzCommand(["--node-compat", "full", "--module", script]);
   const result = spawnSync(command, args, { cwd: REPOSITORY, encoding: "utf8" });
+  if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`${command} failed:\n${result.stdout}\n${result.stderr}`);
   if (!result.stdout.includes("node roots smoke passed")) throw new Error("Blitz node roots smoke produced no success marker");
   console.log("Blitz node:domain, node:sea, node:constants, node:tty, and node:trace_events smoke passed.");

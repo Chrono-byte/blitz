@@ -127,3 +127,15 @@ pnpm run typecheck:effect
 ../../target/debug/blitz check --strict fixtures/effect-foundation-blitz-positive.ts
 ! ../../target/debug/blitz check --strict fixtures/effect-foundation-blitz-negative.ts
 ```
+
+## Running verification
+
+Use Node 24.18.0 for compatibility checks, matching `docs/node-compat-support.json`.
+Run `pnpm run typecheck` and `pnpm test` from this directory. Runtime smoke tests
+use `cargo run --locked` to check source freshness and honor `CARGO_TARGET_DIR`.
+Set `BLITZ_BIN` to an absolute executable path only when testing a specific
+binary; this override skips Cargo's freshness check.
+
+`pnpm run test:facade-gc` checks that discarded facade instances can be collected
+under Node with GC exposed. The smoke tests exercise facade behavior in Blitz;
+the engine's `weak_map_` tests cover its weak-key reachability rules.

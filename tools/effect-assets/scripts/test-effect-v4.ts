@@ -1,3 +1,4 @@
+import { blitzCommand } from "./blitz-command.ts";
 import { strict as assert } from "node:assert";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -8,7 +9,6 @@ import { rollup } from "rollup";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const EFFECT_ENTRY = resolve(ROOT, "node_modules/effect-v4/dist/index.js");
-const BLITZ = resolve(ROOT, "../../target/debug/blitz");
 const MARKER = "BLITZ_EFFECT_V4_RESULT=";
 
 const source = `
@@ -75,7 +75,9 @@ try {
   const executable = written.output.find(item => item.type === "chunk" && item.isEntry);
   assert(executable && executable.type === "chunk", "Effect v4 bundle must contain an entry module");
   assert(readFileSync(output, "utf8").length > 0, "Effect v4 entry must not be empty");
-  const execution = spawnSync(BLITZ, [output], { encoding: "utf8" });
+  const { command, args } = blitzCommand([output]);
+  const execution = spawnSync(command, args, { cwd: resolve(ROOT, "../.."), encoding: "utf8" });
+  if (execution.error) throw execution.error;
   assert.equal(execution.status, 0, `${execution.stderr}\n${execution.stdout}`);
 
   const line = execution.stdout
