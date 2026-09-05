@@ -1,1 +1,0 @@
-import{getCurrentVersion as a}from"blitz-internal:effect/dist/esm/internal/version.js";const o=`effect/GlobalValue/globalStoreId/${a()}`;let l;const r=(e,t)=>{if(!l){globalThis[o]??=new Map;l=globalThis[o]}if(!l.has(e)){l.set(e,t())}return l.get(e)};export{r as globalValue};

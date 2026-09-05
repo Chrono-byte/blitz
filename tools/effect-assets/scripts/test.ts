@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 const ROOT = resolve(import.meta.dirname, "..");
-const ASSETS = resolve(ROOT, "../../crates/blitz-runtime/assets/effect/3.16.7");
+const ASSETS = resolve(ROOT, "../../crates/blitz-runtime/assets/effect/3.22.1");
 const supported = ["effect", "effect/Effect", "effect/Cause", "effect/Exit", "effect/Fiber", "effect/FiberId", "effect/HashSet", "effect/Chunk", "effect/Option", "effect/Either", "effect/Duration", "effect/Function", "effect/Context", "effect/Layer", "effect/Ref", "effect/Stream", "effect/Scope", "effect/Schedule", "effect/Match"];
 const manifest = JSON.parse(readFileSync(join(ASSETS, "manifest.json"), "utf8")) as {
   entries: { specifier: string; source: { path: string }; declaration?: { path: string } }[];
@@ -18,7 +18,7 @@ const requiredExports = new Map<string, readonly string[]>([
   ["effect/Stream", ["acquireRelease", "asyncScoped", "runCollect", "scoped", "scopedWith"]],
 ]);
 
-assert(manifest.package.version === "3.16.7", "the generated package version must be exact");
+assert(manifest.package.version === "3.22.1", "the generated package version must be exact");
 for (const specifier of supported) {
   const entry = entries.get(specifier);
   if (!entry) throw new Error(`missing supported entry ${specifier}`);

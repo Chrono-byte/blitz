@@ -21,19 +21,17 @@ import {
 const connection = createConnection(process.stdin, process.stdout);
 const documents = new TextDocuments(TextDocument);
 
-connection.onInitialize(
-  (): InitializeResult => ({
-    capabilities: {
-      textDocumentSync: TextDocumentSyncKind.Incremental,
-      completionProvider: { triggerCharacters: ["."] },
-      definitionProvider: true,
-      documentSymbolProvider: true,
-      hoverProvider: true,
-      inlayHintProvider: true,
-    },
-    serverInfo: { name: "blitz-language-server", version: "0.1.0" },
-  }),
-);
+connection.onInitialize((): InitializeResult => ({
+  capabilities: {
+    textDocumentSync: TextDocumentSyncKind.Incremental,
+    completionProvider: { triggerCharacters: ["."] },
+    definitionProvider: true,
+    documentSymbolProvider: true,
+    hoverProvider: true,
+    inlayHintProvider: true,
+  },
+  serverInfo: { name: "blitz-language-server", version: "0.1.0" },
+}));
 
 documents.onDidChangeContent(({ document }) => {
   const version = document.version;

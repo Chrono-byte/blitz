@@ -8,4 +8,4 @@ Third-party material retains its applicable upstream license and notices. This s
 
 ## Effect
 
-`crates/blitz-runtime/assets/effect/3.16.7/` contains generated, vendored assets derived from Effect 3.16.7. They retain Effect's upstream MIT license, reproduced at `crates/blitz-runtime/assets/effect/3.16.7/LICENSE`, and are excluded from Blitz's MPL SPDX-header insertion.
+`crates/blitz-runtime/assets/effect/3.22.1/` contains generated, vendored assets derived from Effect 3.22.1. They retain Effect's upstream MIT license, reproduced at `crates/blitz-runtime/assets/effect/3.22.1/LICENSE`, and are excluded from Blitz's MPL SPDX-header insertion.

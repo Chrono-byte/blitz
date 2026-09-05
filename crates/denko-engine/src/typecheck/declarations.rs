@@ -44,17 +44,20 @@ impl TypeContext {
       let mut export_aliases = Vec::new();
       for statement in &declaration.session.program().body {
         match statement {
+          oast::Statement::ExportDeclaration(export) => {
+            self.register_module_declaration(&export.declaration, &mut local)?;
+            module_declaration_names(
+              &export.declaration,
+              &mut exported_values,
+              &mut exported_types,
+            );
+          }
           oast::Statement::ExportNamedDeclaration(export) => {
-            if let Some(declaration) = &export.declaration {
-              self.register_module_declaration(declaration, &mut local)?;
-              module_declaration_names(declaration, &mut exported_values, &mut exported_types);
-            } else if export.source.is_none() {
-              for specifier in &export.specifiers {
-                export_aliases.push((
-                  module_export_name(&specifier.local)?,
-                  module_export_name(&specifier.exported)?,
-                ));
-              }
+            for specifier in &export.specifiers {
+              export_aliases.push((
+                module_export_name(&specifier.local)?,
+                module_export_name(&specifier.exported)?,
+              ));
             }
           }
           oast::Statement::TSTypeAliasDeclaration(_)
@@ -160,10 +163,13 @@ impl TypeContext {
       oast::Statement::ImportDeclaration(import) => {
         self.register_module_import(import, false)?;
       }
-      oast::Statement::ExportNamedDeclaration(export) => {
-        if let Some(source) = &export.source {
-          self.register_reexport(source.value.as_str(), &export.specifiers, module, false)?;
-        }
+      oast::Statement::ExportFromDeclaration(export) => {
+        self.register_reexport(
+          export.source.value.as_str(),
+          &export.specifiers,
+          module,
+          false,
+        )?;
       }
       oast::Statement::ExportAllDeclaration(export) => {
         self.register_export_all(export, module)?;
@@ -182,10 +188,13 @@ impl TypeContext {
       oast::Statement::ImportDeclaration(import) => {
         self.register_module_import(import, true)?;
       }
-      oast::Statement::ExportNamedDeclaration(export) => {
-        if let Some(source) = &export.source {
-          self.register_reexport(source.value.as_str(), &export.specifiers, module, true)?;
-        }
+      oast::Statement::ExportFromDeclaration(export) => {
+        self.register_reexport(
+          export.source.value.as_str(),
+          &export.specifiers,
+          module,
+          true,
+        )?;
       }
       oast::Statement::ExportAllDeclaration(export) => {
         self.register_export_all(export, module)?;
@@ -443,10 +452,8 @@ impl TypeContext {
           self.register_source_import(import, Type::Any);
         }
       }
-      oast::Statement::ExportNamedDeclaration(export) => {
-        if let Some(declaration) = &export.declaration {
-          self.register_exported_declaration(declaration)?;
-        }
+      oast::Statement::ExportDeclaration(export) => {
+        self.register_exported_declaration(&export.declaration)?;
       }
       _ => {}
     }

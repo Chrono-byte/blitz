@@ -331,8 +331,8 @@ impl Compiler {
     return_type: Option<Type>,
   ) -> Result<(Function, usize), crate::errors::CompilerError> {
     let _env_len = self.locals.len();
-    let function_is_strict = self.strict_context || Self::has_use_strict_directive(&func.body);
-    let body_has_use_strict = Self::has_use_strict_directive(&func.body);
+    let body_has_use_strict = func.has_use_strict_directive();
+    let function_is_strict = self.strict_context || body_has_use_strict;
     let has_simple_parameter_list = func.params.rest.is_none()
       && func.params.items.iter().all(|param| {
         matches!(param.pattern, oast::BindingPattern::BindingIdentifier(_))
@@ -510,50 +510,22 @@ impl Compiler {
     }
     let parameter_environment_slot_names = inner.environment_slot_names();
 
-    inner.enter_function_body_scope_with_vars(&func.body.statements, !has_simple_parameter_list);
-    inner.pre_declare_functions_oast_stmts(&func.body.statements);
-    inner.emit_hoisted_function_decls_oast_stmts(&func.body.statements)?;
+    let statements = match &func.body {
+      oast::ArrowFunctionBody::FunctionBody(body) => body.statements.as_slice(),
+      _ => &[],
+    };
+    inner.enter_function_body_scope_with_vars(statements, !has_simple_parameter_list);
+    inner.pre_declare_functions_oast_stmts(statements);
+    inner.emit_hoisted_function_decls_oast_stmts(statements)?;
 
-    if has_simple_parameter_list {
-      if func.expression && func.body.statements.len() == 1 {
-        if let oast::Statement::ExpressionStatement(expr_stmt) = &func.body.statements[0] {
-          inner.compile_expr_oast_tail(&expr_stmt.expression)?;
-          inner.emit(LoweringOpcode::Return, LINE);
-        } else {
-          for stmt in &func.body.statements {
-            if !matches!(stmt, oast::Statement::FunctionDeclaration(_)) {
-              inner.compile_statement_oast(stmt)?;
-            }
-          }
-          inner.emit_fallthrough_return(LINE);
-        }
-      } else {
-        for stmt in &func.body.statements {
-          if matches!(stmt, oast::Statement::FunctionDeclaration(_)) {
-            continue;
-          }
+    if let Some(expression) = func.body.as_expression() {
+      inner.compile_expr_oast_tail(expression)?;
+      inner.emit(LoweringOpcode::Return, LINE);
+    } else {
+      for stmt in statements {
+        if !matches!(stmt, oast::Statement::FunctionDeclaration(_)) {
           inner.compile_statement_oast(stmt)?;
         }
-        inner.emit_fallthrough_return(LINE);
-      }
-    } else if func.expression && func.body.statements.len() == 1 {
-      if let oast::Statement::ExpressionStatement(expr_stmt) = &func.body.statements[0] {
-        inner.compile_expr_oast_tail(&expr_stmt.expression)?;
-        inner.emit(LoweringOpcode::Return, LINE);
-      } else {
-        for stmt in &func.body.statements {
-          if !matches!(stmt, oast::Statement::FunctionDeclaration(_)) {
-            inner.compile_statement_oast(stmt)?;
-          }
-        }
-        inner.emit_fallthrough_return(LINE);
-      }
-    } else {
-      for stmt in &func.body.statements {
-        if matches!(stmt, oast::Statement::FunctionDeclaration(_)) {
-          continue;
-        }
-        inner.compile_statement_oast(stmt)?;
       }
       inner.emit_fallthrough_return(LINE);
     }

@@ -33,7 +33,7 @@ runtime usable and independently testable.
 
 Already present:
 
-- `effect@3.16.7` is pinned in `tools/effect-assets`.
+- `effect@3.22.1` is pinned in `tools/effect-assets`.
 - The generated upstream source graph is canonicalized under
   `blitz-internal:effect/*` and committed.
 - The engine now supports validated, parser-free prelinked module records,

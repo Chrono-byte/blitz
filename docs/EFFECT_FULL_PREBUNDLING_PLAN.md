@@ -18,7 +18,7 @@ import extraction, AST/ESTree linking, typechecking, and compilation.
 ## Objective
 
 Produce one deterministic, committed, network-free runtime artifact containing
-everything required to instantiate and execute the supported Effect 3.16.7
+everything required to instantiate and execute the supported Effect 3.22.1
 graph and stable Blitz stdlib JavaScript modules without parsing or compiling
 any bundled JavaScript at runtime.
 

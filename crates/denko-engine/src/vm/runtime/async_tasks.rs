@@ -421,8 +421,6 @@ impl Vm {
       on_rejected: Vec::new(),
     })));
     let mut child = self.fork_execution();
-    child.modules.current_specifier = self.modules.current_specifier.clone();
-    child.modules.table = self.modules.table.clone();
     child.execution.defer_job_checkpoint = true;
     child.prepare_root(chunk);
     child.execution.active.this_value = Value::Undefined;

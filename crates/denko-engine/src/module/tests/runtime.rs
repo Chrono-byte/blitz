@@ -639,3 +639,74 @@ fn shadowrealm_import_value_waits_for_async_module_evaluation() {
     crate::value::PromiseState::Fulfilled(Value::Number(42.0))
   ));
 }
+
+#[test]
+fn suspended_functions_preserve_live_module_imports() {
+  for reader in [
+    crate::js!(
+      module,
+      "export function* read() { yield value; yield value; }"
+    ),
+    crate::js!(
+      module,
+      "export async function* read() { yield value; yield value; }"
+    ),
+    crate::js!(
+      module,
+      "export async function read() { await 0; return value; }"
+    ),
+  ] {
+    let mut vm = Vm::new(Rc::new(RefCell::new(ObjectData::new())));
+    let source = format!("import {{ value }} from 'test:values'; {reader}");
+    let entry = prepare_async_graph(
+      &mut vm,
+      &[
+        (
+          "test:values",
+          crate::js!(
+            module,
+            "export let value = 41; export function update() { value = 42; }"
+          ),
+        ),
+        ("test:reader", &source),
+        (
+          "test:entry",
+          crate::js!(
+            module,
+            r#"
+          import { read } from 'test:reader';
+          import { update } from 'test:values';
+          const result = read();
+          if (typeof result.next === 'function') {
+            globalThis.first = (await result.next()).value;
+            update();
+            globalThis.second = (await result.next()).value;
+          } else {
+            globalThis.first = await result;
+            update();
+            globalThis.second = await read();
+          }
+        "#
+          ),
+        ),
+      ],
+      "test:entry",
+    );
+    let loader = vm.module_loader_handle();
+    let evaluation =
+      evaluate_entry_promise_shared(&loader, &entry, &mut vm, false).expect("evaluate module");
+    vm.flush_microtasks()
+      .expect("complete suspended reads");
+    assert_evaluation_fulfilled(&evaluation);
+    assert_eq!(
+      vm.get_global("first"),
+      Some(Value::Number(41.0)),
+      "{reader}"
+    );
+    assert_eq!(
+      vm.get_global("second"),
+      Some(Value::Number(42.0)),
+      "{reader}"
+    );
+  }
+}

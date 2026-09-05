@@ -73,7 +73,7 @@ impl TypeContext {
 
     self.check_function_body(
       &function.params,
-      body,
+      &body.statements,
       function.return_type.as_deref(),
       function.r#async || function.generator,
       function.params.span.end as usize,
@@ -86,17 +86,14 @@ impl TypeContext {
     function: &oast::ArrowFunctionExpression<'_>,
   ) -> Result<Type, TypeCheckerError> {
     let hint_checkpoint = self.inlay_hints.len();
-    let implicit_return = if function.expression {
-      match function.body.statements.as_slice() {
-        [oast::Statement::ExpressionStatement(statement)] => Some(&statement.expression),
-        _ => None,
-      }
-    } else {
-      None
+    let implicit_return = function.body.as_expression();
+    let statements = match &function.body {
+      oast::ArrowFunctionBody::FunctionBody(body) => body.statements.as_slice(),
+      _ => &[],
     };
     match self.check_function_body(
       &function.params,
-      &function.body,
+      statements,
       function.return_type.as_deref(),
       function.r#async,
       function.params.span.end as usize,
@@ -113,7 +110,7 @@ impl TypeContext {
   pub(super) fn check_function_body(
     &mut self,
     params: &oast::FormalParameters<'_>,
-    body: &oast::FunctionBody<'_>,
+    body: &[oast::Statement<'_>],
     explicit_return_type: Option<&oast::TSTypeAnnotation<'_>>,
     async_or_generator: bool,
     return_hint_position: usize,
@@ -177,7 +174,6 @@ impl TypeContext {
       })
     } else {
       body
-        .statements
         .iter()
         .try_for_each(|statement| self.check_statement_oast(statement))
     };
@@ -243,17 +239,16 @@ impl TypeContext {
 
   pub(super) fn infer_simple_return_type(
     &self,
-    body: &oast::FunctionBody<'_>,
+    body: &[oast::Statement<'_>],
     implicit_return: Option<&oast::Expression<'_>>,
     returns: &[Type],
   ) -> Option<Type> {
     let simple_body = implicit_return.is_some()
-      || body.statements.is_empty()
+      || body.is_empty()
       || (body
-        .statements
         .last()
         .is_some_and(|statement| matches!(statement, oast::Statement::ReturnStatement(_)))
-        && body.statements[..body.statements.len().saturating_sub(1)]
+        && body[..body.len().saturating_sub(1)]
           .iter()
           .all(|statement| matches!(statement, oast::Statement::VariableDeclaration(_))));
     if !simple_body {
@@ -304,10 +299,8 @@ impl TypeContext {
       OStmt::FunctionDeclaration(function) => {
         self.check_function(function)?;
       }
-      OStmt::ExportNamedDeclaration(export) => {
-        if let Some(declaration) = &export.declaration {
-          self.check_exported_declaration(declaration)?;
-        }
+      OStmt::ExportDeclaration(export) => {
+        self.check_exported_declaration(&export.declaration)?;
       }
       OStmt::ExpressionStatement(e) => {
         drop(self.type_of_expr_oast(&e.expression)?);

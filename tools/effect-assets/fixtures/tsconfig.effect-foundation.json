@@ -6,10 +6,9 @@
     "strict": true,
     "noEmit": true,
     "skipLibCheck": false,
-    "baseUrl": "..",
     "paths": {
-      "effect": ["declarations/effect/index.d.ts"],
-      "effect/*": ["declarations/effect/*.d.ts"]
+      "effect": ["../declarations/effect/index.d.ts"],
+      "effect/*": ["../declarations/effect/*.d.ts"]
     }
   },
   "files": ["effect-foundation.ts"]

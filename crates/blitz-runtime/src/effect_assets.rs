@@ -8,7 +8,7 @@
 /// The pinned manifests are policy inputs, not source-module registrations.
 pub(crate) const EFFECT_MANIFEST_BYTES: &[u8] = include_bytes!(concat!(
   env!("CARGO_MANIFEST_DIR"),
-  "/assets/effect/3.16.7/manifest.json"
+  "/assets/effect/3.22.1/manifest.json"
 ));
 /// Generated Blitz stdlib manifest pinned by the runtime graph wrapper.
 pub(crate) const STDLIB_MANIFEST_BYTES: &[u8] = include_bytes!(concat!(
@@ -33,7 +33,7 @@ pub struct EmbeddedEffectModule {
 
 include!(concat!(
   env!("CARGO_MANIFEST_DIR"),
-  "/assets/effect/3.16.7/embedded.rs"
+  "/assets/effect/3.22.1/embedded.rs"
 ));
 
 mod generated_stdlib {

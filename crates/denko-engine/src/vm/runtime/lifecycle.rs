@@ -216,8 +216,9 @@ impl Vm {
       },
       modules: ModuleState {
         loader: Rc::clone(&self.modules.loader),
-        table: Vec::new(),
-        current_specifier: None,
+        // Binding cells remain shared so suspended functions observe live exports.
+        table: self.modules.table.clone(),
+        current_specifier: self.modules.current_specifier.clone(),
       },
       jobs: JobState {
         active_depth: 0,

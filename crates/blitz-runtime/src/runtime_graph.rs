@@ -23,7 +23,7 @@ pub const RUNTIME_ABI_VERSION: u16 = 1;
 /// ABI version implemented by the runtime's private host bridge.
 pub const HOST_BRIDGE_ABI_VERSION: u16 = 1;
 /// Effect release accepted by this runtime.
-pub const EFFECT_VERSION: &str = "3.16.7";
+pub const EFFECT_VERSION: &str = "3.22.1";
 /// Stable name of the transitional application transport primitive.
 pub const APP_TRANSPORT_PRIMITIVE: &str = "app-transport";
 /// Stable name of the Effect-native filesystem host primitive.
@@ -39,7 +39,7 @@ pub const RUNTIME_CONTROL_PRIMITIVE: &str = "runtime-control";
 /// Package name used by a graph containing Effect and Blitz stdlib modules.
 pub const RUNTIME_GRAPH_PACKAGE_NAME: &str = "effect+blitz-stdlib";
 /// Package version used by the pinned combined runtime graph.
-pub const RUNTIME_GRAPH_PACKAGE_VERSION: &str = "effect-3.16.7+runtime-1";
+pub const RUNTIME_GRAPH_PACKAGE_VERSION: &str = "effect-3.22.1+runtime-1";
 /// Version of the runtime bundle envelope.
 pub const RUNTIME_BUNDLE_WIRE_VERSION: u16 = 1;
 /// Methods required by the application transport adapter.

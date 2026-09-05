@@ -35,8 +35,8 @@ impl Compiler {
             }
           }
         }
-        oast::Statement::ExportNamedDeclaration(export) => {
-          if let Some(oast::Declaration::FunctionDeclaration(fn_decl)) = &export.declaration
+        oast::Statement::ExportDeclaration(export) => {
+          if let oast::Declaration::FunctionDeclaration(fn_decl) = &export.declaration
             && let Some(ident) = &fn_decl.id
           {
             let name = ident.name.to_string();
@@ -81,8 +81,8 @@ impl Compiler {
     for stmt in stmts {
       let variable = match stmt {
         oast::Statement::VariableDeclaration(variable) => Some(variable.as_ref()),
-        oast::Statement::ExportNamedDeclaration(export) => match &export.declaration {
-          Some(oast::Declaration::VariableDeclaration(variable)) => Some(variable.as_ref()),
+        oast::Statement::ExportDeclaration(export) => match &export.declaration {
+          oast::Declaration::VariableDeclaration(variable) => Some(variable.as_ref()),
           _ => None,
         },
         _ => None,
@@ -121,8 +121,8 @@ impl Compiler {
 
       let class = match stmt {
         oast::Statement::ClassDeclaration(class) => Some(class.as_ref()),
-        oast::Statement::ExportNamedDeclaration(export) => match &export.declaration {
-          Some(oast::Declaration::ClassDeclaration(class)) => Some(class.as_ref()),
+        oast::Statement::ExportDeclaration(export) => match &export.declaration {
+          oast::Declaration::ClassDeclaration(class) => Some(class.as_ref()),
           _ => None,
         },
         oast::Statement::ExportDefaultDeclaration(export) => match &export.declaration {
@@ -177,8 +177,8 @@ impl Compiler {
             }
           }
         }
-        oast::Statement::ExportNamedDeclaration(export) => {
-          if let Some(oast::Declaration::FunctionDeclaration(f)) = &export.declaration
+        oast::Statement::ExportDeclaration(export) => {
+          if let oast::Declaration::FunctionDeclaration(f) = &export.declaration
             && let Some(ident) = &f.id
           {
             let name = ident.name.to_string();
@@ -249,8 +249,8 @@ impl Compiler {
             }
           }
         }
-        oast::Statement::ExportNamedDeclaration(export) => {
-          if let Some(oast::Declaration::FunctionDeclaration(f)) = &export.declaration
+        oast::Statement::ExportDeclaration(export) => {
+          if let oast::Declaration::FunctionDeclaration(f) = &export.declaration
             && let Some(ident) = &f.id
           {
             let fname = ident.name.to_string();

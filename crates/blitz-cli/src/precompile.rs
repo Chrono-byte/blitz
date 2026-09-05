@@ -234,7 +234,7 @@ fn write_or_check(
 }
 
 fn build_artifact(root: &Path) -> Result<Vec<u8>, String> {
-  let effect_root = root.join("crates/blitz-runtime/assets/effect/3.16.7");
+  let effect_root = root.join("crates/blitz-runtime/assets/effect/3.22.1");
   let stdlib_root = root.join("crates/blitz-runtime/assets/stdlib");
   let effect_manifest_path = effect_root.join("manifest.json");
   let stdlib_manifest_path = stdlib_root.join("manifest.json");

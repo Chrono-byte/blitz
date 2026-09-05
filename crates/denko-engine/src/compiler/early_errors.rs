@@ -512,7 +512,11 @@ impl Compiler {
     &self,
     class: &oast::Class<'_>,
   ) -> Result<(), crate::errors::CompilerError> {
-    if let Some(super_class) = &class.super_class {
+    if let Some(super_class) = class
+      .heritage
+      .as_ref()
+      .map(|heritage| &heritage.expression)
+    {
       self.validate_early_errors_in_expression(super_class)?;
     }
     let constructor_count = class
@@ -603,7 +607,14 @@ impl Compiler {
             self.validate_early_errors_in_expression(initializer)?;
           }
         }
-        self.validate_early_errors_in_statements(&a.body.statements, false, true)
+        match &a.body {
+          oast::ArrowFunctionBody::FunctionBody(body) => {
+            self.validate_early_errors_in_statements(&body.statements, false, true)
+          }
+          body => {
+            self.validate_early_errors_in_expression(body.as_expression().expect("expression body"))
+          }
+        }
       }
       E::ClassExpression(c) => self.validate_class(c),
       E::ParenthesizedExpression(p) => self.validate_early_errors_in_expression(&p.expression),
@@ -823,6 +834,8 @@ impl Compiler {
           | oast::Statement::ExportAllDeclaration(_)
           | oast::Statement::ExportDefaultDeclaration(_)
           | oast::Statement::ExportNamedDeclaration(_)
+          | oast::Statement::ExportDeclaration(_)
+          | oast::Statement::ExportFromDeclaration(_)
       ) && !allow_module_declarations
       {
         return Err(crate::errors::CompilerError::from(

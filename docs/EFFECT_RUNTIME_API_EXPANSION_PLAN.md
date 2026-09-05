@@ -28,7 +28,7 @@ is a separately reviewable program with smaller commit boundaries.
 
 ## Global decisions
 
-1. The pinned `effect@3.16.7` declarations and runtime behavior are the source
+1. The pinned `effect@3.22.1` declarations and runtime behavior are the source
    of truth. Curated declarations may omit APIs but may not alter the semantics
    or types of APIs they include. Existing compatibility transforms, including
    the temporary internal `WeakMap` to `Map` rewrite, must be explicitly listed

@@ -434,6 +434,6 @@ export const STDLIB_INPUTS = [
 
 export const STDLIB_FORMAT_VERSION = 1;
 export const STDLIB_VERSION = "1";
-export const EFFECT_VERSION = "3.16.7";
+export const EFFECT_VERSION = "3.22.1";
 export const RUNTIME_ABI_VERSION = 1;
 export const HOST_ABI_VERSION = 1;

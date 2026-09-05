@@ -8,9 +8,9 @@ description = "Application JavaScript/TypeScript runtime powered by Denko"
 [dependencies]
 denko.workspace = true
 bytes.workspace = true
-crc32fast = "1.5.0"
+crc32fast = "1.5.1"
 fastwebsockets.workspace = true
-getrandom = "0.2"
+getrandom = "0.4.3"
 http-body-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true

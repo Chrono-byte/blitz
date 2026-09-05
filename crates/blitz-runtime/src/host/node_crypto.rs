@@ -14,7 +14,7 @@ use denko::Vm;
 use denko::errors::RuntimeError;
 use denko::gc;
 use denko::value::{ArrayData, ObjectData, Uint8ArrayByteView, Value};
-use getrandom::getrandom;
+use getrandom::fill;
 
 use super::{object, set};
 
@@ -97,7 +97,7 @@ fn random_uuid(
   _args: &[Value],
 ) -> Result<Value, RuntimeError> {
   let mut bytes = [0_u8; 16];
-  if let Err(error) = getrandom(&mut bytes) {
+  if let Err(error) = fill(&mut bytes) {
     return Ok(entropy_failure(vm, "randomUUID", error.to_string()));
   }
 
@@ -125,7 +125,7 @@ fn random_bytes(
     Err(error) => return Ok(error),
   };
   let mut bytes = vec![0_u8; size];
-  if let Err(error) = getrandom(&mut bytes) {
+  if let Err(error) = fill(&mut bytes) {
     return Ok(entropy_failure(vm, "randomBytes", error.to_string()));
   }
   let value = make_uint8_array(vm, bytes)?;
@@ -178,7 +178,7 @@ fn random_fill(
   }
 
   let mut bytes = vec![0_u8; size];
-  if let Err(error) = getrandom(&mut bytes) {
+  if let Err(error) = fill(&mut bytes) {
     return Ok(entropy_failure(vm, "randomFill", error.to_string()));
   }
   if !view.write_from(offset, &bytes) {
@@ -292,7 +292,7 @@ fn secure_below(range: u64) -> Result<u64, getrandom::Error> {
   let threshold = range.wrapping_neg() % range;
   loop {
     let mut bytes = [0_u8; 8];
-    getrandom(&mut bytes)?;
+    fill(&mut bytes)?;
     let value = u64::from_le_bytes(bytes);
     if value >= threshold {
       return Ok(value % range);

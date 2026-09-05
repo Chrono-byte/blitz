@@ -1,1 +1,0 @@
-const P="Fresh";const o="FromEffect";const t="Suspend";const E="Provide";const O="ProvideMerge";const _="ZipWith";export{P as OP_FRESH,o as OP_FROM_EFFECT,E as OP_PROVIDE,O as OP_PROVIDE_MERGE,t as OP_SUSPEND,_ as OP_ZIP_WITH};

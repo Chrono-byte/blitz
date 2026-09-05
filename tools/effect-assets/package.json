@@ -30,11 +30,12 @@
     "test": "pnpm run test:effect && pnpm run test:stdlib && pnpm run test:punycode && pnpm run test:string-decoder && pnpm run test:async-hooks && pnpm run test:buffer && pnpm run test:node-roots && pnpm run test:streams && pnpm run test:readline && pnpm run test:facade-gc"
   },
   "devDependencies": {
-    "@types/node": "24.3.0",
-    "effect": "3.16.7",
+    "@types/node": "26.4.1",
+    "effect": "3.22.1",
     "effect-v4": "npm:effect@4.0.0-rc.112",
-    "esbuild": "0.25.9",
-    "rollup": "4.50.1",
-    "typescript": "5.9.2"
+    "esbuild": "0.28.2",
+    "rollup": "4.63.1",
+    "typescript": "7.0.2",
+    "typescript-compiler": "npm:typescript@6.0.3"
   }
 }

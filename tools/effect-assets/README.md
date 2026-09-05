@@ -1,13 +1,13 @@
 # Deterministic Effect assets
 
-This workspace pins `effect@3.16.7` and vendors the tree-shaken ESM graph used
+This workspace pins `effect@3.22.1` and vendors the tree-shaken ESM graph used
 by Blitz's curated Effect surface. Rollup preserves upstream module boundaries,
 esbuild removes comments and whitespace, and public entries remain small
 aliases. Internal imports are rewritten to `blitz-internal:effect/...`, so the
 VM caches one module identity across root and deep imports.
 
 Generated files are committed at
-`crates/blitz-runtime/assets/effect/3.16.7/` and
+`crates/blitz-runtime/assets/effect/3.22.1/` and
 `crates/blitz-runtime/assets/stdlib/`. Generation never runs at Rust build or
 runtime and does not access the network. The full upstream ESM graph is
 retained for runtime identity, while declarations are curated and emitted
@@ -139,3 +139,7 @@ binary; this override skips Cargo's freshness check.
 `pnpm run test:facade-gc` checks that discarded facade instances can be collected
 under Node with GC exposed. The smoke tests exercise facade behavior in Blitz;
 the engine's `weak_map_` tests cover its weak-key reachability rules.
+
+Type checking uses TypeScript 7. The asset scripts import the separately pinned
+`typescript-compiler` alias for TypeScript 6.0.3 because TypeScript 7 no longer
+exports the classic compiler API used to inspect declarations and module imports.

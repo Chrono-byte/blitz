@@ -3,7 +3,7 @@
   "package": {
     "name": "blitz-stdlib",
     "version": "1",
-    "effect_version": "3.16.7",
+    "effect_version": "3.22.1",
     "runtime_abi_version": 1,
     "host_abi_version": 1
   },
@@ -1189,7 +1189,7 @@
     },
     {
       "path": "embedded.rs",
-      "sha256": "cc96590e8713b30e72d867252dbd4666e08433c60238fa14419835d3784eca65"
+      "sha256": "8dc90632dd250371b103ee7775a21e8d55079e8803ccf2de525ac871d13d7634"
     },
     {
       "path": "modules/facades/blitz-app.js",

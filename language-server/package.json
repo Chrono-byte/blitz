@@ -15,14 +15,14 @@
     "test": "bun run build && node --test dist/test/*.test.js"
   },
   "dependencies": {
-    "vscode-languageserver": "10.1.0",
-    "vscode-languageserver-textdocument": "1.0.12"
+    "vscode-languageserver": "10.1.1",
+    "vscode-languageserver-textdocument": "1.0.14"
   },
   "devDependencies": {
-    "@types/node": "^24.13.3",
-    "oxfmt": "^0.60.0",
-    "oxlint": "^1.75.0",
-    "typescript": "5.9.3"
+    "@types/node": "^26.4.1",
+    "oxfmt": "^0.66.0",
+    "oxlint": "^1.81.0",
+    "typescript": "7.0.2"
   },
   "engines": {
     "node": ">=24"

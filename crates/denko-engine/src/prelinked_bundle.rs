@@ -23,7 +23,7 @@ use std::sync::Arc;
 use thiserror::Error;
 
 /// Current version of the prelinked graph wire envelope.
-pub const PRELINKED_GRAPH_WIRE_VERSION: u16 = 6;
+pub const PRELINKED_GRAPH_WIRE_VERSION: u16 = 7;
 
 const SOURCE_TEXT_WIRE_VERSION: u16 = 2;
 
@@ -596,7 +596,19 @@ fn encode_constant(
     }
     Constant::Symbol(id, description) => {
       writer.u8(6);
-      writer.u64(id.as_u64());
+      let wire_id = if id.is_private() {
+        // Assign IDs in traversal order, independent of compilation-time randomness.
+        let next = (1_u64 << 63)
+          | u64::try_from(writer.private_names.len())
+            .map_err(|_| invalid("too many private names"))?;
+        *writer
+          .private_names
+          .entry(id.as_u64())
+          .or_insert(next)
+      } else {
+        id.as_u64()
+      };
+      writer.u64(wire_id);
       writer.option_js_string(description.as_ref())?;
     }
     Constant::Null => writer.u8(7),
@@ -623,7 +635,17 @@ fn decode_constant(reader: &mut Reader<'_>) -> Result<Constant, PrelinkedGraphCo
     }
     6 => {
       let id = reader.u64()?;
-      Constant::Symbol(SymbolId::well_known(id), reader.option_js_string()?)
+      let symbol = SymbolId::well_known(id);
+      let symbol = if symbol.is_private() {
+        reader
+          .private_names
+          .entry(id)
+          .or_insert_with(SymbolId::new_private)
+          .clone()
+      } else {
+        symbol
+      };
+      Constant::Symbol(symbol, reader.option_js_string()?)
     }
     7 => Constant::Null,
     tag => return Err(invalid(format!("unknown constant tag {tag}"))),
@@ -1076,6 +1098,7 @@ fn limit(
 #[derive(Default)]
 struct Writer {
   bytes_out: Vec<u8>,
+  private_names: HashMap<u64, u64>,
   name_bytes: usize,
   source_bytes: usize,
 }
@@ -1258,6 +1281,7 @@ impl Writer {
 
 struct Reader<'a> {
   bytes: &'a [u8],
+  private_names: HashMap<u64, SymbolId>,
   position: usize,
   wire_version: u16,
   name_bytes: usize,
@@ -1275,6 +1299,7 @@ impl<'a> Reader<'a> {
   ) -> Self {
     Self {
       bytes,
+      private_names: HashMap::new(),
       position: 0,
       wire_version,
       name_bytes: 0,
@@ -1652,6 +1677,52 @@ mod tests {
     bytes.extend_from_slice(&crc32fast::hash(payload).to_le_bytes());
     bytes.extend_from_slice(payload);
     bytes
+  }
+
+  #[test]
+  fn private_names_encode_deterministically_and_decode_with_fresh_identity() {
+    let make = || {
+      let mut graph = graph();
+      let first = SymbolId::new_private();
+      let second = SymbolId::new_private();
+      graph.modules[0].chunk.constants = vec![Constant::Symbol(first.clone(), None)];
+      Arc::make_mut(&mut graph.modules[1].chunk.functions[0].chunk).constants = vec![
+        Constant::Symbol(first, None),
+        Constant::Symbol(second, None),
+        Constant::Symbol(SymbolId::well_known_to_string_tag(), None),
+      ];
+      graph
+    };
+    let bytes = encode(&make()).expect("encode private names");
+    assert_eq!(bytes, encode(&make()).expect("encode fresh compilation"));
+    let first = decode(&bytes).expect("decode first instance");
+    let second = decode(&bytes).expect("decode second instance");
+    let symbol = |constant: &Constant| match constant {
+      Constant::Symbol(id, _) => id.clone(),
+      _ => panic!("symbol constant"),
+    };
+    let shared = symbol(&first.modules[0].chunk.constants[0]);
+    let nested = &first.modules[1].chunk.functions[0]
+      .chunk
+      .constants;
+    assert!(shared.is_private());
+    assert_eq!(
+      shared,
+      symbol(&nested[0]),
+      "cross-module references share the private name"
+    );
+    assert_ne!(
+      shared,
+      symbol(&nested[1]),
+      "distinct declarations retain distinct brands"
+    );
+    assert_ne!(
+      shared,
+      symbol(&second.modules[0].chunk.constants[0]),
+      "separate loads cannot share private brands"
+    );
+    assert_eq!(symbol(&nested[2]), SymbolId::well_known_to_string_tag());
+    assert_eq!(bytes, encode(&first).expect("re-encode decoded graph"));
   }
 
   #[test]

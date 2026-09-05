@@ -655,7 +655,7 @@ impl Compiler {
       }
       None
     });
-    let class_has_super = c.super_class.is_some();
+    let class_has_super = c.heritage.is_some();
     let proto = if let Some(md) = constructor_method {
       let outer_strict = self.strict_context;
       self.strict_context = true;
@@ -813,7 +813,11 @@ impl Compiler {
     let idx = self.chunk.add_function(proto);
     self.emit(LoweringOpcode::MakeClosure, LINE);
     self.emit_function_index(idx, LINE);
-    if let Some(super_class) = &c.super_class {
+    if let Some(super_class) = c
+      .heritage
+      .as_ref()
+      .map(|heritage| &heritage.expression)
+    {
       self.emit_get_builtin_name("classInitExtends");
       self.emit(LoweringOpcode::Exchange, LINE);
       self.compile_expr_oast(super_class)?;

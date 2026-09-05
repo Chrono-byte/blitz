@@ -1,7 +1,7 @@
 # Effect and Blitz runtime-graph manifest
 
 `blitz-runtime` installs one generated, prelinked runtime graph for the first
-application-runtime Effect surface. It pins `effect@3.16.7`, includes the
+application-runtime Effect surface. It pins `effect@3.22.1`, includes the
 manifest-listed Blitz facades/private adapters, and keeps the raw engine unaware
 of Effect- and Blitz-specific specifiers.
 
@@ -9,15 +9,15 @@ The manifest currently supports:
 
 | Specifier | Origin |
 | --- | --- |
-| `effect` | Effect 3.16.7 root asset |
-| `effect/Effect` | Effect 3.16.7 generated subpath |
-| `effect/Context` | Effect 3.16.7 generated subpath |
-| `effect/Layer` | Effect 3.16.7 generated subpath |
-| `effect/Ref` | Effect 3.16.7 generated subpath |
-| `effect/Stream` | Effect 3.16.7 generated subpath |
-| `effect/Scope` | Effect 3.16.7 generated subpath |
-| `effect/Schedule` | Effect 3.16.7 generated subpath |
-| `effect/Match` | Effect 3.16.7 generated subpath |
+| `effect` | Effect 3.22.1 root asset |
+| `effect/Effect` | Effect 3.22.1 generated subpath |
+| `effect/Context` | Effect 3.22.1 generated subpath |
+| `effect/Layer` | Effect 3.22.1 generated subpath |
+| `effect/Ref` | Effect 3.22.1 generated subpath |
+| `effect/Stream` | Effect 3.22.1 generated subpath |
+| `effect/Scope` | Effect 3.22.1 generated subpath |
+| `effect/Schedule` | Effect 3.22.1 generated subpath |
+| `effect/Match` | Effect 3.22.1 generated subpath |
 | `blitz:match` | Blitz facade over `effect/Match` |
 | `blitz:fs` | Typed filesystem service and live Layer |
 | `blitz:http` | Scoped Effect HTTP service |
@@ -38,7 +38,7 @@ reachable only through bundled dependency indices; direct user imports of
 The pnpm workspace at `tools/effect-assets/` downloads the exact package only
 during explicit generation. It commits a canonical ESM graph, Effect's MIT
 license, package integrity, deterministic SHA-256 manifest, and curated
-public declarations under `crates/blitz-runtime/assets/effect/3.16.7/`.
+public declarations under `crates/blitz-runtime/assets/effect/3.22.1/`.
 Private runtime modules intentionally have no declaration assets; Blitz does
 not vendor Effect's complete upstream declaration graph.
 

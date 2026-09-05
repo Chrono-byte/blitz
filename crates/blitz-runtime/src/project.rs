@@ -312,7 +312,7 @@ mod tests {
         "name": "example",
         "type": "module",
         "scripts": { "start": "blitz src/main.ts" },
-        "dependencies": { "effect": "3.16.7" }
+        "dependencies": { "effect": "3.22.1" }
       }"#,
     )
     .expect("write package manifest");

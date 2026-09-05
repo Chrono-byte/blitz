@@ -31,7 +31,7 @@ Module evaluation now keeps evaluation promises, schedules dependencies and
 cycles, preserves rejection identity, and delays dynamic import and
 ShadowRealm import settlement until evaluation finishes. Root-await metadata
 survives optimization and bytecode serialization. Ordinary bundle version 5
-still reads version 4; prelinked bundle version 6 still reads versions 2–5.
+still reads version 4; prelinked bundle version 7 still reads versions 2–6.
 Older bundles default missing root-await metadata to false, preserving their
 previous behavior.
 

@@ -25,7 +25,7 @@ harness = false
 [dependencies]
 denko-macros.workspace = true
 clap.workspace = true
-crc32fast = "1.5.0"
+crc32fast = "1.5.1"
 fastrand.workspace = true
 indexmap.workspace = true
 js-string.workspace = true
@@ -47,10 +47,10 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-chumsky = "0.11.1"
+chumsky = "0.13.0"
 unicode-normalization = "0.1.25"
 libc = "0.2.189"
-oxc_ast_visit = "0.141.0"
+oxc_ast_visit.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true

@@ -276,34 +276,27 @@ impl Compiler {
           self.emit_set_own_module_export(&export_name)?;
         }
       }
-      OStmt::ExportNamedDeclaration(export) => {
-        if let Some(decl) = &export.declaration {
-          match decl {
-            oast::Declaration::VariableDeclaration(v) => {
-              self.compile_variable_declaration_oast(v)?
-            }
-            oast::Declaration::FunctionDeclaration(f) => {
-              self.compile_function_declaration_oast(f)?
-            }
-            oast::Declaration::ClassDeclaration(c) => {
-              self.compile_class_declaration_oast(c)?;
-            }
-            _ => {}
-          }
+      OStmt::ExportDeclaration(export) => match &export.declaration {
+        oast::Declaration::VariableDeclaration(v) => self.compile_variable_declaration_oast(v)?,
+        oast::Declaration::FunctionDeclaration(f) => self.compile_function_declaration_oast(f)?,
+        oast::Declaration::ClassDeclaration(c) => {
+          self.compile_class_declaration_oast(c)?;
         }
-        if export.declaration.is_none() && export.source.is_none() {
-          for spec in &export.specifiers {
-            let Some(local_name) = Self::module_export_name_to_string(&spec.local) else {
-              continue;
-            };
-            let Some(export_name) = Self::module_export_name_to_string(&spec.exported) else {
-              continue;
-            };
-            self.emit_get_binding(&local_name);
-            self.emit_set_own_module_export(&export_name)?;
-          }
+        _ => {}
+      },
+      OStmt::ExportNamedDeclaration(export) => {
+        for spec in &export.specifiers {
+          let Some(local_name) = Self::module_export_name_to_string(&spec.local) else {
+            continue;
+          };
+          let Some(export_name) = Self::module_export_name_to_string(&spec.exported) else {
+            continue;
+          };
+          self.emit_get_binding(&local_name);
+          self.emit_set_own_module_export(&export_name)?;
         }
       }
+      OStmt::ExportFromDeclaration(_) => {}
       OStmt::ExportDefaultDeclaration(export) => {
         match &export.declaration {
           oast::ExportDefaultDeclarationKind::FunctionDeclaration(f) => {

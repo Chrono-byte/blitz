@@ -6505,12 +6505,8 @@ mod test {
 
   #[test]
   fn for_in_lexical_declaration_with_initializer_is_syntax_error() {
-    let session = Parser::parse_source(crate::js!("for (let x = 3 in {}) {}"))
-      .expect("parser currently accepts syntax");
-    let program = session.program();
-    let err = compiler::compile(program, session.source())
-      .expect_err("compile should reject lexical initializer in for-in");
-    assert!(err.to_string().contains("SyntaxError"));
+    let source = include_str!("../../../../tests/fixtures/parser/for-in-lexical-initializer.js");
+    assert!(Parser::parse_source(source).is_err());
   }
 
   #[test]

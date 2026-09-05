@@ -1,0 +1,1 @@
+import{done as n,isDone as s,suspended as e,running as o}from"blitz-internal:effect/dist/esm/internal/fiberStatus.js";const d=n;const i=o;const r=e;const t=s;export{d as done,t as isDone,i as running,r as suspended};

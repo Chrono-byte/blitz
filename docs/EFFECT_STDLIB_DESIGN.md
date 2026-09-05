@@ -487,7 +487,7 @@ connections are scoped and expose Stream-based reads plus backpressured writes.
 
 ## Bundled Effect surface
 
-Blitz pins `effect@3.16.7` and generates one canonical ESM source graph. The
+Blitz pins `effect@3.22.1` and generates one canonical ESM source graph. The
 final runtime form is one complete, deterministic prelinked module-graph
 artifact containing that Effect graph plus every manifest-listed public and
 private Blitz stdlib JavaScript module—not a bytecode-only cache. The artifact contains verified

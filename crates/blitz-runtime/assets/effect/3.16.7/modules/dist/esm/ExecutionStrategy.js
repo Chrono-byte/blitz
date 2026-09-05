@@ -1,1 +1,0 @@
-import{parallelN as l,sequential as a,parallel as e}from"blitz-internal:effect/dist/esm/internal/executionStrategy.js";const r=a;const s=e;const p=l;export{s as parallel,p as parallelN,r as sequential};

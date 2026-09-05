@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
-import * as ts from "typescript";
+import * as ts from "typescript-compiler";
 
 import {
   EFFECT_VERSION,

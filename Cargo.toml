@@ -18,39 +18,40 @@ edition = "2024"
 denko = { package = "denko-engine", path = "crates/denko-engine" }
 denko-macros = { path = "crates/denko-macros" }
 blitz-runtime = { path = "crates/blitz-runtime" }
-bytes = "1"
-clap = { version = "4.5.57", features = ["derive"] }
-criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
-unicode-case-mapping = "1"
-unicode-id-start = "1.4"
-fastwebsockets = { version = "0.10", features = ["upgrade"] }
-fastrand = "2.1"
-futures = "0.3"
-http-body-util = "0.1"
-hyper = { version = "1", features = ["http1", "server"] }
-hyper-util = { version = "0.1", features = ["tokio"] }
-indexmap = "2"
+bytes = "1.12.1"
+clap = { version = "4.6.6", features = ["derive"] }
+criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
+unicode-case-mapping = "1.0.0"
+unicode-id-start = "1.4.0"
+fastwebsockets = { version = "0.10.0", features = ["upgrade"] }
+fastrand = "2.5.0"
+futures = "0.3.34"
+http-body-util = "0.1.5"
+hyper = { version = "1.11.1", features = ["http1", "server"] }
+hyper-util = { version = "0.1.20", features = ["tokio"] }
+indexmap = "2.14.2"
 js-string = { path = "crates/js-string" }
-num-bigint = "0.4"
-num-traits = "0.2"
-ouroboros = "0.18"
-oxc_allocator = "0.141.0"
-oxc_ast = { version = "0.141.0", features = ["serialize"] }
-oxc_parser = "0.141.0"
-oxc_resolver = "11.17.1"
-oxc_semantic = "0.141.0"
-oxc_span = "0.141.0"
-oxc_str = "0.141.0"
-oxc_syntax = "0.141.0"
+num-bigint = "0.5.1"
+num-traits = "0.2.19"
+ouroboros = "0.18.5"
+oxc_allocator = "0.148.0"
+oxc_ast = { version = "0.148.0", features = ["serialize"] }
+oxc_ast_visit = "0.148.0"
+oxc_parser = "0.148.0"
+oxc_resolver = "11.24.3"
+oxc_semantic = "0.148.0"
+oxc_span = "0.148.0"
+oxc_str = "0.148.0"
+oxc_syntax = "0.148.0"
 regex-js = { path = "crates/regex-js" }
-rustyline = "18"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-serde_yaml = "0.9"
-sha2 = "0.11"
-thiserror = "2.0"
-tokio = { version = "1", features = ["fs", "macros", "net", "rt-multi-thread", "sync", "time"] }
-url = "2"
+rustyline = "18.0.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+serde_yaml = "0.9.34"
+sha2 = "0.11.0"
+thiserror = "2.0.20"
+tokio = { version = "1.53.1", features = ["fs", "macros", "net", "rt-multi-thread", "sync", "time"] }
+url = "2.5.8"
 
 [workspace.lints.clippy]
 # Keep Clippy's maintained default set while leaving the noisier pedantic,

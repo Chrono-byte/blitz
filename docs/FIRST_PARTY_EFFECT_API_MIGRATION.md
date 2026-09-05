@@ -2,7 +2,7 @@
 
 ## Problem
 
-Blitz vendors `effect@3.16.7` and publishes its own `blitz:fs/FileSystem` tag. The Rust host behind that tag has four synchronous whole-file operations. A separate Node compatibility host has a wider but still incomplete set of filesystem calls. Moving to Effect 4's first-party `FileSystem.FileSystem` therefore crosses three contracts at once: the vendored Effect graph, Blitz's runtime host ABI, and existing `blitz:*` application imports. The provider must satisfy Effect's actual interface and `PlatformError` model. A partial service presented as complete would move missing behavior into defects and violate the engine/runtime boundary. This design keeps old applications running while making the first-party Effect service the only new application contract.
+Blitz vendors `effect@3.22.1` and publishes its own `blitz:fs/FileSystem` tag. The Rust host behind that tag has four synchronous whole-file operations. A separate Node compatibility host has a wider but still incomplete set of filesystem calls. Moving to Effect 4's first-party `FileSystem.FileSystem` therefore crosses three contracts at once: the vendored Effect graph, Blitz's runtime host ABI, and existing `blitz:*` application imports. The provider must satisfy Effect's actual interface and `PlatformError` model. A partial service presented as complete would move missing behavior into defects and violate the engine/runtime boundary. This design keeps old applications running while making the first-party Effect service the only new application contract.
 
 ## Usage (caller's view)
 

@@ -4,9 +4,9 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { transform } from "esbuild";
 import { rollup } from "rollup";
-import * as ts from "typescript";
+import * as ts from "typescript-compiler";
 
-const VERSION = "3.16.7";
+const VERSION = "3.22.1";
 const SUPPORTED = ["effect", "effect/Effect", "effect/Cause", "effect/Exit", "effect/Fiber", "effect/FiberId", "effect/HashSet", "effect/Chunk", "effect/Option", "effect/Either", "effect/Duration", "effect/Function", "effect/Context", "effect/Layer", "effect/Ref", "effect/Stream", "effect/Scope", "effect/Schedule", "effect/Match"] as const;
 const EFFECT_MODULES = SUPPORTED.slice(1);
 const ROOT = resolve(import.meta.dirname, "..");
@@ -59,8 +59,8 @@ const filesUnder = (root: string, current = root): string[] => readdirSync(curre
 
 const readIntegrity = () => {
   const lockfile = readFileSync(join(ROOT, "pnpm-lock.yaml"), "utf8");
-  const match = lockfile.match(/effect@3\.16\.7:\n\s+resolution: \{integrity: ([^}]+)\}/);
-  if (!match) throw new Error("pnpm-lock.yaml has no exact effect@3.16.7 integrity");
+  const match = lockfile.match(/effect@3\.22\.1:\n\s+resolution: \{integrity: ([^}]+)\}/);
+  if (!match) throw new Error("pnpm-lock.yaml has no exact effect@3.22.1 integrity");
   return match[1];
 };
 
