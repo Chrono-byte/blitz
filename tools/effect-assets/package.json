@@ -26,7 +26,8 @@
     "test:node-roots": "node --experimental-strip-types scripts/test-node-roots.ts",
     "test:readline": "node --experimental-strip-types scripts/test-readline.ts",
     "test:streams": "node --experimental-strip-types scripts/test-node-streams.ts",
-    "test": "pnpm run test:effect && pnpm run test:stdlib && pnpm run test:punycode && pnpm run test:string-decoder && pnpm run test:async-hooks && pnpm run test:buffer && pnpm run test:node-roots && pnpm run test:streams && pnpm run test:readline"
+    "test:facade-gc": "node --expose-gc scripts/test-facade-gc.mjs",
+    "test": "pnpm run test:effect && pnpm run test:stdlib && pnpm run test:punycode && pnpm run test:string-decoder && pnpm run test:async-hooks && pnpm run test:buffer && pnpm run test:node-roots && pnpm run test:streams && pnpm run test:readline && pnpm run test:facade-gc"
   },
   "devDependencies": {
     "@types/node": "24.3.0",

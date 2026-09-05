@@ -1,7 +1,5 @@
-// Blitz's current WeakMap surface does not yet expose get/set/has. Keep
-// emitter state module-local in Maps until the engine's weak collections land.
-const states = new Map();
-const eventTargetMaxListeners = new Map();
+const states = new WeakMap();
+const eventTargetMaxListeners = new WeakMap();
 const errorMonitor = Symbol("events.errorMonitor");
 const captureRejectionSymbol = typeof Symbol.for === "function"
   ? Symbol.for("nodejs.rejection")

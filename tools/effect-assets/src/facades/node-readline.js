@@ -3,8 +3,8 @@ import EventEmitter from "node:events";
 // readline works with streams supplied by the caller. It does not create or
 // own a terminal: terminal mode, raw mode, and stream lifetime remain the
 // responsibility of the input/output objects.
-const interfaceStates = new Map();
-const keypressStates = new Map();
+const interfaceStates = new WeakMap();
+const keypressStates = new WeakMap();
 const asyncIterator = typeof Symbol === "function" ? Symbol.asyncIterator : undefined;
 
 const isObjectLike = value => value !== null && (typeof value === "object" || typeof value === "function");

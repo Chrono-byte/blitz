@@ -23,7 +23,7 @@ const notImplemented = operation => {
   throw error;
 };
 
-const resourceStates = new Map();
+const resourceStates = new WeakMap();
 const topLevelResource = {};
 resourceStates.set(topLevelResource, {
   asyncId: TOP_LEVEL_ID,
@@ -40,7 +40,7 @@ let currentContext = {
   stores: new Map(),
 };
 
-const storageState = new Map();
+const storageState = new WeakMap();
 
 const contextStores = context => new Map(context.stores);
 const capturedStores = () => contextStores(currentContext);
