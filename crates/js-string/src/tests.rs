@@ -22,6 +22,25 @@ fn slices_share_semantic_content() {
 }
 
 #[test]
+fn concatenation_preserves_code_units_and_reuses_empty_operand_storage() {
+  let empty = JsString::empty();
+  let sliced = JsString::from_utf16(vec![0, 0xD800, 0x0061, 0xDC00, 0])
+    .slice(1..4)
+    .expect("valid slice");
+  for value in [empty.clone(), JsString::new("short"), sliced] {
+    for result in [empty.concat(&value), value.concat(&empty)] {
+      assert_eq!(result.as_slice(), value.as_slice());
+      if matches!(value.repr, Repr::Heap { .. }) {
+        assert!(std::ptr::eq(result.as_slice(), value.as_slice()));
+      }
+    }
+  }
+  let leading = JsString::from_utf16(vec![0xD800]);
+  let trailing = JsString::from_utf16(vec![0xDC00]);
+  assert_eq!(leading.concat(&trailing).as_slice(), &[0xD800, 0xDC00]);
+}
+
+#[test]
 fn code_point_access_retains_code_unit_offsets() {
   let value = JsString::new("😀x");
   assert_eq!(

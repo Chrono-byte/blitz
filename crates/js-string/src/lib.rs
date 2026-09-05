@@ -258,6 +258,12 @@ impl JsString {
     &self,
     other: &Self,
   ) -> Self {
+    if self.is_empty() {
+      return other.clone();
+    }
+    if other.is_empty() {
+      return self.clone();
+    }
     let mut units = Vec::with_capacity(self.len() + other.len());
     units.extend_from_slice(self.as_slice());
     units.extend_from_slice(other.as_slice());
