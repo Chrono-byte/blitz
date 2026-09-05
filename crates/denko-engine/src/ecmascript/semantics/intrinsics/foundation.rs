@@ -11,6 +11,9 @@ pub(crate) struct FoundationIntrinsics {
   pub generator_prototype: Rc<RefCell<ObjectData>>,
   pub generator_function_prototype: Rc<RefCell<ObjectData>>,
   pub async_function_prototype: Rc<RefCell<ObjectData>>,
+  pub async_iterator_prototype: Rc<RefCell<ObjectData>>,
+  pub async_generator_prototype: Rc<RefCell<ObjectData>>,
+  pub async_generator_function_prototype: Rc<RefCell<ObjectData>>,
   pub throw_type_error: Value,
 }
 
@@ -155,6 +158,112 @@ pub(crate) fn create_foundation() -> FoundationIntrinsics {
       },
     );
 
+  let async_iterator_prototype = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
+    Rc::clone(&object_prototype),
+  ))));
+  let async_iterator = builtin_object(
+    Rc::new(|_vm, args| Ok(args.first().cloned().unwrap_or(Value::Undefined))),
+    &function_prototype,
+  );
+  set_builtin_name(&async_iterator, "[Symbol.asyncIterator]");
+  set_builtin_length(&async_iterator, 0.0);
+  async_iterator_prototype
+    .borrow_mut()
+    .properties
+    .insert(
+      PropertyKey::Symbol(crate::value::SymbolId::well_known_async_iterator()),
+      PropertyDescriptor::builtin_data(async_iterator),
+    );
+  let async_generator_prototype = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
+    Rc::clone(&async_iterator_prototype),
+  ))));
+  let async_generator_function_prototype = Rc::new(RefCell::new(ObjectData::with_prototype(
+    Value::Object(Rc::clone(&function_prototype)),
+  )));
+  for (prototype, tag) in [
+    (&async_generator_prototype, "AsyncGenerator"),
+    (
+      &async_generator_function_prototype,
+      "AsyncGeneratorFunction",
+    ),
+  ] {
+    prototype.borrow_mut().properties.insert(
+      PropertyKey::Symbol(crate::value::SymbolId::well_known_to_string_tag()),
+      PropertyDescriptor::Data {
+        value: Value::String(tag.into()),
+        writable: false,
+        enumerable: false,
+        configurable: true,
+      },
+    );
+  }
+  for (name, slot) in [
+    ("next", "[[AsyncGeneratorNext]]"),
+    ("return", "[[AsyncGeneratorReturn]]"),
+    ("throw", "[[AsyncGeneratorThrow]]"),
+  ] {
+    let method = builtin_object(
+      Rc::new(move |vm, args| {
+        let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+        let implementation = match &receiver {
+          Value::Object(object) => object.borrow().internal_slot(slot).cloned(),
+          _ => None,
+        };
+        let Some(implementation) = implementation else {
+          let promise = vm.create_host_promise();
+          let reason = vm.create_intrinsic_error(
+            "TypeError",
+            &format!("AsyncGenerator.prototype.{name} called on incompatible receiver"),
+          )?;
+          if let Value::Promise(state, _) = &promise {
+            crate::runtime_utils::reject_pending_promise(vm, state, reason);
+          }
+          return Ok(promise);
+        };
+        let user_args = if vm.builtin_this_arg_prepended() {
+          args.get(1..).unwrap_or_default()
+        } else {
+          args
+        };
+        vm.call_value_with_this(&implementation, &receiver, user_args)
+      }),
+      &function_prototype,
+    );
+    set_builtin_name(&method, name);
+    set_builtin_length(&method, 1.0);
+    async_generator_prototype
+      .borrow_mut()
+      .properties
+      .insert(
+        PropertyKey::String(name.into()),
+        PropertyDescriptor::builtin_data(method),
+      );
+  }
+  async_generator_function_prototype
+    .borrow_mut()
+    .properties
+    .insert(
+      PropertyKey::prototype(),
+      PropertyDescriptor::Data {
+        value: Value::Object(Rc::clone(&async_generator_prototype)),
+        writable: false,
+        enumerable: false,
+        configurable: true,
+      },
+    );
+  async_generator_prototype
+    .borrow_mut()
+    .properties
+    .insert(
+      PropertyKey::String("constructor".into()),
+      PropertyDescriptor::Data {
+        value: Value::Object(Rc::clone(&async_generator_function_prototype)),
+        writable: false,
+        enumerable: false,
+        configurable: true,
+      },
+    );
+
   let throw_type_error = builtin_object(
     Rc::new(|vm, _args| Err(vm.throw_type_error("ThrowTypeError"))),
     &function_prototype,
@@ -190,6 +299,9 @@ pub(crate) fn create_foundation() -> FoundationIntrinsics {
     generator_prototype,
     generator_function_prototype,
     async_function_prototype,
+    async_iterator_prototype,
+    async_generator_prototype,
+    async_generator_function_prototype,
     throw_type_error,
   }
 }

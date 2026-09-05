@@ -39,7 +39,7 @@ pub struct GcStats {
 pub enum GcDeferredReason {
   /// More than one VM shares the current thread-local prototype heap.
   MultipleVms,
-  /// A VM has host-side jobs whose captured JavaScript values are opaque.
+  /// Queued or running host jobs retain opaque JavaScript captures.
   PendingJobs,
 }
 

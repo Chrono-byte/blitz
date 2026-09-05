@@ -1164,3 +1164,85 @@ fn precompiled_virtual_modules_keep_source_metadata_and_stable_indices() {
     Value::Number(42.0),
   );
 }
+
+#[test]
+fn prelinked_bundles_preserve_unreachable_top_level_await_scheduling() {
+  let dependency = compile_prelinked_chunk(
+    crate::js!(
+      module,
+      "if (false) await 0; globalThis.prelinkedBefore = true;"
+    ),
+    0,
+    &[],
+    &[],
+  );
+  assert!(dependency.has_top_level_await);
+  let ordinary = compile_prelinked_chunk(
+    crate::js!(module, "async function inner() { await 0; }"),
+    2,
+    &[],
+    &[],
+  );
+  assert!(
+    !ordinary.has_top_level_await,
+    "nested await is not module await"
+  );
+  let entry = compile_prelinked_chunk(
+    crate::js!(
+      module,
+      "import 'graph:await'; globalThis.prelinkedAfter = true;"
+    ),
+    1,
+    &[],
+    &[],
+  );
+  let graph = synthetic_graph(
+    vec![
+      PrelinkedModule {
+        specifier: "graph:await".into(),
+        module_index: 0,
+        source_sha256: [1; 32],
+        dependencies: vec![],
+        exports: vec![],
+        imports: vec![],
+        chunk: dependency,
+      },
+      PrelinkedModule {
+        specifier: "graph:await-entry".into(),
+        module_index: 1,
+        source_sha256: [2; 32],
+        dependencies: vec![0],
+        exports: vec![],
+        imports: vec![],
+        chunk: entry,
+      },
+    ],
+    0,
+    vec![1],
+  );
+  let encoded = crate::prelinked_bundle::encode(&graph).expect("encode await graph");
+  let graph = crate::prelinked_bundle::decode(&encoded).expect("decode await graph");
+  assert!(graph.modules[0].chunk.has_top_level_await);
+  let mut vm = Vm::new(Rc::new(RefCell::new(ObjectData::new())));
+  let loader = vm.module_loader_handle();
+  let entry = {
+    let mut loader = loader.borrow_mut();
+    loader
+      .register_prelinked_graph(graph)
+      .expect("register await graph");
+    let entry = loader
+      .construct(Path::new("."), "graph:await-entry")
+      .expect("construct graph");
+    loader
+      .instantiate_all()
+      .expect("instantiate graph");
+    entry
+  };
+  let path = entry.borrow().path.clone();
+  evaluate_entry_promise_shared(&loader, &path, &mut vm, false).expect("start prelinked graph");
+  assert_eq!(vm.get_global("prelinkedBefore"), Some(Value::Bool(true)));
+  assert_eq!(vm.get_global("prelinkedAfter"), None);
+  vm.flush_microtasks()
+    .expect("finish async dependency");
+  assert_eq!(vm.get_global("prelinkedAfter"), Some(Value::Bool(true)));
+}

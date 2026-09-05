@@ -251,6 +251,19 @@ impl Compiler {
         .collect();
       self.chunk.root_strict = self.strict_context;
     }
+    // Read the root AST emitter's operations before optimization can remove
+    // unreachable awaits. Nested functions have independent lowering builders.
+    self.chunk.has_top_level_await = program.source_type.is_module()
+      && self
+        .lowering
+        .instructions
+        .iter()
+        .any(|instruction| {
+          matches!(
+            instruction.opcode,
+            LoweringOpcode::AwaitPromise | LoweringOpcode::GetAsyncIterator
+          )
+        });
     let code = std::mem::take(&mut self.chunk);
     let builder = std::mem::take(&mut self.lowering);
     bytecode::Lowering::finish(code, builder)

@@ -142,78 +142,27 @@ fn resolve_promise_with_value_inner(
     return Ok(());
   }
 
-  if let Value::Promise(ref p_rc, _) = value {
-    if Rc::ptr_eq(p_rc, result_promise) {
-      *already_resolved.borrow_mut() = true;
-      return Err(vm.throw_type_error("Chaining cycle detected"));
-    }
-
-    let mut state = p_rc.borrow_mut();
-    match &mut *state {
-      PromiseState::Pending {
-        on_fulfilled,
-        on_rejected,
-      } => {
-        let resolve_called = Rc::clone(&already_resolved);
-        let res_p = Rc::clone(result_promise);
-        on_fulfilled.push(Value::Builtin(Rc::new(move |vm, args| {
-          if *resolve_called.borrow() {
-            return Ok(Value::Undefined);
-          }
-          *resolve_called.borrow_mut() = true;
-          let off = if args.len() > 1 { 1 } else { 0 };
-          let v = args.get(off).cloned().unwrap_or(Value::Undefined);
-          resolve_promise_with_value(vm, &res_p, v)?;
-          Ok(Value::Undefined)
-        })));
-
-        let reject_called = Rc::clone(&already_resolved);
-        let res_p2 = Rc::clone(result_promise);
-        on_rejected.push(Value::Builtin(Rc::new(move |vm, args| {
-          if *reject_called.borrow() {
-            return Ok(Value::Undefined);
-          }
-          *reject_called.borrow_mut() = true;
-          let off = if args.len() > 1 { 1 } else { 0 };
-          let r = args.get(off).cloned().unwrap_or(Value::Undefined);
-          reject_pending_promise(vm, &res_p2, r);
-          Ok(Value::Undefined)
-        })));
-        return Ok(());
-      }
-      PromiseState::Fulfilled(v) => {
-        let v = v.clone();
-        let resolve_called = Rc::clone(&already_resolved);
-        let res_p = Rc::clone(result_promise);
-        vm.queue_microtask(move |vm| {
-          if *resolve_called.borrow() {
-            return Ok(());
-          }
-          *resolve_called.borrow_mut() = true;
-          fulfill_pending_promise(vm, &res_p, v.clone());
-          Ok(())
-        });
-        return Ok(());
-      }
-      PromiseState::Rejected { reason, .. } => {
-        let reason = reason.clone();
-        let reject_called = Rc::clone(&already_resolved);
-        let res_p = Rc::clone(result_promise);
-        vm.queue_microtask(move |vm| {
-          if *reject_called.borrow() {
-            return Ok(());
-          }
-          *reject_called.borrow_mut() = true;
-          reject_pending_promise(vm, &res_p, reason.clone());
-          Ok(())
-        });
-        return Ok(());
-      }
-    }
+  if let Value::Promise(ref promise, _) = value
+    && Rc::ptr_eq(promise, result_promise)
+  {
+    *already_resolved.borrow_mut() = true;
+    let reason = vm.create_intrinsic_error("TypeError", "Chaining cycle detected")?;
+    reject_pending_promise(vm, result_promise, reason);
+    return Ok(());
   }
 
   if value.is_object() {
-    let then_val = vm.get_property_host(&value, &PropertyKey::String("then".to_string().into()))?;
+    let then_val = match vm.capture_completion(|vm| {
+      vm.get_property_host(&value, &PropertyKey::String("then".to_string().into()))
+    }) {
+      Ok(value) => value,
+      Err((error, thrown)) => {
+        *already_resolved.borrow_mut() = true;
+        let reason = thrown.unwrap_or_else(|| Value::String(error.to_string().into()));
+        reject_pending_promise(vm, result_promise, reason);
+        return Ok(());
+      }
+    };
     if Vm::is_callable_value(&then_val) {
       let resolve_called = Rc::clone(&already_resolved);
       let res_p = Rc::clone(result_promise);
@@ -221,44 +170,71 @@ fn resolve_promise_with_value_inner(
       let then_func = then_val;
 
       vm.queue_microtask(move |vm| {
-        let resolve_called_inner = Rc::clone(&resolve_called);
-        let res_p_inner = Rc::clone(&res_p);
-        let resolve_cb = Value::Builtin(Rc::new(move |vm, args| {
-          if *resolve_called_inner.borrow() {
-            return Ok(Value::Undefined);
-          }
-          *resolve_called_inner.borrow_mut() = true;
-          let off = if args.len() > 1 { 1 } else { 0 };
-          let v = args.get(off).cloned().unwrap_or(Value::Undefined);
-          resolve_promise_with_value(vm, &res_p_inner, v)?;
-          Ok(Value::Undefined)
-        }));
+        vm.with_function_realm(&then_func, |vm| {
+          let resolve_called_inner = Rc::clone(&resolve_called);
+          let res_p_inner = Rc::clone(&res_p);
+          let resolve_cb = Value::Builtin(Rc::new(move |vm, args| {
+            if *resolve_called_inner.borrow() {
+              return Ok(Value::Undefined);
+            }
+            *resolve_called_inner.borrow_mut() = true;
+            let off = usize::from(vm.builtin_this_arg_prepended());
+            let v = args.get(off).cloned().unwrap_or(Value::Undefined);
 
-        let reject_called_inner = Rc::clone(&resolve_called);
-        let res_p2_inner = Rc::clone(&res_p);
-        let reject_cb = Value::Builtin(Rc::new(move |vm, args| {
-          if *reject_called_inner.borrow() {
-            return Ok(Value::Undefined);
-          }
-          *reject_called_inner.borrow_mut() = true;
-          let off = if args.len() > 1 { 1 } else { 0 };
-          let r = args.get(off).cloned().unwrap_or(Value::Undefined);
-          reject_pending_promise(vm, &res_p2_inner, r);
-          Ok(Value::Undefined)
-        }));
+            resolve_promise_with_value(vm, &res_p_inner, v)?;
+            Ok(Value::Undefined)
+          }));
 
-        match vm.call_value_with_this(&then_func, &thenable, &[resolve_cb, reject_cb]) {
-          Ok(_) => Ok(()),
-          Err(err) => {
-            let reason = vm
-              .exceptions
-              .last_uncaught
-              .take()
-              .unwrap_or(Value::String(format!("{}", err).into()));
-            reject_pending_promise(vm, &res_p, reason);
-            Ok(())
+          let reject_called_inner = Rc::clone(&resolve_called);
+          let res_p2_inner = Rc::clone(&res_p);
+          let reject_cb = Value::Builtin(Rc::new(move |vm, args| {
+            if *reject_called_inner.borrow() {
+              return Ok(Value::Undefined);
+            }
+            *reject_called_inner.borrow_mut() = true;
+            let off = usize::from(vm.builtin_this_arg_prepended());
+            let r = args.get(off).cloned().unwrap_or(Value::Undefined);
+            reject_pending_promise(vm, &res_p2_inner, r);
+            Ok(Value::Undefined)
+          }));
+
+          let function_proto = vm.realm().function_prototype();
+          let Value::Object(function_proto) = function_proto else {
+            unreachable!("intrinsic Function prototype")
+          };
+          let wrap = |callback| {
+            let Value::Builtin(callback) = callback else {
+              unreachable!("resolving callback")
+            };
+            let callback = builtin_object(callback, &function_proto);
+            if let Value::BuiltinObject(_, properties) = &callback {
+              properties
+                .borrow_mut()
+                .set_internal_slot("[[RealmGlobals]]", Value::Object(vm.globals_rc()));
+            }
+            set_builtin_length(&callback, 1.0);
+            set_builtin_name(&callback, "");
+            callback
+          };
+          let resolve_cb = wrap(resolve_cb);
+          let reject_cb = wrap(reject_cb);
+
+          match vm.call_value_with_this(&then_func, &thenable, &[resolve_cb, reject_cb]) {
+            Ok(_) => Ok(()),
+            Err(err) => {
+              let reason = vm
+                .exceptions
+                .last_uncaught
+                .take()
+                .unwrap_or(Value::String(format!("{}", err).into()));
+              if !*resolve_called.borrow() {
+                *resolve_called.borrow_mut() = true;
+                reject_pending_promise(vm, &res_p, reason);
+              }
+              Ok(())
+            }
           }
-        }
+        })
       });
       return Ok(());
     }
@@ -315,6 +291,7 @@ pub(crate) fn fulfill_pending_promise(
   use crate::value::PromiseState;
 
   let mut state = promise.borrow_mut();
+
   if let PromiseState::Pending { on_fulfilled, .. } = &mut *state {
     let callbacks = std::mem::take(on_fulfilled);
     if crate::trace::enabled() {
@@ -452,9 +429,9 @@ pub(crate) fn shadowrealm_import_value(
   let undefined = Value::Undefined;
   let target = args.first().unwrap_or(&undefined);
   let record = require_shadow_realm_record(vm, target)?;
-  let specifier = args.first().unwrap_or(&undefined);
+  let specifier = args.get(1).unwrap_or(&undefined);
   let specifier_str = vm.to_string(specifier)?;
-  let export_name = match args.get(1) {
+  let export_name = match args.get(2) {
     Some(Value::String(s)) => s.clone(),
     _ => {
       return Err(
@@ -470,8 +447,8 @@ pub(crate) fn shadowrealm_import_value(
   let promise_value = vm.promise_value(Rc::clone(&promise));
 
   let mut transfer_set_arg: Option<Value> = None;
-  if args.len() > 2 {
-    transfer_set_arg = args.get(2).cloned();
+  if args.len() > 3 {
+    transfer_set_arg = args.get(3).cloned();
   }
 
   let record_handle = Rc::clone(&record);
@@ -480,108 +457,137 @@ pub(crate) fn shadowrealm_import_value(
   let export_clone = export_name;
 
   vm.queue_microtask(move |vm| {
-    let result = (|| -> Result<Value, String> {
+    let prepared = (|| -> Result<_, String> {
       let entry = {
         let inner_vm = record_handle.borrow_vm();
         let mut loader = inner_vm.module_loader_mut();
         let entry = loader
           .construct(&base_dir, specifier_clone.as_str_lossy())
-          .map_err(|err| format!("module construct failed: {}", err))?;
+          .map_err(|error| format!("module construct failed: {error}"))?;
         loader
           .instantiate_all()
-          .map_err(|err| format!("module instantiate failed: {}", err))?;
+          .map_err(|error| format!("module instantiate failed: {error}"))?;
         entry
       };
       let entry_path = entry.borrow().path.clone();
-      {
+      let evaluation = {
         let mut inner_vm = record_handle.borrow_vm();
-        let loader_handle = inner_vm.module_loader_handle();
-        crate::module::evaluate_entry_shared(&loader_handle, &entry_path, &mut inner_vm, false)
-          .map_err(|err| format!("module runtime failed: {err}"))?;
+        let loader = inner_vm.module_loader_handle();
+        let result =
+          crate::module::evaluate_entry_promise_shared(&loader, &entry_path, &mut inner_vm, false);
+        vm.take_jobs_from(&mut inner_vm);
+        result.map_err(|error| format!("module runtime failed: {error}"))?
+      };
+      Ok((entry, evaluation))
+    })();
+    let (entry, evaluation) = match prepared {
+      Ok(prepared) => prepared,
+      Err(message) => {
+        let reason = vm
+          .create_intrinsic_error("TypeError", &message)
+          .unwrap_or_else(|_| Value::String(message.into()));
+        reject_pending_promise(vm, &promise, reason);
+        return Ok(());
       }
-      let slot = entry
+    };
+    let rejected_promise = Rc::clone(&promise);
+    let fulfilled_promise = Rc::clone(&promise);
+    let export_clone = export_clone.clone();
+    let transfer_set_arg = transfer_set_arg.clone();
+    let on_fulfilled = Value::Builtin(Rc::new(move |vm, _| {
+      let promise = &fulfilled_promise;
+      let result = entry
         .borrow()
         .exports
         .get(export_clone.as_str_lossy())
         .cloned()
-        .ok_or_else(|| format!("export {} not found", export_clone))?;
-      Ok(slot.value())
-    })();
-
-    match result {
-      Ok(value) => {
-        let mut transfer_set: Option<HashSet<usize>> = None;
-        if let Some(Value::Array(arr_rc, _)) = transfer_set_arg.clone() {
-          let mut set = HashSet::new();
-          for v in arr_rc.borrow().iter().flatten().cloned() {
-            match v {
-              Value::Object(obj_rc) => {
-                if let Some(backing_rc) = array_buffer_backing(&Value::Object(Rc::clone(&obj_rc))) {
-                  if !set.insert(Rc::as_ptr(&backing_rc) as usize) {
-                    let err_val = vm
-                      .create_intrinsic_error(
-                        "TypeError",
-                        "Transfer list contains a duplicate ArrayBuffer",
-                      )
-                      .unwrap_or(Value::String(
-                        "Transfer list contains a duplicate ArrayBuffer"
-                          .to_string()
-                          .into(),
-                      ));
-                    reject_pending_promise(vm, &promise, err_val);
-                    return Ok(());
+        .map(|slot| slot.value())
+        .ok_or_else(|| format!("export {export_clone} not found"));
+      match result {
+        Ok(value) => {
+          let mut transfer_set: Option<HashSet<usize>> = None;
+          if let Some(Value::Array(arr_rc, _)) = transfer_set_arg.clone() {
+            let mut set = HashSet::new();
+            for v in arr_rc.borrow().iter().flatten().cloned() {
+              match v {
+                Value::Object(obj_rc) => {
+                  if let Some(backing_rc) = array_buffer_backing(&Value::Object(Rc::clone(&obj_rc)))
+                  {
+                    if !set.insert(Rc::as_ptr(&backing_rc) as usize) {
+                      let err_val = vm
+                        .create_intrinsic_error(
+                          "TypeError",
+                          "Transfer list contains a duplicate ArrayBuffer",
+                        )
+                        .unwrap_or(Value::String(
+                          "Transfer list contains a duplicate ArrayBuffer"
+                            .to_string()
+                            .into(),
+                        ));
+                      reject_pending_promise(vm, promise, err_val);
+                      return Ok(Value::Undefined);
+                    }
+                    continue;
                   }
-                  continue;
+                  let err_val = vm
+                    .create_intrinsic_error(
+                      "TypeError",
+                      "Transfer list entries must be ArrayBuffer objects",
+                    )
+                    .unwrap_or(Value::String(
+                      "Transfer list entries must be ArrayBuffer objects"
+                        .to_string()
+                        .into(),
+                    ));
+                  reject_pending_promise(vm, promise, err_val);
+                  return Ok(Value::Undefined);
                 }
-                let err_val = vm
-                  .create_intrinsic_error(
-                    "TypeError",
-                    "Transfer list entries must be ArrayBuffer objects",
-                  )
-                  .unwrap_or(Value::String(
-                    "Transfer list entries must be ArrayBuffer objects"
-                      .to_string()
-                      .into(),
-                  ));
-                reject_pending_promise(vm, &promise, err_val);
-                return Ok(());
-              }
-              _ => {
-                let err_val = vm
-                  .create_intrinsic_error(
-                    "TypeError",
-                    "Transfer list entries must be ArrayBuffer objects",
-                  )
-                  .unwrap_or(Value::String(
-                    "Transfer list entries must be ArrayBuffer objects"
-                      .to_string()
-                      .into(),
-                  ));
-                reject_pending_promise(vm, &promise, err_val);
-                return Ok(());
+                _ => {
+                  let err_val = vm
+                    .create_intrinsic_error(
+                      "TypeError",
+                      "Transfer list entries must be ArrayBuffer objects",
+                    )
+                    .unwrap_or(Value::String(
+                      "Transfer list entries must be ArrayBuffer objects"
+                        .to_string()
+                        .into(),
+                    ));
+                  reject_pending_promise(vm, promise, err_val);
+                  return Ok(Value::Undefined);
+                }
               }
             }
+            transfer_set = Some(set);
           }
-          transfer_set = Some(set);
-        }
 
-        match clone_value_across_realms(vm, &value, transfer_set.as_ref()) {
-          Ok(cloned) => fulfill_pending_promise(vm, &promise, cloned),
-          Err(err) => {
-            let err_val = vm
-              .create_intrinsic_error("TypeError", &format!("ShadowRealm clone failed: {}", err))
-              .unwrap_or(Value::String(err.into()));
-            reject_pending_promise(vm, &promise, err_val);
+          match clone_value_across_realms(vm, &value, transfer_set.as_ref()) {
+            Ok(cloned) => fulfill_pending_promise(vm, promise, cloned),
+            Err(err) => {
+              let err_val = vm
+                .create_intrinsic_error("TypeError", &format!("ShadowRealm clone failed: {}", err))
+                .unwrap_or(Value::String(err.into()));
+              reject_pending_promise(vm, promise, err_val);
+            }
           }
         }
+        Err(msg) => {
+          let err_val = vm
+            .create_intrinsic_error("TypeError", &msg)
+            .unwrap_or(Value::String(msg.clone().into()));
+          reject_pending_promise(vm, promise, err_val);
+        }
       }
-      Err(msg) => {
-        let err_val = vm
-          .create_intrinsic_error("TypeError", &msg)
-          .unwrap_or(Value::String(msg.clone().into()));
-        reject_pending_promise(vm, &promise, err_val);
-      }
-    }
+      Ok(Value::Undefined)
+    }));
+    let on_rejected = Value::Builtin(Rc::new(move |vm, _| {
+      let reason = vm
+        .create_intrinsic_error("TypeError", "ShadowRealm module evaluation failed")
+        .unwrap_or_else(|_| Value::String("ShadowRealm module evaluation failed".into()));
+      reject_pending_promise(vm, &rejected_promise, reason);
+      Ok(Value::Undefined)
+    }));
+    crate::module::observe_evaluation(vm, &evaluation, on_fulfilled, on_rejected);
     Ok(())
   });
 
@@ -630,11 +636,8 @@ pub(crate) fn dynamic_import_value(
     None => (resolve_shadowrealm_base_dir(vm), None),
   };
   let loader_handle = vm.module_loader_handle();
-  let globals = vm.globals_rc();
   vm.queue_dynamic_import_job(move |vm| {
-    let mut import_vm = Vm::new_with_module_loader(Rc::clone(&globals), loader_handle.clone());
-    import_vm.share_host_roots_from(vm);
-    let result = (|| -> Result<Value, Value> {
+    let result = (|| -> Result<(Value, Value), Value> {
       let entry = {
         let mut loader = loader_handle.borrow_mut();
         let entry = loader
@@ -660,20 +663,20 @@ pub(crate) fn dynamic_import_value(
         entry
       };
       let entry_path = entry.borrow().path.clone();
-      crate::module::evaluate_entry_shared(&loader_handle, &entry_path, &mut import_vm, false)
-        .map_err(|err| {
-          import_vm
-            .exceptions
-            .last_uncaught
-            .take()
-            .unwrap_or_else(|| {
-              host_error_object(
-                vm,
-                "TypeError",
-                &format!("dynamic import evaluate failed: {}", err),
-              )
-            })
-        })?;
+      let evaluation =
+        crate::module::evaluate_entry_promise_shared(&loader_handle, &entry_path, vm, false)
+          .map_err(|err| {
+            vm.exceptions
+              .last_uncaught
+              .take()
+              .unwrap_or_else(|| {
+                host_error_object(
+                  vm,
+                  "TypeError",
+                  &format!("dynamic import evaluate failed: {}", err),
+                )
+              })
+          })?;
 
       let module_index = entry.borrow().module_index.ok_or_else(|| {
         Value::String(
@@ -698,22 +701,105 @@ pub(crate) fn dynamic_import_value(
       for (index, exports) in exports {
         vm.ensure_module_exports(index, exports);
       }
-      vm.module_namespace_value(module_index)
+      let namespace = vm
+        .module_namespace_value(module_index)
         .ok_or_else(|| {
           Value::String(
             "dynamic import failed: module namespace missing"
               .to_string()
               .into(),
           )
-        })
+        })?;
+      Ok((evaluation, namespace))
     })();
 
     match result {
-      Ok(value) => fulfill_pending_promise(vm, &promise, value),
+      Ok((evaluation, namespace)) => {
+        let fulfilled = Rc::clone(&promise);
+        let on_fulfilled = Value::Builtin(Rc::new(move |vm, _| {
+          resolve_promise_with_value(vm, &fulfilled, namespace.clone())?;
+          Ok(Value::Undefined)
+        }));
+        let rejected = Rc::clone(&promise);
+        let on_rejected = Value::Builtin(Rc::new(move |vm, args| {
+          let offset = usize::from(args.len() > 1);
+          reject_pending_promise(
+            vm,
+            &rejected,
+            args
+              .get(offset)
+              .cloned()
+              .unwrap_or(Value::Undefined),
+          );
+          Ok(Value::Undefined)
+        }));
+        crate::module::observe_evaluation(vm, &evaluation, on_fulfilled, on_rejected);
+      }
       Err(reason) => reject_pending_promise(vm, &promise, reason),
     }
     Ok(())
   });
 
   Ok(promise_value)
+}
+
+#[cfg(test)]
+mod resolution_tests {
+  use super::*;
+
+  fn run(
+    vm: &mut Vm,
+    source: &str,
+  ) {
+    let session = crate::parser::Parser::parse_source(source).expect("parse");
+    let chunk = crate::compiler::compile_session(&session).expect("compile");
+    vm.run(chunk).expect("run");
+  }
+
+  #[test]
+  fn thenable_resolving_functions_use_the_then_method_realm_and_ignore_this() {
+    let mut foreign = Vm::new(Rc::new(RefCell::new(ObjectData::new())));
+    run(
+      &mut foreign,
+      crate::js!(
+        r#"
+      globalThis.thenable = { then(resolve) {
+        resolve(Object.getPrototypeOf(resolve) === Function.prototype);
+      } };
+    "#
+      ),
+    );
+    let mut local = Vm::new(Rc::new(RefCell::new(ObjectData::new())));
+    local.realm().set_global(
+      "thenable",
+      foreign
+        .get_global("thenable")
+        .expect("foreign thenable"),
+    );
+    run(
+      &mut local,
+      crate::js!(
+        r#"
+      var correctRealm = false, correctProxyRealm = false, correctValue = false, correctReason = false;
+      Promise.resolve(thenable).then(value => { correctRealm = value; });
+      Promise.resolve({ then: new Proxy(thenable.then, {}) }).then(value => { correctProxyRealm = value; });
+      Promise.resolve({ then(resolve) { resolve.call(42); } })
+        .then(value => { correctValue = value === undefined; });
+      Promise.resolve({ then(resolve, reject) { reject.call(42); } })
+        .catch(reason => { correctReason = reason === undefined; });
+    "#
+      ),
+    );
+    local
+      .flush_microtasks()
+      .expect("settle thenables");
+    for name in [
+      "correctRealm",
+      "correctProxyRealm",
+      "correctValue",
+      "correctReason",
+    ] {
+      assert_eq!(local.get_global(name), Some(Value::Bool(true)), "{name}");
+    }
+  }
 }

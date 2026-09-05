@@ -61,7 +61,7 @@ pub(crate) use memory::VmMemory;
 pub use memory::{HostRoot, VmMemorySnapshot, WeakHostRoot};
 pub(crate) use partial_descriptor::PartialDescriptor;
 pub(crate) use stack::{CallStack, HandlerStack};
-pub(crate) use yield_star::{YieldStarResume, YieldStarState};
+pub(crate) use yield_star::{YieldStarPhase, YieldStarResume, YieldStarState};
 
 /// Initial locals vector capacity per call frame.
 pub(super) const LOCALS_INITIAL_CAPACITY: usize = 64;
@@ -200,6 +200,8 @@ pub(super) struct ExecutionState {
   /// Number of active interpreter loops. Native calls only drain jobs when
   /// this is zero, preserving JavaScript job run-to-completion.
   pub(super) interpreter_depth: usize,
+  /// Module bodies return their jobs to the host before a checkpoint.
+  pub(super) defer_job_checkpoint: bool,
   /// Changes whenever exception handling transfers execution to a handler.
   pub(super) control_flow_epoch: u64,
   pub(super) builtin_this_arg_prepended: bool,
@@ -231,6 +233,8 @@ pub(super) struct ModuleState {
 }
 
 pub(super) struct JobState {
+  /// Running host jobs may retain Values in opaque native closure captures.
+  pub(super) active_depth: usize,
   pub(super) microtasks: VecDeque<Microtask>,
   pub(super) dynamic_imports: VecDeque<DynamicImportJob>,
   pub(super) unhandled_rejection_hook: Option<UnhandledRejectionHook>,

@@ -113,37 +113,56 @@ pub fn evaluate_entry_shared(
   vm: &mut Vm,
   enable_typecheck: bool,
 ) -> Result<(), crate::errors::RuntimeError> {
-  {
-    let loader_ref = loader.borrow();
-    for rec_rc in loader_ref.map.values() {
-      let rec = rec_rc.borrow();
-      if let Some(idx) = rec.module_index {
-        let exports_clone = rec.exports.clone();
-        vm.install_module_exports(idx, exports_clone);
+  let promise = evaluate_entry_promise_shared(loader, entry, vm, enable_typecheck)?;
+  async_evaluation::finish_host_evaluation(vm, &promise)
+}
+
+/// Start evaluating a linked module graph and return its cached evaluation promise.
+/// Pending top-level awaits resume through the VM job queue; this function does
+/// not drain jobs or require the promise to settle synchronously.
+///
+/// # Errors
+/// Returns an error if graph preparation or compilation fails.
+pub fn evaluate_entry_promise_shared(
+  loader: &Rc<RefCell<ModuleLoader>>,
+  entry: &Path,
+  vm: &mut Vm,
+  enable_typecheck: bool,
+) -> Result<Value, crate::errors::RuntimeError> {
+  let entry = loader
+    .borrow_mut()
+    .prepare_evaluation(entry, vm, enable_typecheck)?;
+  async_evaluation::evaluate(vm, &entry)
+}
+
+impl ModuleLoader {
+  pub(super) fn prepare_evaluation(
+    &mut self,
+    entry: &Path,
+    vm: &mut Vm,
+    enable_typecheck: bool,
+  ) -> Result<Rc<RefCell<ModuleRecord>>, crate::errors::RuntimeError> {
+    use crate::errors::RuntimeError;
+    for record in self.map.values() {
+      let record = record.borrow();
+      if let Some(index) = record.module_index {
+        vm.ensure_module_exports(index, record.exports.clone());
       }
     }
-    loader_ref.initialize_namespace_reexports(vm);
-  }
-
-  let order = {
-    let mut loader_ref = loader.borrow_mut();
-    loader_ref
+    self.initialize_namespace_reexports(vm);
+    let order = self
       .evaluation_order_from(entry)
-      .map_err(|e| crate::errors::RuntimeError::from(format!("Module resolution failed: {}", e)))?
-  };
-
-  let declarations = {
-    let loader_ref = loader.borrow();
-    loader_ref.virtual_declarations_for_typecheck()
-  };
-
-  let compile_jobs = {
-    let loader_ref = loader.borrow();
-    order
+      .map_err(|error| RuntimeError::from(format!("Module resolution failed: {error}")))?;
+    let entry_path = order
+      .last()
+      .ok_or_else(|| RuntimeError::from("empty module graph"))?;
+    let entry = Rc::clone(&self.map[entry_path]);
+    let declarations = self.virtual_declarations_for_typecheck();
+    let jobs = order
       .iter()
       .filter_map(|path| {
-        let record = loader_ref.map.get(path)?.borrow();
-        if !matches!(record.state, ModuleState::Instantiated) || record.bytecode.is_some() {
+        let record = self.map.get(path)?.borrow();
+        if record.state != ModuleState::Instantiated || record.bytecode.is_some() {
           return None;
         }
         let ModuleRecordPayload::Source {
@@ -161,101 +180,120 @@ pub fn evaluate_entry_shared(
           context: ModuleContext {
             module_index: record
               .module_index
-              .expect("module_index should be set"),
+              .expect("instantiated module index"),
             imports: record.import_sources.clone(),
             exports: record.exports.keys().cloned().collect(),
             namespace_exports: record.namespace_exports.clone(),
           },
         })
       })
-      .collect()
-  };
-  let pipeline_counters = {
-    let loader_ref = loader.borrow();
-    Arc::clone(&loader_ref.pipeline_counters)
-  };
-  let mut compiled = compile_modules_parallel(compile_jobs, pipeline_counters)?;
-
-  for path in order {
-    let maybe_chunk = 'prepare: {
-      let loader_ref = loader.borrow_mut();
-      let Some(rec_rc) = loader_ref.map.get(&path).cloned() else {
-        break 'prepare None;
-      };
-      let rec_rc_return = Rc::clone(&rec_rc);
-      let mut rec = rec_rc.borrow_mut();
-      if matches!(rec.state, ModuleState::Evaluating) {
-        None
-      } else if matches!(rec.state, ModuleState::Instantiated) {
-        if rec.host_initialized {
-          rec.state = ModuleState::Evaluated;
-          break 'prepare None;
-        }
-        rec.state = ModuleState::Evaluating;
-        let code = match &rec.payload {
-          ModuleRecordPayload::Prelinked { .. } => rec.bytecode.clone().ok_or_else(|| {
-            crate::errors::RuntimeError::from(
-              "Prelinked module record is missing its validated chunk",
-            )
-          })?,
-          ModuleRecordPayload::Source {
-            session,
-            dependencies,
-            ..
-          } => {
-            let program = session.program();
-            if enable_typecheck {
-              loader_ref.pipeline_counters.source_typecheck();
-              crate::typecheck::check_with_declarations_and_source_imports(
-                program,
-                &declarations,
-                dependencies,
-              )
-              .map_err(|error| {
-                crate::errors::RuntimeError::from(format!("Typecheck failed: {error}"))
-              })?;
-            }
-            let module_index = rec
-              .module_index
-              .expect("module_index should be set");
-            let context = ModuleContext {
-              module_index,
-              imports: rec.import_sources.clone(),
-              exports: rec.exports.keys().cloned().collect(),
-              namespace_exports: rec.namespace_exports.clone(),
-            };
-            let code = if let Some(code) = rec.bytecode.clone() {
-              crate::runtime_utils::clear_slot_types_in_chunk(code)
-            } else if let Some(code) = compiled.remove(&path) {
-              code
-            } else {
-              loader_ref.pipeline_counters.source_compilation();
-              let code =
-                crate::compiler::compile_oxc_with_ctx(program, Some(&context), session.source())
-                  .map_err(|error| {
-                    crate::errors::RuntimeError::from(format!("Compile failed: {error}"))
-                  })?;
-              crate::runtime_utils::clear_slot_types_in_chunk(code)
-            };
-            rec.bytecode = Some(code.clone());
-            code
-          }
-        };
-        Some((rec_rc_return, code))
-      } else {
-        None
+      .collect();
+    let mut compiled = compile_modules_parallel(jobs, Arc::clone(&self.pipeline_counters))?;
+    for path in order {
+      let record = Rc::clone(&self.map[&path]);
+      if record.borrow().state != ModuleState::Instantiated {
+        continue;
       }
-    };
-
-    if let Some((rec_rc, code)) = maybe_chunk {
-      let specifier = rec_rc.borrow().specifier.clone();
-      vm.set_current_module_specifier(Some(specifier));
-      let result = vm.run(code);
-      vm.set_current_module_specifier(None);
-      result?;
-      rec_rc.borrow_mut().state = ModuleState::Evaluated;
+      let dependencies = self
+        .evaluation_dependencies(&record)
+        .map_err(|error| RuntimeError::from(format!("Module resolution failed: {error}")))?;
+      let mut record = record.borrow_mut();
+      record.evaluation.dependencies = dependencies.iter().map(Rc::downgrade).collect();
+      if record.host_initialized {
+        continue;
+      }
+      if let ModuleRecordPayload::Source {
+        session,
+        dependencies,
+        ..
+      } = &record.payload
+        && enable_typecheck
+      {
+        self.pipeline_counters.source_typecheck();
+        crate::typecheck::check_with_declarations_and_source_imports(
+          session.program(),
+          &declarations,
+          dependencies,
+        )
+        .map_err(|error| RuntimeError::from(format!("Typecheck failed: {error}")))?;
+      }
+      if record.bytecode.is_none() {
+        let code = if let Some(code) = compiled.remove(&path) {
+          code
+        } else {
+          let ModuleRecordPayload::Source { session, .. } = &record.payload else {
+            return Err(RuntimeError::from("prelinked module missing bytecode"));
+          };
+          self.pipeline_counters.source_compilation();
+          crate::compiler::compile_oxc_with_ctx(
+            session.program(),
+            Some(&ModuleContext {
+              module_index: record
+                .module_index
+                .expect("instantiated module index"),
+              imports: record.import_sources.clone(),
+              exports: record.exports.keys().cloned().collect(),
+              namespace_exports: record.namespace_exports.clone(),
+            }),
+            session.source(),
+          )
+          .map_err(|error| RuntimeError::from(format!("Compile failed: {error}")))?
+        };
+        record.bytecode = Some(crate::runtime_utils::clear_slot_types_in_chunk(code));
+      }
+      record.evaluation.has_tla = record
+        .bytecode
+        .as_ref()
+        .is_some_and(|code| code.has_top_level_await);
     }
+    Ok(entry)
   }
 
-  Ok(())
+  fn evaluation_dependencies(
+    &mut self,
+    record: &Rc<RefCell<ModuleRecord>>,
+  ) -> Result<Vec<Rc<RefCell<ModuleRecord>>>, BundlerError> {
+    enum Requests {
+      Source(Vec<String>, PathBuf, Option<String>),
+      Prelinked(Vec<usize>),
+    }
+    let requests = {
+      let record = record.borrow();
+      match &record.payload {
+        ModuleRecordPayload::Source { dependencies, .. } => Requests::Source(
+          dependencies.clone(),
+          record
+            .path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf(),
+          record
+            .path
+            .to_string_lossy()
+            .starts_with(VIRTUAL_PATH_PREFIX)
+            .then(|| record.specifier.clone()),
+        ),
+        ModuleRecordPayload::Prelinked { dependencies } => {
+          Requests::Prelinked(dependencies.clone())
+        }
+      }
+    };
+    match requests {
+      Requests::Source(requests, base, importer) => requests
+        .into_iter()
+        .map(|specifier| self.construct_from_importer(&base, importer.as_deref(), &specifier))
+        .collect(),
+      Requests::Prelinked(indices) => indices
+        .into_iter()
+        .map(|index| {
+          let location = self
+            .prelinked_by_index
+            .get(&index)
+            .copied()
+            .ok_or_else(|| BundlerError::from(format!("missing prelinked dependency {index}")))?;
+          self.construct_prelinked_at(location)
+        })
+        .collect(),
+    }
+  }
 }

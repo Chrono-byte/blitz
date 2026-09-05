@@ -17,7 +17,7 @@ use std::sync::Arc;
 use thiserror::Error;
 
 /// Current version of the bytecode bundle container format.
-pub const BYTECODE_BUNDLE_VERSION: u16 = 4;
+pub const BYTECODE_BUNDLE_VERSION: u16 = 5;
 
 const MAGIC: &[u8; 8] = b"BLITZBC\0";
 const HEADER_LEN: usize = MAGIC.len() + 2 + 8 + 4;
@@ -113,7 +113,12 @@ pub fn encode(entries: &[NamedChunk]) -> Result<Vec<u8>, BundleError> {
       .collect::<Result<_, _>>()?,
     entries: wire_entries,
   };
-  let payload = postcard::to_allocvec(&bundle)?;
+  let flags = bundle
+    .chunks
+    .iter()
+    .map(|chunk| chunk.has_top_level_await)
+    .collect::<Vec<_>>();
+  let payload = postcard::to_allocvec(&(bundle, flags))?;
   frame_payload(&payload)
 }
 
@@ -139,7 +144,7 @@ pub fn decode(bytes: &[u8]) -> Result<Vec<NamedChunk>, BundleError> {
   }
 
   let version = u16::from_le_bytes([bytes[8], bytes[9]]);
-  if version != BYTECODE_BUNDLE_VERSION {
+  if version != 4 && version != BYTECODE_BUNDLE_VERSION {
     return Err(BundleError::UnsupportedVersion(version));
   }
 
@@ -166,7 +171,22 @@ pub fn decode(bytes: &[u8]) -> Result<Vec<NamedChunk>, BundleError> {
     return Err(BundleError::ChecksumMismatch);
   }
 
-  let wire: WireBundle = postcard::from_bytes(payload)?;
+  // Version 4 has the same nested chunk representation, but no root-await
+  // metadata table. Its chunks retain the historical false default.
+  let wire: WireBundle = if version == 4 {
+    postcard::from_bytes(payload)?
+  } else {
+    let (mut wire, flags): (WireBundle, Vec<bool>) = postcard::from_bytes(payload)?;
+    if flags.len() != wire.chunks.len() {
+      return Err(BundleError::InvalidData(
+        "await metadata count differs from chunk count".into(),
+      ));
+    }
+    for (chunk, flag) in wire.chunks.iter_mut().zip(flags) {
+      chunk.has_top_level_await = flag;
+    }
+    wire
+  };
   let sources = wire.sources.into_iter().map(Arc::new).collect();
   let mut decoder = Decoder {
     chunks: wire.chunks,
@@ -241,6 +261,10 @@ struct WireNamedChunk {
 
 #[derive(Clone, Serialize, Deserialize)]
 struct WireChunk {
+  // Kept in the version-5 envelope metadata table so version-4 Postcard
+  // struct layouts remain decodable without ambiguous trailing fields.
+  #[serde(skip)]
+  has_top_level_await: bool,
   version: u8,
   code: Vec<u32>,
   constants: Vec<WireConstant>,
@@ -458,6 +482,7 @@ impl Encoder {
     code: &Chunk,
   ) -> Result<WireChunk, BundleError> {
     Ok(WireChunk {
+      has_top_level_await: code.has_top_level_await,
       version: code.version as u8,
       code: code.words.clone(),
       constants: code
@@ -618,6 +643,7 @@ impl Decoder {
       spill_slot_count: wire.spill_slot_count,
       value_spill_slot_count: wire.value_spill_slot_count,
       root_strict: wire.root_strict,
+      has_top_level_await: wire.has_top_level_await,
       allow_new_target: wire.allow_new_target,
       allow_super: wire.allow_super,
       finally_handlers: wire
@@ -1148,6 +1174,22 @@ mod tests {
   }
 
   #[test]
+  fn await_metadata_round_trips_and_version_four_defaults_to_false() {
+    let mut entries = populated_bundle();
+    entries[0].chunk.has_top_level_await = true;
+    let bytes = encode_bytecode_bundle(&entries).expect("encode await metadata");
+    let decoded = decode_bytecode_bundle(&bytes).expect("decode await metadata");
+    assert!(decoded[0].chunk.has_top_level_await);
+    let (wire, _flags): (WireBundle, Vec<bool>) =
+      postcard::from_bytes(&bytes[HEADER_LEN..]).expect("new wire envelope");
+    let payload = postcard::to_allocvec(&wire).expect("legacy wire payload");
+    let mut legacy = frame_payload(&payload).expect("legacy envelope");
+    legacy[8..10].copy_from_slice(&4_u16.to_le_bytes());
+    let decoded = decode_bytecode_bundle(&legacy).expect("version four stays readable");
+    assert!(!decoded[0].chunk.has_top_level_await);
+  }
+
+  #[test]
   fn rejects_corruption() {
     let mut bytes = encode_bytecode_bundle(&populated_bundle()).expect("encode bundle");
     let last = bytes.len() - 1;
@@ -1172,10 +1214,10 @@ mod tests {
   #[test]
   fn verifies_code_after_decode() {
     let bytes = encode_bytecode_bundle(&populated_bundle()).expect("encode bundle");
-    let mut wire: WireBundle =
+    let (mut wire, flags): (WireBundle, Vec<bool>) =
       postcard::from_bytes(&bytes[HEADER_LEN..]).expect("decode private wire payload");
     wire.chunks[0].code[0] = 0xff;
-    let payload = postcard::to_allocvec(&wire).expect("encode private wire payload");
+    let payload = postcard::to_allocvec(&(wire, flags)).expect("encode private wire payload");
     let bytes = frame_payload(&payload).expect("frame private wire payload");
 
     assert!(matches!(

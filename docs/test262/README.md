@@ -32,3 +32,7 @@ The schema-v2 summary always reports `pass`, `fail`, `skip`, `crash`, and
 a normative module test appears in both `normative` and `module`.
 
 The reviewed baseline and interpretation are recorded in `ES6_BASELINE.md`.
+
+Async generators, async iteration, and top-level await are tracked in
+[ASYNC_COMPATIBILITY.md](ASYNC_COMPATIBILITY.md), with separate compatibility
+and Promise/async-function regression manifests.

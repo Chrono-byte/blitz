@@ -93,6 +93,21 @@ impl Vm {
     self.jobs.microtasks.push_back(Box::new(job));
   }
 
+  /// Return a suspended child execution's jobs to the host queue.
+  pub(crate) fn take_jobs_from(
+    &mut self,
+    child: &mut Vm,
+  ) {
+    self
+      .jobs
+      .microtasks
+      .append(&mut child.jobs.microtasks);
+    self
+      .jobs
+      .dynamic_imports
+      .append(&mut child.jobs.dynamic_imports);
+  }
+
   /// Queue a dynamic import job to be executed by the host job loop.
   pub(crate) fn queue_dynamic_import_job<F>(
     &mut self,
@@ -150,6 +165,24 @@ impl Vm {
     resolve_promise_with_value(self, promise, value)
   }
 
+  /// Reject a promise created for a host integration with its original reason.
+  ///
+  /// # Errors
+  /// Returns an error when `promise` is not a Promise.
+  pub fn reject_host_promise(
+    &mut self,
+    promise: &Value,
+    reason: Value,
+  ) -> Result<(), crate::errors::RuntimeError> {
+    let Value::Promise(promise, _) = promise else {
+      return Err(crate::errors::RuntimeError::from(
+        "host promise settlement requires a Promise",
+      ));
+    };
+    reject_pending_promise(self, promise, reason);
+    Ok(())
+  }
+
   /// Invoke the installed unhandled rejection hook, if present.
   pub(crate) fn call_unhandled_rejection(
     &mut self,
@@ -174,7 +207,10 @@ impl Vm {
   pub(crate) fn drain_dynamic_import_jobs(&mut self) -> Result<(), crate::errors::RuntimeError> {
     while let Some(mut job) = self.jobs.dynamic_imports.pop_front() {
       let caller_handlers = std::mem::take(&mut self.exceptions.handlers);
+      self.jobs.active_depth += 1;
       let result = job(self);
+      drop(job);
+      self.jobs.active_depth -= 1;
       self.exceptions.handlers = caller_handlers;
       self.memory.kept_alive.clear();
       self.maybe_collect_garbage_prototype();
@@ -206,7 +242,10 @@ impl Vm {
   pub(crate) fn drain_microtasks(&mut self) -> Result<(), crate::errors::RuntimeError> {
     while let Some(mut job) = self.jobs.microtasks.pop_front() {
       let caller_handlers = std::mem::take(&mut self.exceptions.handlers);
+      self.jobs.active_depth += 1;
       let result = job(self);
+      drop(job);
+      self.jobs.active_depth -= 1;
       self.exceptions.handlers = caller_handlers;
       self.memory.kept_alive.clear();
       self.maybe_collect_garbage_prototype();
@@ -372,6 +411,37 @@ impl Vm {
     Ok(self.promise_value(promise))
   }
 
+  /// Begin a module body without running a host job checkpoint between dependencies.
+  pub(crate) fn start_async_module(
+    &mut self,
+    chunk: std::sync::Arc<crate::bytecode::Chunk>,
+  ) -> Result<Value, crate::errors::RuntimeError> {
+    let promise = crate::gc::track_promise(Rc::new(RefCell::new(PromiseState::Pending {
+      on_fulfilled: Vec::new(),
+      on_rejected: Vec::new(),
+    })));
+    let mut child = self.fork_execution();
+    child.modules.current_specifier = self.modules.current_specifier.clone();
+    child.modules.table = self.modules.table.clone();
+    child.execution.defer_job_checkpoint = true;
+    child.prepare_root(chunk);
+    child.execution.active.this_value = Value::Undefined;
+    let register_state = RegisterState::new(
+      child.execution.active.this_value.clone(),
+      &[],
+      child.execution.active.chunk.spill_slot_count as usize,
+    );
+    let runner = Rc::new(RefCell::new(AsyncRunner {
+      execution: Some(AsyncExecution {
+        vm: child,
+        register_state,
+      }),
+      result_promise: Rc::clone(&promise),
+    }));
+    Self::resume_async_runner(self, &runner, AsyncResume::Start);
+    Ok(self.promise_value(promise))
+  }
+
   fn resume_async_runner(
     host: &mut Vm,
     runner: &Rc<RefCell<AsyncRunner>>,
@@ -437,17 +507,12 @@ impl Vm {
       Ok(RunOutcome::Await(value)) => {
         runner.borrow_mut().execution = Some(execution);
         if let Err(error) = Self::queue_async_resume(host, runner, value) {
-          let result_promise = Rc::clone(&runner.borrow().result_promise);
-          reject_pending_promise(
-            host,
-            &result_promise,
-            Value::String(error.to_string().into()),
-          );
-          if let Some(mut execution) = runner.borrow_mut().execution.take() {
-            execution
-              .vm
-              .discard_suspended_activation(&mut execution.register_state);
-          }
+          let reason = host
+            .exceptions
+            .last_uncaught
+            .take()
+            .unwrap_or_else(|| Value::String(error.to_string().into()));
+          Self::resume_async_runner(host, runner, AsyncResume::Reject(reason));
         }
       }
       Ok(RunOutcome::Return(value)) => {
@@ -507,12 +572,6 @@ impl Vm {
     runner: &Rc<RefCell<AsyncRunner>>,
     awaited: Value,
   ) -> Result<(), crate::errors::RuntimeError> {
-    let promise = crate::gc::track_promise(Rc::new(RefCell::new(PromiseState::Pending {
-      on_fulfilled: Vec::new(),
-      on_rejected: Vec::new(),
-    })));
-    resolve_promise_with_value(host, &promise, awaited)?;
-
     let fulfilled_runner = Rc::clone(runner);
     let on_fulfilled = Value::Builtin(Rc::new(move |vm, args| {
       let offset = usize::from(args.len() > 1);
@@ -533,6 +592,62 @@ impl Vm {
       Self::resume_async_runner(vm, &rejected_runner, AsyncResume::Reject(reason));
       Ok(Value::Undefined)
     }));
+
+    // Await uses the suspended activation's intrinsic Promise, even when a
+    // reaction is running on a host VM from another realm.
+    let mut execution = runner
+      .borrow_mut()
+      .execution
+      .take()
+      .expect("awaiting activation");
+    let result = execution
+      .vm
+      .observe_await(awaited, on_fulfilled, on_rejected);
+    if result.is_err() {
+      host.exceptions.last_uncaught = execution.vm.exceptions.last_uncaught.take();
+    }
+    host.take_jobs_from(&mut execution.vm);
+    runner.borrow_mut().execution = Some(execution);
+    result
+  }
+
+  pub(crate) fn observe_await(
+    &mut self,
+    awaited: Value,
+    on_fulfilled: Value,
+    on_rejected: Value,
+  ) -> Result<(), crate::errors::RuntimeError> {
+    let constructor = self
+      .realm_state
+      .realm
+      .intrinsics
+      .promise_constructor
+      .clone()
+      .unwrap_or(Value::Undefined);
+    let native = if let Value::Promise(promise, _) = &awaited {
+      match self.capture_completion(|vm| {
+        crate::runtime_utils::promise_constructor_matches(vm, &awaited, &constructor)
+      }) {
+        Ok(true) => Some(Rc::clone(promise)),
+        Ok(false) => None,
+        Err((error, reason)) => {
+          self.exceptions.last_uncaught = reason;
+          return Err(error);
+        }
+      }
+    } else {
+      None
+    };
+    let promise = if let Some(promise) = native {
+      promise
+    } else {
+      let promise = crate::gc::track_promise(Rc::new(RefCell::new(PromiseState::Pending {
+        on_fulfilled: Vec::new(),
+        on_rejected: Vec::new(),
+      })));
+      resolve_promise_with_value(self, &promise, awaited)?;
+      promise
+    };
 
     enum PromiseReaction {
       Pending,
@@ -562,7 +677,7 @@ impl Vm {
     match reaction {
       PromiseReaction::Pending => {}
       PromiseReaction::Fulfilled(value) => {
-        host.queue_microtask(move |vm| {
+        self.queue_microtask(move |vm| {
           vm.call_value_with_this(
             &on_fulfilled,
             &Value::Undefined,
@@ -572,7 +687,7 @@ impl Vm {
         });
       }
       PromiseReaction::Rejected(reason) => {
-        host.queue_microtask(move |vm| {
+        self.queue_microtask(move |vm| {
           vm.call_value_with_this(
             &on_rejected,
             &Value::Undefined,
@@ -717,6 +832,76 @@ mod tests {
       Value::Promise(state, _)
         if matches!(&*state.borrow(), PromiseState::Fulfilled(Value::Number(42.0)))
     ));
+  }
+
+  #[test]
+  fn running_jobs_retain_opaque_captures_until_the_job_finishes() {
+    for dynamic_import in [false, true] {
+      let mut vm = test_vm();
+      let captured =
+        crate::gc::track_array(Rc::new(RefCell::new(crate::value::ArrayData::new(vec![
+          Some(Value::Number(42.0)),
+        ]))));
+      let job = move |vm: &mut Vm| {
+        assert_eq!(
+          vm.collect_garbage_prototype().deferred,
+          Some(crate::gc::GcDeferredReason::PendingJobs)
+        );
+        assert_eq!(captured.borrow().first(), Some(&Some(Value::Number(42.0))));
+        Ok(())
+      };
+      if dynamic_import {
+        vm.queue_dynamic_import_job(job);
+      } else {
+        vm.queue_microtask(job);
+      }
+      vm.flush_microtasks().expect("flush");
+      assert_eq!(vm.collect_garbage_prototype().deferred, None);
+    }
+  }
+
+  #[test]
+  fn host_promise_rejection_preserves_the_reason() {
+    let mut vm = test_vm();
+    let promise = vm.create_host_promise();
+    let reason = Value::Object(Rc::new(RefCell::new(ObjectData::new())));
+    vm.reject_host_promise(&promise, reason.clone())
+      .expect("reject host promise");
+    let Value::Promise(state, _) = promise else {
+      panic!("host Promise")
+    };
+    assert!(
+      matches!(&*state.borrow(), PromiseState::Rejected { reason: actual, .. }
+      if crate::runtime_utils::strict_equal(actual, &reason))
+    );
+  }
+
+  #[test]
+  fn promise_resolution_observes_then_and_ignores_throws_after_resolution() {
+    let source = crate::js!(
+      r#"
+      var observedThen = false, fulfilled = false, caught = false, synchronousThrow = false;
+      const original = Promise.resolve(1);
+      original.then = function(resolve) { observedThen = true; resolve(7); };
+      new Promise(resolve => resolve(original)).then(value => { fulfilled = value === 7; });
+      const marker = {};
+      try {
+        Promise.resolve({ get then() { throw marker; } }).catch(error => { caught = error === marker; });
+      } catch (_) { synchronousThrow = true; }
+      var ignoredThrow = false;
+      Promise.resolve({ then(resolve) { resolve(Promise.resolve(9)); throw marker; } })
+        .then(value => { ignoredThrow = value === 9; });
+    "#
+    );
+    let session = crate::parser::Parser::parse_source(source).expect("parse");
+    let code = crate::compiler::compile_session(&session).expect("compile");
+    let mut vm = test_vm();
+    vm.run(code).expect("run");
+    vm.flush_microtasks().expect("flush");
+    for name in ["observedThen", "fulfilled", "caught", "ignoredThrow"] {
+      assert_eq!(vm.get_global(name), Some(Value::Bool(true)), "{name}");
+    }
+    assert_eq!(vm.get_global("synchronousThrow"), Some(Value::Bool(false)));
   }
 
   #[test]

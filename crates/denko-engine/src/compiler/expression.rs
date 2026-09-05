@@ -1283,6 +1283,7 @@ impl super::Compiler {
         }
         if y.delegate {
           self.emit(LoweringOpcode::YieldStar, LINE);
+          self.emit_byte(u8::from(self.is_async), LINE);
         } else {
           self.emit(LoweringOpcode::Yield, LINE);
         }

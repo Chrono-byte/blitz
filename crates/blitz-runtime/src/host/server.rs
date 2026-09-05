@@ -8,9 +8,7 @@ use std::rc::Rc;
 
 use denko::errors::RuntimeError;
 use denko::gc;
-use denko::value::{
-  ArrayData, BuiltinFn, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, Value,
-};
+use denko::value::{ArrayData, BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
 use denko::{HostRoot, Vm};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
@@ -177,21 +175,22 @@ impl ServerState {
     vm: &mut Vm,
   ) -> Result<Value, RuntimeError> {
     let generation = self.0.borrow().generation;
-    let finished = self.finished_value(vm);
+    let finished = self.finished_value(vm)?;
     self.close(vm, generation, &finished)?;
     Ok(finished)
   }
 
   fn finished_value(
     &self,
-    vm: &Vm,
-  ) -> Value {
+    vm: &mut Vm,
+  ) -> Result<Value, RuntimeError> {
     self
       .0
       .borrow()
       .finished
       .and_then(|root| vm.host_root(root))
-      .unwrap_or_else(|| resolved_promise(Value::Undefined))
+      .map(Ok)
+      .unwrap_or_else(|| resolved_promise(vm, Value::Undefined))
   }
 
   fn close(
@@ -879,10 +878,10 @@ fn request_object(
   );
   let body = String::from_utf8_lossy(&event.body).into_owned();
   let text: BuiltinFn =
-    Rc::new(move |_vm, _args| Ok(resolved_promise(Value::String(body.clone().into()))));
+    Rc::new(move |vm, _args| resolved_promise(vm, Value::String(body.clone().into())));
   set(&request, "text", host_function(vm, "text", 0, text));
   let body = String::from_utf8_lossy(&event.body).into_owned();
-  let json: BuiltinFn = Rc::new(move |vm, _args| Ok(json_promise(vm, &body)));
+  let json: BuiltinFn = Rc::new(move |vm, _args| json_promise(vm, &body));
   set(&request, "json", host_function(vm, "json", 0, json));
   request
 }
@@ -1561,14 +1560,14 @@ fn install_response_constructor(vm: &mut Vm) {
     set(&response, "url", Value::String(String::new().into()));
     set(&response, "bodyUsed", Value::Bool(false));
     let text: BuiltinFn =
-      Rc::new(move |_vm, _args| Ok(resolved_promise(Value::String(body.clone().into()))));
+      Rc::new(move |vm, _args| resolved_promise(vm, Value::String(body.clone().into())));
     set(&response, "text", host_function(vm, "text", 0, text));
     let json_body =
       match vm.get_property_host(&response, &PropertyKey::String("body".to_string().into()))? {
         Value::String(body) => body,
         _ => String::new().into(),
       };
-    let json: BuiltinFn = Rc::new(move |vm, _args| Ok(json_promise(vm, json_body.as_str_lossy())));
+    let json: BuiltinFn = Rc::new(move |vm, _args| json_promise(vm, json_body.as_str_lossy()));
     set(&response, "json", host_function(vm, "json", 0, json));
     Ok(response)
   });
@@ -1626,28 +1625,28 @@ fn extract_header_entries(
     .collect()
 }
 
-fn resolved_promise(value: Value) -> Value {
-  Value::Promise(
-    gc::track_promise(Rc::new(RefCell::new(PromiseState::Fulfilled(value)))),
-    gc::track_object(Rc::new(RefCell::new(ObjectData::new()))),
-  )
+fn resolved_promise(
+  vm: &mut Vm,
+  value: Value,
+) -> Result<Value, RuntimeError> {
+  let promise = vm.create_host_promise();
+  vm.resolve_host_promise(&promise, value)?;
+  Ok(promise)
 }
 
 fn json_promise(
   vm: &mut Vm,
   body: &str,
-) -> Value {
+) -> Result<Value, RuntimeError> {
   match serde_json::from_str::<serde_json::Value>(body) {
-    Ok(value) => resolved_promise(json_to_value(vm, value)),
+    Ok(value) => {
+      let value = json_to_value(vm, value);
+      resolved_promise(vm, value)
+    }
     Err(error) => {
-      let reason = Value::String(error.to_string().into());
-      Value::Promise(
-        gc::track_promise(Rc::new(RefCell::new(PromiseState::Rejected {
-          reason,
-          handled: true,
-        }))),
-        gc::track_object(Rc::new(RefCell::new(ObjectData::new()))),
-      )
+      let promise = vm.create_host_promise();
+      vm.reject_host_promise(&promise, Value::String(error.to_string().into()))?;
+      Ok(promise)
     }
   }
 }

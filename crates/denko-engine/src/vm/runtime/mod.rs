@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 /// Async/microtask helpers and background runtime utilities.
+mod async_generators;
 pub mod async_tasks;
 /// Call handling and tail-call helpers.
 pub mod calls;

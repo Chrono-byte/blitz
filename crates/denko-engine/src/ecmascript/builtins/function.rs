@@ -214,6 +214,101 @@ pub(crate) fn create_async_function_constructor(
   constructor
 }
 
+pub(crate) fn create_async_generator_function_constructor(
+  globals: &Rc<RefCell<ObjectData>>,
+  function_constructor: &Value,
+  async_generator_function_prototype: &Rc<RefCell<ObjectData>>,
+) -> Value {
+  let constructor_properties = Rc::new(RefCell::new(ObjectData::with_prototype(
+    function_constructor.clone(),
+  )));
+  constructor_properties
+    .borrow_mut()
+    .properties
+    .insert(
+      PropertyKey::prototype(),
+      PropertyDescriptor::builtin_prototype(Value::Object(Rc::clone(
+        async_generator_function_prototype,
+      ))),
+    );
+
+  constructor_properties
+    .borrow_mut()
+    .set_internal_slot("[[DefersInstanceAllocation]]", Value::Bool(true));
+  constructor_properties
+    .borrow_mut()
+    .set_internal_slot("[[RealmGlobals]]", Value::Object(Rc::clone(globals)));
+  let fallback_prototype = Value::Object(Rc::clone(async_generator_function_prototype));
+  let constructor_globals = Rc::clone(globals);
+  let constructor = Value::BuiltinObject(
+    Rc::new(move |vm, args| {
+      let new_target = vm.pending_constructor_new_target();
+      let off = usize::from(new_target.is_some());
+      let user_args = args.get(off..).unwrap_or_default();
+      let mut parameters = Vec::with_capacity(user_args.len().saturating_sub(1));
+      for argument in user_args
+        .iter()
+        .take(user_args.len().saturating_sub(1))
+      {
+        parameters.push(vm.to_string(argument)?);
+      }
+      let body = if let Some(last) = user_args.last() {
+        vm.to_string(last)?
+      } else {
+        js_string::JsString::empty()
+      };
+      let source = crate::js!(
+        format(script),
+        "(async function* anonymous({}\n) {{\n{}\n}})",
+        parameters
+          .iter()
+          .map(js_string::JsString::as_str_lossy)
+          .collect::<Vec<_>>()
+          .join(","),
+        body
+      );
+      let code = crate::typecheck::with_strict_override(None, || {
+        let session = Parser::parse_source(&source)
+          .map_err(|error| syntax_error(vm, format!("parse: {error}")))?;
+        compiler::compile_repl_session(&session)
+          .map_err(|error| syntax_error(vm, format!("compile: {error}")))
+      })?;
+      let function_prototype = match new_target {
+        Some(new_target) => vm.prototype_from_constructor(&new_target, "AsyncGeneratorFunction")?,
+        None => fallback_prototype.clone(),
+      };
+      let mut child = Vm::new(Rc::clone(&constructor_globals));
+      let result = child.run(code)?;
+      if let Value::Closure { props, .. } = &result {
+        props
+          .borrow_mut()
+          .set_prototype_value(function_prototype);
+        props.borrow_mut().set_internal_slot(
+          "[[RealmGlobals]]",
+          Value::Object(Rc::clone(&constructor_globals)),
+        );
+      }
+      Ok(result)
+    }),
+    constructor_properties,
+  );
+  set_builtin_name(&constructor, "AsyncGeneratorFunction");
+  set_builtin_length(&constructor, 1.0);
+  async_generator_function_prototype
+    .borrow_mut()
+    .properties
+    .insert(
+      PropertyKey::String("constructor".into()),
+      PropertyDescriptor::Data {
+        value: constructor.clone(),
+        writable: false,
+        enumerable: false,
+        configurable: true,
+      },
+    );
+  constructor
+}
+
 /// Creates the Function constructor and installs the properties of
 /// `Function.prototype` on the preallocated foundation objects.
 ///

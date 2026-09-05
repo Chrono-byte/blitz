@@ -1,44 +1,15 @@
 // SPDX-License-Identifier: MPL-2.0
 //! Module loading and evaluation.
 //!
-//! Conformance notes and known deviations from ECMA-262
+//! Source, virtual, and prelinked graphs preserve live bindings and namespace
+//! identity. Evaluation follows cyclic module records: dependencies execute in
+//! source order, top-level await suspends through the VM job queue, and importers
+//! wait for asynchronous dependencies. Evaluation promises and original failures
+//! are cached on cycle roots. Dynamic import settles after graph evaluation.
 //!
-//! `ModuleLoader` supports source, virtual, and prelinked module graphs. It
-//! preserves live bindings across direct imports, indirect exports, star
-//! exports, namespace exports, and cycles, including ambiguous-star detection.
-//! The remaining differences from ECMA-262 are primarily in host scheduling for
-//! dynamic import and the algorithms used to link and evaluate source graphs.
-//!
-//! 1) Dynamic import timing and async behaviour
-//! - Current behaviour: `import()` synchronously constructs, instantiates, and
-//!   evaluates the requested graph in a child VM, then queues fulfillment or
-//!   rejection on the VM's dynamic-import job queue. Import options are
-//!   evaluated but otherwise ignored.
-//! - Spec behaviour: the host performs loading, linking, and evaluation through
-//!   the dynamic-import host hooks and resolves or rejects the returned Promise
-//!   through the prescribed job sequencing.
-//! - Impact: the Promise settles asynchronously, but module work and its side
-//!   effects happen before the queued settlement job. Host-hook timing, import
-//!   attributes, and some Promise ordering remain observably different.
-//!
-//! 2) Linking/instantiation simplifications
-//! - Current behaviour: source records are linked by scanning serialized ESTree
-//!   to allocate slots and collect import/export metadata. `resolve_export`
-//!   handles direct, indirect, and star exports, cycles, shared origin slots,
-//!   and ambiguous star exports. Evaluation uses a synchronous DFS post-order
-//!   with basic cycle tolerance.
-//! - Spec behaviour: cyclic module records use the specification's linking and
-//!   evaluation state machines, including their precise status and error
-//!   propagation rules.
-//! - Impact: the common static-module cases above are supported, but the
-//!   implementation is not yet a complete Cyclic Module Record algorithm and
-//!   source linking still depends on an ESTree serialization pass.
-//!
-//! Recommendations:
-//! - Move dynamic-import loading and evaluation behind the host job boundary
-//!   and implement import attributes and host-hook error propagation.
-//! - Replace serialized-ESTree linking and DFS evaluation with spec-oriented
-//!   module-record linking and evaluation state machines.
+//! Linking still derives declarations from serialized ESTree. Import attributes
+//! and complete host module-loading hooks remain separate compatibility work.
+mod async_evaluation;
 mod compilation;
 mod construction;
 mod evaluation;
@@ -47,7 +18,8 @@ mod registration;
 #[cfg(test)]
 mod tests;
 
-pub use compilation::evaluate_entry_shared;
+pub(crate) use async_evaluation::observe as observe_evaluation;
+pub use compilation::{evaluate_entry_promise_shared, evaluate_entry_shared};
 
 use crate::binding::BindingCell;
 use crate::bytecode::Chunk;
@@ -588,6 +560,7 @@ enum ModuleState {
   Parsed,
   Instantiated,
   Evaluating,
+  EvaluatingAsync,
   Evaluated,
 }
 
@@ -630,6 +603,7 @@ pub struct ModuleRecord {
   pub content_hash: Option<u64>,
   /// Current loader lifecycle state for this module.
   state: ModuleState,
+  evaluation: async_evaluation::Evaluation,
   /// Assigned numeric module index used by the VM module table. Set during instantiation.
   pub module_index: Option<usize>,
   /// Export slots: mapping export name -> shared slot.
@@ -719,6 +693,7 @@ impl ModuleRecord {
       declaration_source,
       content_hash,
       state: ModuleState::Parsed,
+      evaluation: async_evaluation::Evaluation::default(),
       module_index: None,
       exports: HashMap::new(),
       imports: HashMap::new(),

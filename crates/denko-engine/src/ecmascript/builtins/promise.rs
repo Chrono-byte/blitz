@@ -434,13 +434,11 @@ pub(crate) fn create_promise_intrinsics(
             return Ok(Value::Undefined);
           }
           *resolve_called_for_resolve.borrow_mut() = true;
-          let value = if let Some(value) = args.get(1) {
-            value.clone()
-          } else if let Some(value) = args.first() {
-            value.clone()
-          } else {
-            Value::Undefined
-          };
+          let offset = usize::from(vm.builtin_this_arg_prepended());
+          let value = args
+            .get(offset)
+            .cloned()
+            .unwrap_or(Value::Undefined);
           if let Err(err) = resolve_promise_with_value(vm, &promise_for_resolve, value) {
             let reason = vm
               .exceptions
@@ -464,13 +462,11 @@ pub(crate) fn create_promise_intrinsics(
             return Ok(Value::Undefined);
           }
           *reject_called.borrow_mut() = true;
-          let reason = if let Some(reason) = args.get(1) {
-            reason.clone()
-          } else if let Some(reason) = args.first() {
-            reason.clone()
-          } else {
-            Value::Undefined
-          };
+          let offset = usize::from(vm.builtin_this_arg_prepended());
+          let reason = args
+            .get(offset)
+            .cloned()
+            .unwrap_or(Value::Undefined);
           reject_pending_promise(vm, &promise_for_reject, reason);
           Ok(Value::Undefined)
         }),
@@ -1525,4 +1521,53 @@ pub(crate) fn create_promise_intrinsics(
   );
 
   (promise_proto_map, promise_ctor_map, promise_ctor_val)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn resolving_functions_ignore_the_receiver_when_called_without_arguments() {
+    let source = crate::js!(
+      r#"
+      var results = [];
+      var unexpected = false;
+      function check(promise, index) {
+        var rejects = index === 2 || index === 3 || index === 6 || index === 7;
+        return promise.then(
+          value => { results.push(!rejects && value === undefined); },
+          reason => { results.push(rejects && reason === undefined); }
+        );
+      }
+      var promises = [
+        new Promise(resolve => resolve.call(42)),
+        new Promise(resolve => resolve.apply({ marker: 1 }, [])),
+        new Promise((resolve, reject) => reject.call(42)),
+        new Promise((resolve, reject) => reject.apply({ marker: 1 }, [])),
+        Promise.resolve({ then(resolve) { resolve.call(42); } }),
+        Promise.resolve({ then(resolve) { resolve.apply({ marker: 1 }, []); } }),
+        Promise.resolve({ then(resolve, reject) { reject.call(42); } }),
+        Promise.resolve({ then(resolve, reject) { reject.apply({ marker: 1 }, []); } })
+      ];
+      Promise.all(promises.map(check)).then(
+        () => { result = results.join(','); },
+        () => { unexpected = true; }
+      );
+      var result = '';
+    "#
+    );
+    let session = crate::parser::Parser::parse_source(source).expect("parse");
+    let code = crate::compiler::compile_session(&session).expect("compile");
+    let mut vm = Vm::new(Rc::new(RefCell::new(ObjectData::new())));
+    vm.run(code).expect("run");
+    vm.flush_microtasks().expect("flush");
+    assert_eq!(vm.get_global("unexpected"), Some(Value::Bool(false)));
+    assert_eq!(
+      vm.get_global("result"),
+      Some(Value::String(
+        "true,true,true,true,true,true,true,true".into()
+      ))
+    );
+  }
 }

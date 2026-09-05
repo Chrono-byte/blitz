@@ -30,6 +30,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 pub(super) enum YieldStarStep {
+  Await(Value),
   Yield(Value),
   Complete(Value),
   Return(Value),
@@ -82,6 +83,18 @@ impl Vm {
     &mut self,
     chunk_rc: Arc<Chunk>,
   ) -> Result<Value, RuntimeError> {
+    self.prepare_root(chunk_rc);
+    let result = self.run_loop(true);
+    if result.is_ok() && self.current_module_specifier().is_none() {
+      self.persist_root_bindings();
+    }
+    result
+  }
+
+  pub(super) fn prepare_root(
+    &mut self,
+    chunk_rc: Arc<Chunk>,
+  ) {
     self.execution.root_chunk = Some(Arc::clone(&chunk_rc));
     self.execution.active.chunk = chunk_rc;
     self.execution.active.pc = 0;
@@ -129,12 +142,6 @@ impl Vm {
     }
     gc::reset_allocation_pressure();
     self.begin_opcode_profile_run();
-
-    let result = self.run_loop(true);
-    if result.is_ok() && self.current_module_specifier().is_none() {
-      self.persist_root_bindings();
-    }
-    result
   }
 
   pub(super) fn run_loop(
@@ -237,7 +244,10 @@ impl Vm {
       *resume_destination = caller_state.resume_destination;
       return Ok(None);
     }
-    if self.execution.call_stack.is_empty() && self.execution.interpreter_depth == 1 {
+    if self.execution.call_stack.is_empty()
+      && self.execution.interpreter_depth == 1
+      && !self.execution.defer_job_checkpoint
+    {
       let temp_root_base = self.memory.temporary.len();
       self.memory.temporary.push(result.clone());
       self.memory.kept_alive.clear();
@@ -1518,9 +1528,14 @@ impl Vm {
           Opcode::YieldStar => {
             if self.execution.active.yield_star.is_none() {
               self.execution.active.yield_star =
-                Some(self.create_yield_star_state(registers[rd].clone())?);
+                Some(self.create_yield_star_state(registers[rd].clone(), decode_aux8(word) != 0)?);
             }
             match self.resume_yield_star()? {
+              YieldStarStep::Await(value) => {
+                self.execution.active.pc = self.execution.active.pc.saturating_sub(1);
+                state.pending_operation = Some(PendingOperation::YieldStar { destination: rd });
+                return Ok(Some(RunOutcome::Await(value)));
+              }
               YieldStarStep::Yield(value) => {
                 self.execution.active.pc = self.execution.active.pc.saturating_sub(1);
                 return Ok(Some(RunOutcome::YieldStar(value)));

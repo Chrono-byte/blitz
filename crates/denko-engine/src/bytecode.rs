@@ -324,6 +324,8 @@ pub struct Chunk {
   pub value_spill_slot_count: u16,
   /// Whether the compiled root source is strict.
   pub root_strict: bool,
+  /// Whether the root module syntax contains await, including unreachable code.
+  pub has_top_level_await: bool,
   /// Whether `new.target` is valid in this code object's execution context.
   pub allow_new_target: bool,
   /// Whether `super` property access/calls are valid in this code object.
@@ -442,6 +444,7 @@ impl Chunk {
       spill_slot_count: 0,
       value_spill_slot_count: 0,
       root_strict: false,
+      has_top_level_await: false,
       allow_new_target: false,
       allow_super: false,
       finally_handlers: Vec::new(),
@@ -1207,7 +1210,7 @@ pub enum Opcode {
   IteratorClose,
   /// Yield: yield rd from generator
   Yield,
-  /// YieldStar: delegate yield for yield*
+  /// YieldStar: delegate yield for yield*; aux8 is 1 for async delegation.
   YieldStar,
 
   /// Return rd

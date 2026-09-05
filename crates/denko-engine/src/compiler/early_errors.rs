@@ -867,6 +867,11 @@ impl Compiler {
           self.validate_early_errors_in_statements(std::slice::from_ref(&f.body), false, false)?
         }
         oast::Statement::ForOfStatement(f) => {
+          if crate::parser::for_of_declaration_has_initializer(&f.left) {
+            return Err(crate::errors::CompilerError::from(
+              "for-of declarations cannot have initializers",
+            ));
+          }
           self.validate_for_statement_left(&f.left)?;
           self.validate_early_errors_in_expression(&f.right)?;
           self.validate_statement_position_function(&f.body)?;

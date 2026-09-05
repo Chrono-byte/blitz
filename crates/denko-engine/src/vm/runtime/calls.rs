@@ -71,6 +71,32 @@ impl Vm {
     ))
   }
 
+  pub(crate) fn with_function_realm<T>(
+    &mut self,
+    callee: &Value,
+    operation: impl FnOnce(&mut Self) -> T,
+  ) -> T {
+    if let Value::Proxy(proxy) = callee {
+      let target = {
+        let proxy = proxy.borrow();
+        proxy
+          .handler
+          .as_ref()
+          .map(|_| proxy.target.clone())
+      };
+      // GetFunctionRealm follows live proxy targets. A revoked proxy's job
+      // stays in the current realm and rejects when the call is attempted.
+      return match target {
+        Some(target) => self.with_function_realm(&target, operation),
+        None => operation(self),
+      };
+    }
+    let previous = self.enter_function_realm(callee);
+    let result = operation(self);
+    self.leave_function_realm(previous);
+    result
+  }
+
   pub(super) fn leave_function_realm(
     &mut self,
     previous: Option<RealmState>,
@@ -124,6 +150,12 @@ impl Vm {
     }
 
     if let Some(Value::Object(globals)) = Self::function_realm_globals(constructor) {
+      if intrinsic == "AsyncGeneratorFunction"
+        && let Some((intrinsics, _)) = crate::runtime_utils::realm_kernel(&globals)
+        && let Some(prototype) = intrinsics.async_generator_function_prototype
+      {
+        return Ok(prototype);
+      }
       let realm_constructor = globals
         .borrow()
         .properties
@@ -808,7 +840,9 @@ impl Vm {
           } else {
             this_arg
           };
-          if proto.is_generator {
+          if proto.is_generator && proto.is_async {
+            self.create_async_generator_object(proto, &closure_env, call_args, this_arg, callee)
+          } else if proto.is_generator {
             Ok(self.create_generator_object(proto, &closure_env, call_args, this_arg, callee)?)
           } else if proto.is_async {
             self.invoke_async_closure(proto, &closure_env, call_args, this_arg, callee)

@@ -43,23 +43,9 @@ pub(crate) enum AwaitSettlement {
 }
 
 pub(crate) enum PendingOperation {
-  NextNative {
-    destination: usize,
-    record: Value,
-  },
-  NextSync {
-    destination: usize,
-    record: Value,
-    done: bool,
-  },
-  CloseNative {
-    destination: usize,
-    record: Value,
-  },
-  CloseSync {
-    destination: usize,
-    record: Value,
-  },
+  YieldStar { destination: usize },
+  NextNative { destination: usize, record: Value },
+  CloseNative { destination: usize, record: Value },
 }
 
 pub(crate) enum PendingOperationStep {

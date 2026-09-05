@@ -1341,6 +1341,9 @@ impl Compiler {
           } else {
             self.emit(LoweringOpcode::Undefined, LINE);
           }
+          if self.is_async && self.is_generator && r.argument.is_some() {
+            self.emit(LoweringOpcode::AwaitPromise, LINE);
+          }
           self.emit(LoweringOpcode::StoreLocal, LINE);
           self.emit_slot(return_slot, LINE);
           self.emit_handler_pops_to(self.finally_patches[finally_index].handler_depth);
@@ -1363,7 +1366,8 @@ impl Compiler {
           return Ok(());
         }
         if let Some(arg) = &r.argument {
-          if self.handler_depth == 0
+          if !(self.is_async && self.is_generator)
+            && self.handler_depth == 0
             && self.iterator_close_stack.is_empty()
             && self.with_depth == 0
             && self.finally_patches.is_empty()
@@ -1374,6 +1378,9 @@ impl Compiler {
           }
         } else {
           self.emit(LoweringOpcode::Undefined, LINE);
+        }
+        if self.is_async && self.is_generator && r.argument.is_some() {
+          self.emit(LoweringOpcode::AwaitPromise, LINE);
         }
         if !self.iterator_close_stack.is_empty() {
           let return_slot = self.alloc_temp_local("return_value");

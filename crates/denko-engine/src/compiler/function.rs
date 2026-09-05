@@ -284,7 +284,7 @@ impl Compiler {
     slot_names.resize(inner.locals.len(), None);
     let slot_types = inner.local_types;
     let lexical_tdz = inner.local_tdz;
-    let has_prototype_property = !func.r#async;
+    let has_prototype_property = !func.r#async || func.generator;
     let is_constructor = !func.r#async && !func.generator;
     Ok((
       Function {

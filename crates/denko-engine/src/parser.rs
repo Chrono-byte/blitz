@@ -197,6 +197,7 @@ impl Parser {
             .join("\n"),
         ));
       }
+      validate_for_of_initializers(&ret.program)?;
       Ok(ret.program)
     })
   }
@@ -227,6 +228,7 @@ impl Parser {
         return Err(ParserError::from(msgs.join("\n")));
       }
 
+      validate_for_of_initializers(&ret.program)?;
       Ok(ret.program)
     })
   }
@@ -265,6 +267,7 @@ impl Parser {
         return Err(ParserError::from(msgs.join("\n")));
       }
 
+      validate_for_of_initializers(&ret.program)?;
       Ok(ret.program)
     })
   }
@@ -393,6 +396,40 @@ impl Parser {
   }
 }
 
+pub(crate) fn for_of_declaration_has_initializer(left: &oast::ForStatementLeft<'_>) -> bool {
+  matches!(left, oast::ForStatementLeft::VariableDeclaration(declaration)
+    if declaration.declarations.iter().any(|declarator| declarator.init.is_some()))
+}
+
+fn validate_for_of_initializers(program: &oast::Program<'_>) -> Result<(), ParserError> {
+  use oxc_ast_visit::{Visit, walk};
+  #[derive(Default)]
+  struct ForOfInitializers {
+    invalid: bool,
+  }
+  impl<'a> Visit<'a> for ForOfInitializers {
+    fn visit_for_of_statement(
+      &mut self,
+      statement: &oast::ForOfStatement<'a>,
+    ) {
+      if for_of_declaration_has_initializer(&statement.left) {
+        self.invalid = true;
+      } else if !self.invalid {
+        walk::walk_for_of_statement(self, statement);
+      }
+    }
+  }
+  let mut visitor = ForOfInitializers::default();
+  visitor.visit_program(program);
+  if visitor.invalid {
+    Err(ParserError::from(
+      "for-of declarations cannot have initializers",
+    ))
+  } else {
+    Ok(())
+  }
+}
+
 impl ParserSession {
   /// Simple get borrow program
   pub fn program(&self) -> &oast::Program<'_> {
@@ -408,6 +445,20 @@ impl ParserSession {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn all_parse_entry_points_reject_for_of_initializers_before_compilation() {
+    for source in [
+      include_str!("../tests/fixtures/parser/for-await-initializer.js"),
+      include_str!("../tests/fixtures/parser/for-of-initializer.js"),
+    ] {
+      assert!(Parser::parse_source(source).is_err());
+      assert!(Parser::parse_eval_source(source, false).is_err());
+      assert!(Parser::new_from_source(source).parse().is_err());
+    }
+    // Annex B permits this distinct sloppy for-in form.
+    assert!(Parser::parse_source(crate::js!("for (var key = 0 in {}) {}")).is_ok());
+  }
 
   #[test]
   fn type_only_imports_are_not_runtime_dependencies() {

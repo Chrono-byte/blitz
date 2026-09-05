@@ -5,7 +5,8 @@ use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value}
 use crate::vm::Vm;
 use crate::vm::runtime::execution::{YieldStarStep, ensure_slot};
 use crate::vm::state::{
-  AwaitSettlement, PendingOperation, PendingOperationStep, YieldStarResume, YieldStarState,
+  AwaitSettlement, PendingOperation, PendingOperationStep, YieldStarPhase, YieldStarResume,
+  YieldStarState,
 };
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -118,25 +119,16 @@ impl Vm {
     let Some(record) = async_iterator_record(iterator) else {
       return Ok(None);
     };
-    let result = self.call_value_with_this(&record.next, &record.iterator, &[])?;
-    if record.sync {
-      if !result.is_object() {
-        return Err(self.throw_type_error("Iterator result must be an object"));
-      }
-      let done =
-        self.get_property_host(&result, &PropertyKey::String("done".to_string().into()))?;
-      let done = self.to_boolean(&done);
-      let value =
-        self.get_property_host(&result, &PropertyKey::String("value".to_string().into()))?;
-      return Ok(Some(PendingOperationStep::Await {
-        value,
-        operation: PendingOperation::NextSync {
-          destination,
-          record: iterator.clone(),
-          done,
-        },
-      }));
-    }
+    let result = if record.sync {
+      let result = self
+        .capture_completion(|vm| vm.call_value_with_this(&record.next, &record.iterator, &[]))
+        .map_err(|(error, thrown)| {
+          thrown.unwrap_or_else(|| Value::String(error.to_string().into()))
+        });
+      self.async_from_sync_continuation(&record, result, true)
+    } else {
+      self.call_value_with_this(&record.next, &record.iterator, &[])?
+    };
     Ok(Some(PendingOperationStep::Await {
       value: result,
       operation: PendingOperation::NextNative {
@@ -144,6 +136,80 @@ impl Vm {
         record: iterator.clone(),
       },
     }))
+  }
+
+  /// AsyncFromSyncIteratorContinuation has its own promise reaction before the
+  /// consuming for-await loop awaits the resulting iterator-result promise.
+  fn async_from_sync_continuation(
+    &mut self,
+    record: &AsyncIteratorRecord,
+    result: Result<Value, Value>,
+    close_on_rejection: bool,
+  ) -> Value {
+    let promise_value = self.create_host_promise();
+    let Value::Promise(promise, _) = &promise_value else {
+      unreachable!("intrinsic promise")
+    };
+    let result = result.and_then(|result| {
+      self
+        .capture_completion(|vm| {
+          if !result.is_object() {
+            return Err(vm.throw_type_error("Iterator result must be an object"));
+          }
+          let done = vm.get_property_host(&result, &PropertyKey::String("done".into()))?;
+          let done = vm.to_boolean(&done);
+          let value = vm.get_property_host(&result, &PropertyKey::String("value".into()))?;
+          Ok((done, value))
+        })
+        .map_err(|(error, thrown)| {
+          thrown.unwrap_or_else(|| Value::String(error.to_string().into()))
+        })
+    });
+    let (done, value) = match result {
+      Ok(result) => result,
+      Err(reason) => {
+        crate::runtime_utils::reject_pending_promise(self, promise, reason);
+        return promise_value;
+      }
+    };
+    let fulfilled = Rc::clone(promise);
+    let on_fulfilled = Value::Builtin(Rc::new(move |vm, args| {
+      let offset = usize::from(vm.builtin_this_arg_prepended());
+      let value = args
+        .get(offset)
+        .cloned()
+        .unwrap_or(Value::Undefined);
+      let result = vm.make_iterator_result(value, done);
+      crate::runtime_utils::resolve_promise_with_value(vm, &fulfilled, result)?;
+      Ok(Value::Undefined)
+    }));
+    let rejected = Rc::clone(promise);
+    let iterator = record.iterator.clone();
+    let wrapper = Rc::clone(&record.wrapper);
+    let on_rejected = Value::Builtin(Rc::new(move |vm, args| {
+      let offset = usize::from(vm.builtin_this_arg_prepended());
+      let reason = args
+        .get(offset)
+        .cloned()
+        .unwrap_or(Value::Undefined);
+      if close_on_rejection && !done {
+        mark_async_iterator_done(&wrapper);
+        drop(vm.close_iterator_in_fork(&iterator));
+      }
+      crate::runtime_utils::reject_pending_promise(vm, &rejected, reason);
+      Ok(Value::Undefined)
+    }));
+    if let Err((error, thrown)) =
+      self.capture_completion(|vm| vm.observe_await(value, on_fulfilled, on_rejected))
+    {
+      let reason = thrown.unwrap_or_else(|| Value::String(error.to_string().into()));
+      if close_on_rejection && !done {
+        mark_async_iterator_done(&record.wrapper);
+        drop(self.close_iterator_in_fork(&record.iterator));
+      }
+      crate::runtime_utils::reject_pending_promise(self, promise, reason);
+    }
+    promise_value
   }
 
   pub(super) fn begin_async_iterator_close(
@@ -161,6 +227,46 @@ impl Vm {
       }));
     }
     mark_async_iterator_done(&record.wrapper);
+    if record.sync {
+      let result = self
+        .capture_completion(|vm| {
+          let return_fn =
+            vm.get_property_host(&record.iterator, &PropertyKey::String("return".into()))?;
+          if matches!(return_fn, Value::Undefined | Value::Null) {
+            return Ok(None);
+          }
+          if !Self::is_callable_value(&return_fn) {
+            return Err(vm.throw_type_error("Iterator return is not callable"));
+          }
+          vm.call_value_with_this(&return_fn, &record.iterator, &[])
+            .map(Some)
+        })
+        .map_err(|(error, thrown)| {
+          thrown.unwrap_or_else(|| Value::String(error.to_string().into()))
+        });
+      let value = match result {
+        Ok(None) => {
+          // An absent sync return method resolves its adapter promise directly;
+          // only a supplied return result passes through the value continuation.
+          let promise = self.create_host_promise();
+          let result = self.make_iterator_result(Value::Undefined, true);
+          self.resolve_host_promise(&promise, result)?;
+          promise
+        }
+        result => self.async_from_sync_continuation(
+          &record,
+          result.map(|value| value.expect("present return result")),
+          false,
+        ),
+      };
+      return Ok(Some(PendingOperationStep::Await {
+        value,
+        operation: PendingOperation::CloseNative {
+          destination,
+          record: iterator.clone(),
+        },
+      }));
+    }
     let return_fn = self.get_property_host(
       &record.iterator,
       &PropertyKey::String("return".to_string().into()),
@@ -175,22 +281,6 @@ impl Vm {
       return Err(self.throw_type_error("Iterator return is not callable"));
     }
     let result = self.call_value_with_this(&return_fn, &record.iterator, &[])?;
-    if record.sync {
-      if !result.is_object() {
-        return Err(self.throw_type_error("Iterator return result is not an object"));
-      }
-      let _done =
-        self.get_property_host(&result, &PropertyKey::String("done".to_string().into()))?;
-      let value =
-        self.get_property_host(&result, &PropertyKey::String("value".to_string().into()))?;
-      return Ok(Some(PendingOperationStep::Await {
-        value,
-        operation: PendingOperation::CloseSync {
-          destination,
-          record: iterator.clone(),
-        },
-      }));
-    }
     Ok(Some(PendingOperationStep::Await {
       value: result,
       operation: PendingOperation::CloseNative {
@@ -205,22 +295,39 @@ impl Vm {
     operation: PendingOperation,
     settlement: AwaitSettlement,
   ) -> Result<PendingOperationStep, RuntimeError> {
-    if let (
-      PendingOperation::NextSync {
-        record,
-        done: false,
-        ..
-      },
-      AwaitSettlement::Rejected(reason),
-    ) = (&operation, &settlement)
-    {
-      if let Some(record) = async_iterator_record(record) {
-        mark_async_iterator_done(&record.wrapper);
-        drop(self.close_iterator_in_fork(&record.iterator));
-      }
-      return Ok(PendingOperationStep::Throw(reason.clone()));
+    if let PendingOperation::YieldStar { destination } = operation {
+      return match settlement {
+        AwaitSettlement::Fulfilled(value) => {
+          let state = self
+            .execution
+            .active
+            .yield_star
+            .as_mut()
+            .ok_or_else(|| RuntimeError::from("Missing async yield-star state"))?;
+          state.settled = Some(value);
+          Ok(PendingOperationStep::Complete {
+            destination,
+            value: Value::Undefined,
+          })
+        }
+        AwaitSettlement::Rejected(reason) => {
+          if let Some(state) = self.execution.active.yield_star.take()
+            && matches!(
+              state.phase,
+              YieldStarPhase::SyncValue {
+                done: false,
+                is_return: false
+              }
+            )
+          {
+            drop(self.close_iterator_in_fork(&state.iterator));
+          }
+          Ok(PendingOperationStep::Throw(reason))
+        }
+      };
     }
     match (operation, settlement) {
+      (PendingOperation::YieldStar { .. }, _) => unreachable!("handled above"),
       (_, AwaitSettlement::Rejected(reason)) => Ok(PendingOperationStep::Throw(reason)),
       (
         PendingOperation::NextNative {
@@ -249,22 +356,6 @@ impl Vm {
         })
       }
       (
-        PendingOperation::NextSync {
-          destination,
-          record,
-          done,
-        },
-        AwaitSettlement::Fulfilled(value),
-      ) => {
-        if done && let Some(record) = async_iterator_record(&record) {
-          mark_async_iterator_done(&record.wrapper);
-        }
-        Ok(PendingOperationStep::Complete {
-          destination,
-          value: self.make_iterator_result(value, done),
-        })
-      }
-      (
         PendingOperation::CloseNative {
           destination,
           record,
@@ -279,16 +370,6 @@ impl Vm {
           value: record,
         })
       }
-      (
-        PendingOperation::CloseSync {
-          destination,
-          record,
-        },
-        AwaitSettlement::Fulfilled(_),
-      ) => Ok(PendingOperationStep::Complete {
-        destination,
-        value: record,
-      }),
     }
   }
 
@@ -427,30 +508,40 @@ impl Vm {
   pub(super) fn create_yield_star_state(
     &mut self,
     iterable: Value,
+    is_async: bool,
   ) -> Result<YieldStarState, RuntimeError> {
-    let iterator_method = self.get_property_host(
-      &iterable,
-      &PropertyKey::Symbol(SymbolId::well_known_iterator()),
-    )?;
+    let mut sync = !is_async;
+    let mut iterator_method = if is_async {
+      self.get_property_host(
+        &iterable,
+        &PropertyKey::Symbol(SymbolId::well_known_async_iterator()),
+      )?
+    } else {
+      Value::Undefined
+    };
+    if matches!(iterator_method, Value::Undefined | Value::Null) {
+      sync = true;
+      iterator_method = self.get_property_host(
+        &iterable,
+        &PropertyKey::Symbol(SymbolId::well_known_iterator()),
+      )?;
+    }
     if !Self::is_callable_value(&iterator_method) {
       return Err(self.throw_type_error("Yield-star value is not iterable"));
     }
-
     let iterator = self.call_value_with_this(&iterator_method, &iterable, &[])?;
     if !iterator.is_object() {
       return Err(self.throw_type_error("Iterator method must return an object"));
     }
-
-    let next_method =
-      self.get_property_host(&iterator, &PropertyKey::String("next".to_string().into()))?;
-    if !Self::is_callable_value(&next_method) {
-      return Err(self.throw_type_error("Iterator next method is not callable"));
-    }
-
+    let next_method = self.get_property_host(&iterator, &PropertyKey::String("next".into()))?;
     Ok(YieldStarState {
       iterator,
       next_method,
       resume: Some(YieldStarResume::Next(Value::Undefined)),
+      is_async,
+      sync,
+      phase: YieldStarPhase::Resume,
+      settled: None,
     })
   }
 
@@ -488,12 +579,70 @@ impl Vm {
   }
 
   pub(super) fn resume_yield_star(&mut self) -> Result<YieldStarStep, RuntimeError> {
+    let adapter = self
+      .execution
+      .active
+      .yield_star
+      .as_ref()
+      .filter(|state| state.is_async && state.sync && matches!(state.phase, YieldStarPhase::Resume))
+      .cloned();
+    if let Some(mut state) = adapter {
+      return match self.capture_completion(Self::resume_yield_star_inner) {
+        Ok(step) => Ok(step),
+        Err((error, None)) => Err(error),
+        Err((_, Some(reason))) => {
+          let promise = self.create_host_promise();
+          let Value::Promise(ref pending, _) = promise else {
+            unreachable!("intrinsic Promise")
+          };
+          crate::runtime_utils::reject_pending_promise(self, pending, reason);
+          state.phase = YieldStarPhase::Result {
+            is_return: false,
+            missing_throw: false,
+          };
+          self.execution.active.yield_star = Some(state);
+          Ok(YieldStarStep::Await(promise))
+        }
+      };
+    }
+    self.resume_yield_star_inner()
+  }
+
+  fn resume_yield_star_inner(&mut self) -> Result<YieldStarStep, RuntimeError> {
     let mut state = self
       .execution
       .active
       .yield_star
       .take()
       .ok_or_else(|| RuntimeError::from("Missing yield-star state"))?;
+    if let Some(result) = state.settled.take() {
+      return match state.phase {
+        YieldStarPhase::Result {
+          is_return,
+          missing_throw,
+        } => {
+          if missing_throw {
+            if !result.is_object() {
+              return Err(self.throw_type_error("Iterator return method must return an object"));
+            }
+            Err(self.throw_type_error("Delegated iterator has no throw method"))
+          } else {
+            self.finish_yield_star_result(state, result, is_return, false)
+          }
+        }
+        YieldStarPhase::SyncValue { done, is_return } => {
+          let result = self.make_iterator_result(result, done);
+          state.phase = YieldStarPhase::Result {
+            is_return,
+            missing_throw: false,
+          };
+          self.execution.active.yield_star = Some(state);
+          Ok(YieldStarStep::Await(result))
+        }
+        YieldStarPhase::ReturnValue => Ok(YieldStarStep::Return(result)),
+        YieldStarPhase::Resume => Err(RuntimeError::from("Unexpected yield-star settlement")),
+      };
+    }
     let resume = state
       .resume
       .take()
@@ -519,6 +668,14 @@ impl Vm {
               return Err(self.throw_type_error("Iterator return method is not callable"));
             }
             let close_result = self.call_value_with_this(&return_method, &state.iterator, &[])?;
+            if state.is_async && !state.sync {
+              state.phase = YieldStarPhase::Result {
+                is_return: false,
+                missing_throw: true,
+              };
+              self.execution.active.yield_star = Some(state);
+              return Ok(YieldStarStep::Await(close_result));
+            }
             if !close_result.is_object() {
               return Err(self.throw_type_error("Iterator return method must return an object"));
             }
@@ -536,6 +693,20 @@ impl Vm {
           &PropertyKey::String("return".to_string().into()),
         )?;
         if matches!(return_method, Value::Undefined | Value::Null) {
+          if state.is_async {
+            let awaited = if state.sync {
+              state.phase = YieldStarPhase::Result {
+                is_return: true,
+                missing_throw: false,
+              };
+              self.make_iterator_result(value, true)
+            } else {
+              state.phase = YieldStarPhase::ReturnValue;
+              value
+            };
+            self.execution.active.yield_star = Some(state);
+            return Ok(YieldStarStep::Await(awaited));
+          }
           return Ok(YieldStarStep::Return(value));
         }
         if !Self::is_callable_value(&return_method) {
@@ -545,21 +716,61 @@ impl Vm {
       }
     };
 
+    if state.is_async && !state.sync {
+      state.phase = YieldStarPhase::Result {
+        is_return,
+        missing_throw: false,
+      };
+      self.execution.active.yield_star = Some(state);
+      return Ok(YieldStarStep::Await(result));
+    }
+    self.finish_yield_star_result(state, result, is_return, true)
+  }
+
+  fn finish_yield_star_result(
+    &mut self,
+    mut state: YieldStarState,
+    result: Value,
+    is_return: bool,
+    unwrap_sync: bool,
+  ) -> Result<YieldStarStep, RuntimeError> {
     if !result.is_object() {
       return Err(self.throw_type_error("Iterator result must be an object"));
     }
-    let done = self.get_property_host(&result, &PropertyKey::String("done".to_string().into()))?;
-    if self.to_boolean(&done) {
-      let value =
-        self.get_property_host(&result, &PropertyKey::String("value".to_string().into()))?;
+    let done = self.get_property_host(&result, &PropertyKey::String("done".into()))?;
+    let done = self.to_boolean(&done);
+    if !state.is_async && !done {
+      self.execution.active.yield_star = Some(state);
+      return Ok(YieldStarStep::Yield(result));
+    }
+    let value = self.get_property_host(&result, &PropertyKey::String("value".into()))?;
+    if state.is_async && state.sync && unwrap_sync {
+      state.phase = YieldStarPhase::SyncValue { done, is_return };
+      self.execution.active.yield_star = Some(state);
+      return Ok(YieldStarStep::Await(value));
+    }
+    self.finish_yield_star_value(state, value, done, is_return)
+  }
+
+  fn finish_yield_star_value(
+    &mut self,
+    mut state: YieldStarState,
+    value: Value,
+    done: bool,
+    is_return: bool,
+  ) -> Result<YieldStarStep, RuntimeError> {
+    if done {
       if is_return {
         Ok(YieldStarStep::Return(value))
       } else {
         Ok(YieldStarStep::Complete(value))
       }
     } else {
+      state.phase = YieldStarPhase::Resume;
       self.execution.active.yield_star = Some(state);
-      Ok(YieldStarStep::Yield(result))
+      Ok(YieldStarStep::Yield(
+        self.make_iterator_result(value, false),
+      ))
     }
   }
 
@@ -676,3 +887,6 @@ impl Vm {
     Ok(iterator)
   }
 }
+
+#[cfg(test)]
+mod async_delegation_tests;

@@ -248,7 +248,14 @@ impl Vm {
       "[[RealmGlobals]]",
       Value::Object(Rc::clone(&self.realm_state.globals)),
     );
-    if closure_proto.is_generator {
+    if closure_proto.is_generator && closure_proto.is_async {
+      props.borrow_mut().set_prototype_value(
+        self
+          .realm_state
+          .realm
+          .async_generator_function_prototype(),
+      );
+    } else if closure_proto.is_generator {
       props.borrow_mut().set_prototype_value(
         self
           .realm_state
@@ -302,7 +309,11 @@ impl Vm {
     if has_prototype_property {
       let proto_obj = if closure_proto.is_generator {
         Value::Object(gc::track_object(Rc::new(RefCell::new(
-          ObjectData::with_prototype(self.realm_state.realm.generator_prototype()),
+          ObjectData::with_prototype(if closure_proto.is_async {
+            self.realm_state.realm.async_generator_prototype()
+          } else {
+            self.realm_state.realm.generator_prototype()
+          }),
         ))))
       } else {
         let object_proto = self
@@ -368,5 +379,62 @@ impl Vm {
       }
     }
     Ok(closure)
+  }
+}
+
+#[cfg(test)]
+mod async_generator_intrinsic_tests {
+  use super::*;
+
+  #[test]
+  fn async_generator_intrinsics_have_distinct_prototypes_and_reject_invalid_receivers() {
+    let source = crate::js!(
+      r#"
+      var f = async function* () {};
+      var functionPrototype = Object.getPrototypeOf(f);
+      var generatorPrototype = Object.getPrototypeOf(f.prototype);
+      var iteratorPrototype = Object.getPrototypeOf(generatorPrototype);
+      var ctor = functionPrototype.constructor;
+      var dynamic = ctor('value', 'yield value');
+      var tags = Object.prototype.toString.call(f) === '[object AsyncGeneratorFunction]'
+        && Object.prototype.toString.call(f.prototype) === '[object AsyncGenerator]';
+      var graph = functionPrototype.prototype === generatorPrototype
+        && generatorPrototype.constructor === functionPrototype
+        && Object.getPrototypeOf(functionPrototype) === Function.prototype
+        && Object.getPrototypeOf(ctor) === Function
+        && Object.getPrototypeOf(dynamic) === functionPrototype
+        && Object.getPrototypeOf(dynamic.prototype) === generatorPrototype
+        && iteratorPrototype[Symbol.asyncIterator].call(f) === f
+        && !(Symbol.iterator in f.prototype);
+      var descriptors = true;
+      for (var name of ['next', 'return', 'throw']) {
+        var d = Object.getOwnPropertyDescriptor(generatorPrototype, name);
+        descriptors = descriptors && d.writable && !d.enumerable && d.configurable
+          && d.value.name === name && d.value.length === 1;
+      }
+      var rejected = 0;
+      for (var name of ['next', 'return', 'throw']) {
+        var promise = generatorPrototype[name].call({});
+        if (!(promise instanceof Promise)) throw Error('missing Promise');
+        promise.catch(function (error) { if (error instanceof TypeError) rejected++; });
+      }
+    "#
+    );
+    let session = crate::parser::Parser::parse_source(source).expect("parse");
+    let code = crate::compiler::compile_repl_session(&session).expect("compile");
+    let mut vm = Vm::new(Rc::new(RefCell::new(ObjectData::new())));
+    vm.run(code).expect("evaluate prototype checks");
+    vm.flush_microtasks()
+      .expect("settle rejected calls");
+    for name in ["tags", "graph", "descriptors"] {
+      assert!(
+        matches!(vm.get_global(name), Some(Value::Bool(true))),
+        "{name}"
+      );
+    }
+    assert!(matches!(
+      vm.get_global("rejected"),
+      Some(Value::Number(3.0))
+    ));
   }
 }

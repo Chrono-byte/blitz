@@ -23,7 +23,7 @@ use std::sync::Arc;
 use thiserror::Error;
 
 /// Current version of the prelinked graph wire envelope.
-pub const PRELINKED_GRAPH_WIRE_VERSION: u16 = 5;
+pub const PRELINKED_GRAPH_WIRE_VERSION: u16 = 6;
 
 const SOURCE_TEXT_WIRE_VERSION: u16 = 2;
 
@@ -316,6 +316,7 @@ fn encode_chunk(
   writer.u16(code.spill_slot_count);
   writer.u16(code.value_spill_slot_count);
   writer.bool(code.root_strict);
+  writer.bool(code.has_top_level_await);
   writer.bool(code.allow_new_target);
   writer.bool(code.allow_super);
   writer.vector_len(
@@ -390,6 +391,7 @@ fn decode_chunk(
   let spill_slot_count = reader.u16()?;
   let value_spill_slot_count = reader.u16()?;
   let root_strict = reader.bool()?;
+  let has_top_level_await = reader.wire_version >= 6 && reader.bool()?;
   let allow_new_target = reader.bool()?;
   let allow_super = reader.bool()?;
   let handler_count = reader.vector_len(MAX_VECTOR_ITEMS, "finally handler count")?;
@@ -417,6 +419,7 @@ fn decode_chunk(
     spill_slot_count,
     value_spill_slot_count,
     root_strict,
+    has_top_level_await,
     allow_new_target,
     allow_super,
     finally_handlers,

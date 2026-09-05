@@ -155,6 +155,8 @@ pub struct Intrinsics {
   pub async_function_prototype: Option<Value>,
   /// AsyncGenerator prototype for this realm.
   pub async_generator_prototype: Option<Value>,
+  /// AsyncGeneratorFunction prototype for this realm.
+  pub async_generator_function_prototype: Option<Value>,
   /// AsyncFromSyncIterator prototype for this realm.
   pub async_from_sync_iterator_prototype: Option<Value>,
 
@@ -252,6 +254,22 @@ impl Realm {
     self
       .function_prototype_ref()
       .cloned()
+      .unwrap_or(Value::Null)
+  }
+
+  pub fn async_generator_prototype(&self) -> Value {
+    self
+      .intrinsics
+      .async_generator_prototype
+      .clone()
+      .unwrap_or(Value::Null)
+  }
+
+  pub fn async_generator_function_prototype(&self) -> Value {
+    self
+      .intrinsics
+      .async_generator_function_prototype
+      .clone()
       .unwrap_or(Value::Null)
   }
 
@@ -394,6 +412,12 @@ impl Realm {
         .generator_function_prototype
         .as_ref(),
       "Generator" => self.intrinsics.generator_prototype.as_ref(),
+      "AsyncGenerator" => self.intrinsics.async_generator_prototype.as_ref(),
+      "AsyncGeneratorFunction" => self
+        .intrinsics
+        .async_generator_function_prototype
+        .as_ref(),
+      "AsyncFunction" => self.intrinsics.async_function_prototype.as_ref(),
       "String" => self.intrinsics.string_prototype.as_ref(),
       "Symbol" => self.intrinsics.symbol_prototype.as_ref(),
       "Error" => self.intrinsics.error_prototype.as_ref(),

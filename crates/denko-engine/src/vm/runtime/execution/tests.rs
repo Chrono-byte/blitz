@@ -6609,6 +6609,84 @@ mod test {
   }
 
   #[test]
+  fn await_reuses_intrinsic_promises_and_catches_constructor_errors() {
+    let (mut vm, _) = run_script(crate::js!(
+      r#"
+      var order = [];
+      const promise = Promise.resolve(1);
+      Object.defineProperty(promise, 'then', { get() { throw 'must not read then'; } });
+      async function run() { await promise; order.push('await'); }
+      run();
+      Promise.resolve().then(() => order.push('tick'));
+      const marker = {};
+      const invalid = Promise.resolve(2);
+      Object.defineProperty(invalid, 'constructor', { get() { throw marker; } });
+      async function catches() {
+        try { await invalid; } catch (error) { globalThis.awaitCaught = error === marker; }
+      }
+      catches();
+      globalThis.awaitOrder = order;
+    "#
+    ));
+    vm.flush_microtasks().expect("flush");
+    assert_eq!(vm.get_global("awaitCaught"), Some(Value::Bool(true)));
+    let order = vm.get_global("awaitOrder").expect("order array");
+    assert_eq!(
+      vm.get_property_host(&order, &PropertyKey::String("length".into()))
+        .expect("length"),
+      Value::Number(2.0)
+    );
+    for (index, expected) in ["await", "tick"].into_iter().enumerate() {
+      assert_eq!(
+        vm.get_property_host(&order, &PropertyKey::String(index.to_string().into()))
+          .expect("element"),
+        Value::String(expected.into())
+      );
+    }
+  }
+
+  #[test]
+  fn async_generator_queues_requests_and_awaits_yielded_values() {
+    let (mut vm, _) = run_script(crate::js!(
+      r#"
+      var results = [];
+      async function* values() {
+        const sent = yield Promise.resolve(1);
+        yield await Promise.resolve(sent + 1);
+        return 9;
+      }
+      const iterator = values();
+      const first = iterator.next();
+      const second = iterator.next(4);
+      const third = iterator.next();
+      first.then(result => results.push(result.value + ":" + result.done));
+      second.then(result => results.push(result.value + ":" + result.done));
+      third.then(result => results.push(result.value + ":" + result.done));
+      globalThis.asyncGeneratorResults = results;
+    "#
+    ));
+    vm.flush_microtasks().expect("flush");
+    let results = vm
+      .get_global("asyncGeneratorResults")
+      .expect("results");
+    assert_eq!(
+      vm.get_property_host(&results, &PropertyKey::String("length".into()))
+        .expect("length"),
+      Value::Number(3.0)
+    );
+    for (index, expected) in ["1:false", "5:false", "9:true"]
+      .into_iter()
+      .enumerate()
+    {
+      assert_eq!(
+        vm.get_property_host(&results, &PropertyKey::String(index.to_string().into()))
+          .expect("element"),
+        Value::String(expected.into())
+      );
+    }
+  }
+
+  #[test]
   fn yield_star_delegates_through_the_iterator_protocol() {
     let src = crate::js!(
       r#"
@@ -6996,6 +7074,33 @@ mod test {
       matches!(assign_result, Some(Value::Number(n)) if (n - 9.0).abs() < f64::EPSILON),
       "unexpected assign_result: {:?}",
       assign_result
+    );
+  }
+
+  #[test]
+  fn resumed_async_functions_await_in_their_own_realm() {
+    let source = crate::js!(
+      r#"
+      const foreign = $262.createRealm();
+      foreign.evalScript(`
+        async function task() {
+          await 0;
+          const promise = Promise.resolve(7);
+          promise.then = function() { throw 'must reuse foreign intrinsic Promise'; };
+          return await promise;
+        }
+      `);
+      foreign.global.task().then(value => { globalThis.foreignAsyncResult = value; });
+    "#
+    );
+    let session = Parser::parse_source(source).expect("parse");
+    let code = compiler::compile_session(&session).expect("compile");
+    let mut vm = Vm::new(crate::test262_support::make_test262_globals());
+    vm.run(code).expect("run");
+    vm.flush_microtasks().expect("flush");
+    assert_eq!(
+      vm.get_global("foreignAsyncResult"),
+      Some(Value::Number(7.0))
     );
   }
 

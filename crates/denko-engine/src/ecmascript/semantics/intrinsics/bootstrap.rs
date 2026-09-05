@@ -71,6 +71,9 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   let generator_proto_map = foundation.generator_prototype;
   let generator_function_proto_map = foundation.generator_function_prototype;
   let async_function_proto_map = foundation.async_function_prototype;
+  let async_iterator_proto_map = foundation.async_iterator_prototype;
+  let async_generator_proto_map = foundation.async_generator_prototype;
+  let async_generator_function_proto_map = foundation.async_generator_function_prototype;
   let throw_type_error_val = foundation.throw_type_error;
 
   let array_intrinsics =
@@ -102,6 +105,12 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     &function_ctor_val,
     &generator_function_proto_map,
   );
+  let _async_generator_function_ctor_val =
+    builtins::function::create_async_generator_function_constructor(
+      globals,
+      &function_ctor_val,
+      &async_generator_function_proto_map,
+    );
   let _async_function_ctor_val = builtins::function::create_async_function_constructor(
     globals,
     &function_ctor_val,
@@ -340,7 +349,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     shared_array_buffer_prototype: Some(Value::Object(sharedarraybuffer_proto_map)),
     data_view_prototype: Some(Value::Object(dataview_proto_map)),
     iterator_prototype: Some(iterator_proto),
-    async_iterator_prototype: None,
+    async_iterator_prototype: Some(Value::Object(async_iterator_proto_map)),
     array_iterator_prototype: Some(Value::Object(array_iterator_proto)),
     map_iterator_prototype: Some(map_iterator_proto),
     set_iterator_prototype: Some(set_iterator_proto),
@@ -349,7 +358,8 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     generator_prototype: Some(Value::Object(generator_proto_map)),
     generator_function_prototype: Some(Value::Object(generator_function_proto_map)),
     async_function_prototype: Some(Value::Object(async_function_proto_map)),
-    async_generator_prototype: None,
+    async_generator_prototype: Some(Value::Object(async_generator_proto_map)),
+    async_generator_function_prototype: Some(Value::Object(async_generator_function_proto_map)),
     async_from_sync_iterator_prototype: None,
     throw_type_error: Some(throw_type_error_val),
     typed_array_constructors,

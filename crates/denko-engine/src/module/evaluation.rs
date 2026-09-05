@@ -270,85 +270,9 @@ impl ModuleLoader {
     vm: &mut Vm,
     enable_typecheck: bool,
   ) -> Result<(), crate::errors::RuntimeError> {
-    for rec_rc in self.map.values() {
-      let rec = rec_rc.borrow();
-      if let Some(idx) = rec.module_index {
-        let exports_clone = rec.exports.clone();
-        vm.install_module_exports(idx, exports_clone);
-      }
-    }
-    self.initialize_namespace_reexports(vm);
-    let order = self
-      .evaluation_order_from(entry)
-      .map_err(|e| crate::errors::RuntimeError::from(format!("Module resolution failed: {}", e)))?;
-    let declarations = self.virtual_declarations_for_typecheck();
-
-    for path in order {
-      if let Some(rec_rc) = self.map.get(&path) {
-        let mut rec = rec_rc.borrow_mut();
-        if matches!(rec.state, ModuleState::Evaluating) {
-          continue;
-        }
-        if matches!(rec.state, ModuleState::Instantiated) {
-          if rec.host_initialized {
-            rec.state = ModuleState::Evaluated;
-            continue;
-          }
-          rec.state = ModuleState::Evaluating;
-          let code = match &rec.payload {
-            ModuleRecordPayload::Prelinked { .. } => rec.bytecode.clone().ok_or_else(|| {
-              crate::errors::RuntimeError::from(
-                "Prelinked module record is missing its validated chunk",
-              )
-            })?,
-            ModuleRecordPayload::Source {
-              session,
-              dependencies,
-              ..
-            } => {
-              let program = session.program();
-              if enable_typecheck {
-                self.pipeline_counters.source_typecheck();
-                crate::typecheck::check_with_declarations_and_source_imports(
-                  program,
-                  &declarations,
-                  dependencies,
-                )
-                .map_err(|error| {
-                  crate::errors::RuntimeError::from(format!("Typecheck failed: {error}"))
-                })?;
-              }
-              let module_index = rec
-                .module_index
-                .expect("module_index should be set");
-              let context = ModuleContext {
-                module_index,
-                imports: rec.import_sources.clone(),
-                exports: rec.exports.keys().cloned().collect(),
-                namespace_exports: rec.namespace_exports.clone(),
-              };
-              let code = if let Some(code) = rec.bytecode.clone() {
-                code
-              } else {
-                self.pipeline_counters.source_compilation();
-                crate::compiler::compile_oxc_with_ctx(program, Some(&context), session.source())
-                  .map_err(|error| {
-                    crate::errors::RuntimeError::from(format!("Compile failed: {error}"))
-                  })?
-              };
-              crate::runtime_utils::clear_slot_types_in_chunk(code)
-            }
-          };
-          vm.set_current_module_specifier(Some(rec.specifier.clone()));
-          let result = vm.run(code);
-          vm.set_current_module_specifier(None);
-          result?;
-          rec.state = ModuleState::Evaluated;
-        }
-      }
-    }
-
-    Ok(())
+    let entry = self.prepare_evaluation(entry, vm, enable_typecheck)?;
+    let promise = async_evaluation::evaluate(vm, &entry)?;
+    async_evaluation::finish_host_evaluation(vm, &promise)
   }
 
   /// Evaluate all instantiated modules in loader insertion order.
@@ -364,62 +288,9 @@ impl ModuleLoader {
     vm: &mut Vm,
     enable_typecheck: bool,
   ) -> Result<(), crate::errors::RuntimeError> {
-    for rec_rc in self.map.values() {
-      let record = rec_rc.borrow();
-      if let Some(module_index) = record.module_index {
-        vm.install_module_exports(module_index, record.exports.clone());
-      }
-    }
-    self.initialize_namespace_reexports(vm);
-    let declarations = self.virtual_declarations_for_typecheck();
-    for rec_rc in self.map.values() {
-      let mut rec = rec_rc.borrow_mut();
-      if matches!(rec.state, ModuleState::Instantiated) {
-        if rec.host_initialized {
-          rec.state = ModuleState::Evaluated;
-          continue;
-        }
-        rec.state = ModuleState::Evaluating;
-        let code = match &rec.payload {
-          ModuleRecordPayload::Prelinked { .. } => rec.bytecode.clone().ok_or_else(|| {
-            crate::errors::RuntimeError::from(
-              "Prelinked module record is missing its validated chunk",
-            )
-          })?,
-          ModuleRecordPayload::Source {
-            session,
-            dependencies,
-            ..
-          } => {
-            let program = session.program();
-            if enable_typecheck {
-              self.pipeline_counters.source_typecheck();
-              crate::typecheck::check_with_declarations_and_source_imports(
-                program,
-                &declarations,
-                dependencies,
-              )
-              .map_err(|error| {
-                crate::errors::RuntimeError::from(format!("Typecheck failed: {error}"))
-              })?;
-            }
-            let code = if let Some(code) = rec.bytecode.clone() {
-              code
-            } else {
-              self.pipeline_counters.source_compilation();
-              crate::compiler::compile_oxc_with_ctx(program, None, session.source()).map_err(
-                |error| crate::errors::RuntimeError::from(format!("Compile failed: {error}")),
-              )?
-            };
-            crate::runtime_utils::clear_slot_types_in_chunk(code)
-          }
-        };
-        vm.set_current_module_specifier(Some(rec.specifier.clone()));
-        let result = vm.run(code);
-        vm.set_current_module_specifier(None);
-        result?;
-        rec.state = ModuleState::Evaluated;
-      }
+    let paths = self.map.keys().cloned().collect::<Vec<_>>();
+    for path in paths {
+      self.evaluate_entry(&path, vm, enable_typecheck)?;
     }
     Ok(())
   }

@@ -78,6 +78,7 @@ impl Vm {
           strict: false,
         },
         interpreter_depth: 0,
+        defer_job_checkpoint: false,
         control_flow_epoch: 0,
         builtin_this_arg_prepended: false,
         pending_closure_env: None,
@@ -104,6 +105,7 @@ impl Vm {
         current_specifier: None,
       },
       jobs: JobState {
+        active_depth: 0,
         microtasks: VecDeque::new(),
         dynamic_imports: VecDeque::new(),
         unhandled_rejection_hook: None,
@@ -191,6 +193,7 @@ impl Vm {
           strict: self.execution.active.strict,
         },
         interpreter_depth: 0,
+        defer_job_checkpoint: false,
         control_flow_epoch: 0,
         builtin_this_arg_prepended: false,
         pending_closure_env: None,
@@ -217,6 +220,7 @@ impl Vm {
         current_specifier: None,
       },
       jobs: JobState {
+        active_depth: 0,
         microtasks: VecDeque::new(),
         dynamic_imports: VecDeque::new(),
         unhandled_rejection_hook: self.jobs.unhandled_rejection_hook.clone(),
@@ -309,13 +313,6 @@ impl Vm {
     root: HostRoot,
   ) -> Result<(), RuntimeError> {
     self.memory.release_host_root(root)
-  }
-
-  pub(crate) fn share_host_roots_from(
-    &mut self,
-    other: &Self,
-  ) {
-    self.memory.share_host_roots_from(&other.memory);
   }
 
   pub(super) fn begin_opcode_profile_run(&mut self) {
@@ -644,7 +641,10 @@ impl Vm {
 
   /// Run the prototype mark/sweep collector and return mark statistics.
   pub fn collect_garbage_prototype(&mut self) -> gc::GcStats {
-    if !self.jobs.microtasks.is_empty() || !self.jobs.dynamic_imports.is_empty() {
+    if self.jobs.active_depth != 0
+      || !self.jobs.microtasks.is_empty()
+      || !self.jobs.dynamic_imports.is_empty()
+    {
       if Self::gc_trace_enabled() {
         eprintln!(
           "[gc] skip collect: pending_jobs microtasks={} import_jobs={}",
@@ -705,6 +705,15 @@ impl Vm {
     if let Some(state) = &self.execution.active.yield_star {
       roots.push(state.iterator.clone());
       roots.push(state.next_method.clone());
+      roots.extend(state.settled.iter().cloned());
+      if let Some(resume) = &state.resume {
+        let value = match resume {
+          YieldStarResume::Next(value)
+          | YieldStarResume::Throw(value)
+          | YieldStarResume::Return(value) => value,
+        };
+        roots.push(value.clone());
+      }
     }
     if let Some(env) = &self.execution.active.closure_env {
       env_roots.push(env.clone());
@@ -761,6 +770,15 @@ impl Vm {
       if let Some(state) = &frame.context.yield_star {
         roots.push(state.iterator.clone());
         roots.push(state.next_method.clone());
+        roots.extend(state.settled.iter().cloned());
+        if let Some(resume) = &state.resume {
+          let value = match resume {
+            YieldStarResume::Next(value)
+            | YieldStarResume::Throw(value)
+            | YieldStarResume::Return(value) => value,
+          };
+          roots.push(value.clone());
+        }
       }
       if let Some(env) = &frame.context.closure_env {
         env_roots.push(env.clone());
@@ -772,6 +790,36 @@ impl Vm {
         .borrow()
         .collect_binding_values(&mut roots);
     }
+    if let Ok(loader) = self.modules.loader.try_borrow() {
+      loader.append_evaluation_roots(&mut roots);
+    }
+    roots.extend(
+      self
+        .realm_state
+        .realm
+        .intrinsics
+        .async_generator_function_prototype
+        .iter()
+        .cloned(),
+    );
+    roots.extend(
+      self
+        .realm_state
+        .realm
+        .intrinsics
+        .async_generator_prototype
+        .iter()
+        .cloned(),
+    );
+    roots.extend(
+      self
+        .realm_state
+        .realm
+        .intrinsics
+        .async_iterator_prototype
+        .iter()
+        .cloned(),
+    );
     for module in &self.modules.table {
       roots.extend(module.values().map(BindingCell::value));
     }

@@ -1013,7 +1013,9 @@ impl Lowering {
           let rd = destination_register(destination, source);
           emit(
             &mut lowered,
-            op_word(instruction.opcode) | encode_rd(rd),
+            op_word(instruction.opcode)
+              | encode_rd(rd)
+              | ((instruction.operand_u8(0).unwrap_or_default() as u32) << 16),
             line,
           );
           store_location(&mut lowered, destination, rd, line);

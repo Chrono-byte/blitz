@@ -38,13 +38,6 @@ impl VmMemory {
     }
   }
 
-  pub(crate) fn share_host_roots_from(
-    &mut self,
-    other: &Self,
-  ) {
-    self.host = Rc::clone(&other.host);
-  }
-
   pub(crate) fn create_host_root(
     &mut self,
     value: Value,
