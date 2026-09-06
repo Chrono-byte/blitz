@@ -325,6 +325,14 @@ impl EnvironmentRecord {
     Ok(false)
   }
 
+  /// Read this record's binding values without traversing its outer environment.
+  pub(crate) fn own_binding_values(&self) -> impl Iterator<Item = Value> + '_ {
+    self
+      .bindings
+      .values()
+      .map(|binding| binding.cell.value())
+  }
+
   /// Collect all currently stored binding values in this environment chain.
   ///
   /// This is used by the prototype GC as a conservative root walk for live
@@ -333,9 +341,7 @@ impl EnvironmentRecord {
     &self,
     values: &mut Vec<Value>,
   ) {
-    for binding in self.bindings.values() {
-      values.push(binding.cell.value());
-    }
+    values.extend(self.own_binding_values());
     if let Some(outer) = &self.outer {
       outer.borrow().collect_binding_values(values);
     }

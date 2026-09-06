@@ -7,6 +7,8 @@
 
 use crate::value::Value;
 use std::ptr::NonNull;
+pub(crate) mod numeric_body;
+pub(crate) mod typed_view;
 
 #[repr(C)]
 pub(crate) struct JitFrame {

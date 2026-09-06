@@ -34,7 +34,7 @@ impl CodePoint {
   }
 }
 
-const INLINE_ASCII_CAPACITY: usize = 7;
+const INLINE_CAPACITY: usize = 7;
 
 /// An immutable JavaScript string backed by exact UTF-16 code units.
 #[derive(Clone)]
@@ -44,14 +44,14 @@ pub struct JsString {
 
 #[derive(Clone)]
 enum Repr {
-  Inline(InlineAscii),
+  Inline(InlineString),
   Heap { shared: Arc<HeapString>, len: usize },
 }
 
 #[derive(Clone)]
-struct InlineAscii {
-  units: [u16; INLINE_ASCII_CAPACITY],
-  bytes: [u8; INLINE_ASCII_CAPACITY],
+struct InlineString {
+  units: [u16; INLINE_CAPACITY],
+  bytes: [u8; INLINE_CAPACITY],
   len: u8,
 }
 
@@ -61,41 +61,70 @@ struct HeapString {
   utf8_lossy: OnceLock<String>,
 }
 
-impl InlineAscii {
+impl InlineString {
   fn try_from_str(value: &str) -> Option<Self> {
-    if value.len() > INLINE_ASCII_CAPACITY || !value.is_ascii() {
+    if value.len() > INLINE_CAPACITY {
       return None;
     }
     let mut inline = Self {
-      units: [0; INLINE_ASCII_CAPACITY],
-      bytes: [0; INLINE_ASCII_CAPACITY],
-      len: value.len() as u8,
+      units: [0; INLINE_CAPACITY],
+      bytes: [0; INLINE_CAPACITY],
+      len: 0,
     };
     inline.bytes[..value.len()].copy_from_slice(value.as_bytes());
-    for (unit, byte) in inline.units.iter_mut().zip(value.bytes()) {
-      *unit = u16::from(byte);
+    if value.is_ascii() {
+      for (slot, byte) in inline.units.iter_mut().zip(value.bytes()) {
+        *slot = u16::from(byte);
+      }
+      inline.len = (value.len() as u8) | ((value.len() as u8) << 4);
+      return Some(inline);
     }
+    let mut unit_length = 0;
+    for (slot, unit) in inline.units.iter_mut().zip(value.encode_utf16()) {
+      *slot = unit;
+      unit_length += 1;
+    }
+    // Both lengths fit in a nibble; keep the string representation unchanged.
+    inline.len = unit_length | ((value.len() as u8) << 4);
     Some(inline)
   }
 
   fn try_from_units(units: &[u16]) -> Option<Self> {
-    if units.len() > INLINE_ASCII_CAPACITY || units.iter().any(|unit| *unit > 0x7F) {
+    if units.len() > INLINE_CAPACITY {
       return None;
     }
     let mut inline = Self {
-      units: [0; INLINE_ASCII_CAPACITY],
-      bytes: [0; INLINE_ASCII_CAPACITY],
+      units: [0; INLINE_CAPACITY],
+      bytes: [0; INLINE_CAPACITY],
       len: units.len() as u8,
     };
     inline.units[..units.len()].copy_from_slice(units);
-    for (byte, unit) in inline.bytes.iter_mut().zip(units.iter().copied()) {
-      *byte = unit as u8;
+    if units.iter().all(|unit| *unit <= 0x7f) {
+      for (byte, unit) in inline.bytes.iter_mut().zip(units.iter().copied()) {
+        *byte = unit as u8;
+      }
+      inline.len |= (units.len() as u8) << 4;
+      return Some(inline);
     }
+    let mut byte_length = 0;
+    for point in char::decode_utf16(units.iter().copied()) {
+      let mut encoded = [0; 4];
+      let text = point
+        .unwrap_or(char::REPLACEMENT_CHARACTER)
+        .encode_utf8(&mut encoded);
+      let end = byte_length + text.len();
+      if end > INLINE_CAPACITY {
+        return None;
+      }
+      inline.bytes[byte_length..end].copy_from_slice(text.as_bytes());
+      byte_length = end;
+    }
+    inline.len |= (byte_length as u8) << 4;
     Some(inline)
   }
 
   const fn len(&self) -> usize {
-    self.len as usize
+    (self.len & 0x0f) as usize
   }
 
   fn units(&self) -> &[u16] {
@@ -103,7 +132,8 @@ impl InlineAscii {
   }
 
   fn text(&self) -> &str {
-    std::str::from_utf8(&self.bytes[..self.len()]).expect("inline ASCII is valid UTF-8")
+    std::str::from_utf8(&self.bytes[..usize::from(self.len >> 4)])
+      .expect("inline text is valid lossy UTF-8")
   }
 }
 
@@ -117,7 +147,7 @@ impl JsString {
   /// Encode a Rust string as UTF-16.
   #[must_use]
   pub fn new(value: &str) -> Self {
-    if let Some(inline) = InlineAscii::try_from_str(value) {
+    if let Some(inline) = InlineString::try_from_str(value) {
       return Self {
         repr: Repr::Inline(inline),
       };
@@ -129,7 +159,7 @@ impl JsString {
   #[must_use]
   pub fn from_utf16(units: impl Into<Vec<u16>>) -> Self {
     let units = units.into();
-    if let Some(inline) = InlineAscii::try_from_units(&units) {
+    if let Some(inline) = InlineString::try_from_units(&units) {
       return Self {
         repr: Repr::Inline(inline),
       };
@@ -231,14 +261,18 @@ impl JsString {
     if range.start > range.end || range.end > self.len() {
       return None;
     }
+    if range.start == 0 && range.end == self.len() {
+      return Some(self.clone());
+    }
+    let units = &self.as_slice()[range.clone()];
+    if let Some(inline) = InlineString::try_from_units(units) {
+      return Some(Self {
+        repr: Repr::Inline(inline),
+      });
+    }
     let len = range.end - range.start;
     Some(match &self.repr {
-      Repr::Inline(inline) => Self {
-        repr: Repr::Inline(
-          InlineAscii::try_from_units(&inline.units()[range])
-            .expect("an inline ASCII slice remains inline ASCII"),
-        ),
-      },
+      Repr::Inline(_) => Self::from_utf16(units.to_vec()),
       Repr::Heap { shared, .. } => Self {
         repr: Repr::Heap {
           shared: Arc::new(HeapString {

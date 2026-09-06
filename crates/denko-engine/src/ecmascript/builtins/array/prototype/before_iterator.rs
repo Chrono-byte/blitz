@@ -54,50 +54,39 @@ pub(in crate::ecmascript::builtins::array) fn install_before_iterator(
     PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(|vm, args| {
         let receiver = vm.to_object_value(args.first().cloned().unwrap_or(Value::Undefined))?;
+        let len = array_like_length(vm, &receiver)?;
         let callback = args.get(1).cloned().unwrap_or(Value::Undefined);
         let this_arg = args.get(2).cloned().unwrap_or(Value::Undefined);
         if !Vm::is_callable_value(&callback) {
           return Err(vm.throw_type_error("Array.prototype.map callback is not callable"));
         }
-
-        let len = array_like_length(vm, &receiver)?;
-        if len > u32::MAX as usize {
-          return Err(vm.throw_range_error("Invalid array length"));
-        }
-        let mut out: Vec<Option<Value>> = Vec::with_capacity(len);
-        for i in 0..len {
-          let key = PKey::String(i.to_string().into());
-          let has_prop = vm.has_property_host(&receiver, &key)?;
-          if has_prop {
-            let item = vm.get_property_host(&receiver, &key)?;
-            let mapped = vm.call_value_with_this(
-              &callback,
-              &this_arg,
-              &[item, Value::Number(usize_to_f64(i)), receiver.clone()],
-            )?;
-            out.push(Some(mapped));
-          } else {
-            out.push(None);
-          }
-        }
-
         let result = array_species_create(vm, &receiver, len)?;
-        for (index, value) in out.into_iter().enumerate() {
-          if let Some(value) = value {
-            create_data_property_or_throw(
-              vm,
-              &result,
-              &Value::String(index.to_string().into()),
-              value,
-            )?;
+        let root = vm.create_host_root(result.clone());
+        let completion = (|| {
+          if vm.try_map_numeric_callback(&receiver, &result, &callback, len)? {
+            return Ok(result.clone());
           }
-        }
-        vm.set_property_host(
-          &result,
-          &Value::String("length".into()),
-          Value::Number(usize_to_f64(len)),
-        )?;
-        Ok(result)
+          for i in 0..len {
+            let key = PKey::String(i.to_string().into());
+            if vm.has_property_host(&receiver, &key)? {
+              let item = vm.get_property_host(&receiver, &key)?;
+              let mapped = vm.call_value_with_this(
+                &callback,
+                &this_arg,
+                &[item, Value::Number(usize_to_f64(i)), receiver.clone()],
+              )?;
+              create_data_property_or_throw(
+                vm,
+                &result,
+                &Value::String(i.to_string().into()),
+                mapped,
+              )?;
+            }
+          }
+          Ok(result.clone())
+        })();
+        vm.release_host_root(root)?;
+        completion
       }),
       function_proto_map,
     )),
@@ -145,59 +134,26 @@ pub(in crate::ecmascript::builtins::array) fn install_before_iterator(
     .insert(PKey::String("sort".to_string().into()), {
       let sort_fn = builtin_object(
         Rc::new(|vm, args| {
-          let this = args.first().cloned().unwrap_or(Value::Undefined);
           let compare_fn = args.get(1).cloned().unwrap_or(Value::Undefined);
-          let compare_is_undefined = matches!(compare_fn, Value::Undefined);
-          let compare_is_callable = compare_is_undefined
-            || matches!(
-              compare_fn,
-              Value::Builtin(_) | Value::BuiltinObject(_, _) | Value::Closure { .. }
-            );
-          if !compare_is_callable {
+          if !matches!(compare_fn, Value::Undefined) && !Vm::is_callable_value(&compare_fn) {
             return Err(vm.throw_type_error("Array.prototype.sort comparefn is not callable"));
           }
-
+          let this = vm.to_object_value(args.first().cloned().unwrap_or(Value::Undefined))?;
           let len = array_like_length(vm, &this)?;
-          let (keys, snapshot) = collect_indexed_snapshot(vm, &this, len)?;
           let mut values: Vec<Value> = Vec::new();
           let mut undefined_count = 0usize;
-          for idx in &keys {
-            match snapshot
-              .get(idx)
-              .cloned()
-              .unwrap_or(Value::Undefined)
-            {
-              Value::Undefined => undefined_count += 1,
-              v => values.push(v),
+          // SortIndexedProperties observes HasProperty/Get in ascending index order.
+          for index in 0..len {
+            let key = PKey::String(index.to_string().into());
+            if vm.has_property_host(&this, &key)? {
+              match vm.get_property_host(&this, &key)? {
+                Value::Undefined => undefined_count += 1,
+                value => values.push(value),
+              }
             }
           }
 
-          let compare_pair =
-            |vm: &mut Vm, a: &Value, b: &Value| -> Result<Ordering, RuntimeError> {
-              if compare_is_undefined {
-                let sa = vm.to_string(a)?;
-                let sb = vm.to_string(b)?;
-                return Ok(sa.cmp(&sb));
-              }
-              let cmp =
-                vm.call_value_with_this(&compare_fn, &Value::Undefined, &[a.clone(), b.clone()])?;
-              let cmp_num = vm.to_number_value(&cmp)?;
-              Ok(if cmp_num.is_nan() || cmp_num == 0.0 {
-                Ordering::Equal
-              } else if cmp_num < 0.0 {
-                Ordering::Less
-              } else {
-                Ordering::Greater
-              })
-            };
-          let n = values.len();
-          for i in 0..n {
-            for j in (i + 1)..n {
-              if compare_pair(vm, &values[i], &values[j])? == Ordering::Greater {
-                values.swap(i, j);
-              }
-            }
-          }
+          sort_array_values(vm, &mut values, &compare_fn)?;
 
           let cutoff = values.len() + undefined_count;
           let mut next_index = 0usize;
@@ -213,10 +169,8 @@ pub(in crate::ecmascript::builtins::array) fn install_before_iterator(
             )?;
             next_index += 1;
           }
-          for idx in keys {
-            if idx >= cutoff {
-              delete_property_or_throw(vm, &this, &PKey::String(idx.to_string().into()))?;
-            }
+          for index in cutoff..len {
+            delete_property_or_throw(vm, &this, &PKey::String(index.to_string().into()))?;
           }
           Ok(this)
         }),
@@ -233,15 +187,14 @@ pub(in crate::ecmascript::builtins::array) fn install_before_iterator(
         move |vm, args| {
           let receiver = args.first().cloned().unwrap_or(Value::Undefined);
           let len = array_like_length(vm, &receiver)?;
+          if len > u32::MAX as usize {
+            return Err(vm.throw_range_error("Invalid array length"));
+          }
           let mut out: Vec<Option<Value>> = Vec::with_capacity(len);
           for k in 0..len {
             let from = len - 1 - k;
             let key = PKey::String(from.to_string().into());
-            if vm.has_property_host(&receiver, &key)? {
-              out.push(Some(vm.get_property_host(&receiver, &key)?));
-            } else {
-              out.push(None);
-            }
+            out.push(Some(vm.get_property_host(&receiver, &key)?));
           }
           let arr_rc = Rc::new(RefCell::new(ArrayData::from(out)));
           let props = Rc::new(RefCell::new(ObjectData::new()));
@@ -278,37 +231,12 @@ pub(in crate::ecmascript::builtins::array) fn install_before_iterator(
           let mut undefined_count = 0usize;
           for i in 0..len {
             let key = PKey::String(i.to_string().into());
-            if vm.has_property_host(&receiver, &key)? {
-              let item = vm.get_property_host(&receiver, &key)?;
-              match item {
-                Value::Undefined => undefined_count += 1,
-                v => values.push(v),
-              }
-            } else {
-              undefined_count += 1;
+            match vm.get_property_host(&receiver, &key)? {
+              Value::Undefined => undefined_count += 1,
+              value => values.push(value),
             }
           }
-          let n = values.len();
-          for i in 0..n {
-            for j in (i + 1)..n {
-              let swap = if has_compare {
-                let cmp = vm.call_value_with_this(
-                  &compare_fn,
-                  &Value::Undefined,
-                  &[values[i].clone(), values[j].clone()],
-                )?;
-                let cmp_num = vm.to_number_value(&cmp)?;
-                cmp_num > 0.0
-              } else {
-                let ai = vm.to_string(&values[i])?;
-                let aj = vm.to_string(&values[j])?;
-                ai > aj
-              };
-              if swap {
-                values.swap(i, j);
-              }
-            }
-          }
+          sort_array_values(vm, &mut values, &compare_fn)?;
           while undefined_count > 0 {
             values.push(Value::Undefined);
             undefined_count -= 1;
@@ -338,15 +266,18 @@ pub(in crate::ecmascript::builtins::array) fn install_before_iterator(
           move |vm, args| {
             let receiver = args.first().cloned().unwrap_or(Value::Undefined);
             let len = array_like_length(vm, &receiver)?;
-            let relative_index =
-              to_integer_or_infinity(vm, args.get(1).unwrap_or(&Value::Undefined))?;
-            let actual_index = if relative_index < 0 {
-              len as isize + relative_index
+            let number = vm.to_number_value(args.get(1).unwrap_or(&Value::Undefined))?;
+            let relative_index = if number.is_nan() { 0.0 } else { number.trunc() };
+            let actual_index = if relative_index < 0.0 {
+              usize_to_f64(len) + relative_index
             } else {
               relative_index
             };
-            if actual_index < 0 || actual_index as usize >= len {
+            if actual_index < 0.0 || actual_index >= usize_to_f64(len) {
               return Err(vm.throw_range_error("Array.prototype.with index out of range"));
+            }
+            if len > u32::MAX as usize {
+              return Err(vm.throw_range_error("Invalid array length"));
             }
             let actual_index = actual_index as usize;
             let replacement = args.get(2).cloned().unwrap_or(Value::Undefined);
@@ -357,13 +288,7 @@ pub(in crate::ecmascript::builtins::array) fn install_before_iterator(
                 continue;
               }
               let key = PKey::String(i.to_string().into());
-              let value = if matches!(receiver, Value::Array(..))
-                && own_property_descriptor(&receiver, &key).is_none()
-              {
-                vm.get_property_host(&Value::Object(Rc::clone(&array_proto_map)), &key)?
-              } else {
-                vm.get_property_host(&receiver, &key)?
-              };
+              let value = vm.get_property_host(&receiver, &key)?;
               out.push(Some(value));
             }
             let arr_rc = Rc::new(RefCell::new(ArrayData::from(out)));
@@ -396,6 +321,9 @@ pub(in crate::ecmascript::builtins::array) fn install_before_iterator(
         .ok_or_else(|| vm.throw_type_error("Array.prototype.push result is too large"))?;
       if !array_length_is_writable(&receiver) && item_count > 0 {
         return Err(vm.throw_type_error("Array length is not writable"));
+      }
+      if vm.try_append_dense_array(&receiver, &args[1..], length) {
+        return Ok(Value::Number(usize_to_f64(new_length)));
       }
       for (offset, item) in args.iter().skip(1).cloned().enumerate() {
         vm.set_property_host(
@@ -632,27 +560,23 @@ pub(in crate::ecmascript::builtins::array) fn install_before_iterator(
             len.min(max_safe_len as usize)
           };
           let insert_count = args.len().saturating_sub(3);
-          let start_raw = vm.to_number_value(args.get(1).unwrap_or(&Value::Number(0.0)))?;
-          let start = if start_raw < 0.0 {
-            let back = start_raw.abs().trunc().to_usize().unwrap_or(len);
-            len.saturating_sub(back)
+          let number = vm.to_number_value(args.get(1).unwrap_or(&Value::Undefined))?;
+          let relative_start = if number.is_nan() { 0.0 } else { number.trunc() };
+          let start = if relative_start < 0.0 {
+            (usize_to_f64(len) + relative_start).max(0.0) as usize
           } else {
-            start_raw
-              .trunc()
-              .to_usize()
-              .unwrap_or(len)
-              .min(len)
+            relative_start.min(usize_to_f64(len)) as usize
           };
-          let delete_count = if let Some(dc) = args.get(2) {
-            vm.to_number_value(dc)?
+          let actual_delete_count = if let Some(delete_count) = args.get(2) {
+            vm.to_number_value(delete_count)?
               .max(0.0)
               .trunc()
-              .to_usize()
-              .unwrap_or(0)
+              .min(usize_to_f64(len - start)) as usize
+          } else if args.len() > 1 {
+            len - start
           } else {
-            len.saturating_sub(start)
+            0
           };
-          let actual_delete_count = delete_count.min(len.saturating_sub(start));
           let new_len = (len as u128)
             .checked_sub(actual_delete_count as u128)
             .and_then(|n| n.checked_add(insert_count as u128))
@@ -666,20 +590,12 @@ pub(in crate::ecmascript::builtins::array) fn install_before_iterator(
           let mut out: Vec<Option<Value>> = Vec::new();
           for i in 0..start {
             let key = PKey::String(i.to_string().into());
-            if vm.has_property_host(&receiver, &key)? {
-              out.push(Some(vm.get_property_host(&receiver, &key)?));
-            } else {
-              out.push(None);
-            }
+            out.push(Some(vm.get_property_host(&receiver, &key)?));
           }
           out.extend(args.iter().skip(3).cloned().map(Some));
           for i in start.saturating_add(actual_delete_count)..len {
             let key = PKey::String(i.to_string().into());
-            if vm.has_property_host(&receiver, &key)? {
-              out.push(Some(vm.get_property_host(&receiver, &key)?));
-            } else {
-              out.push(None);
-            }
+            out.push(Some(vm.get_property_host(&receiver, &key)?));
           }
           let arr_rc = Rc::new(RefCell::new(ArrayData::from(out)));
           let props = Rc::new(RefCell::new(ObjectData::new()));

@@ -33,6 +33,8 @@ pub struct Intrinsics {
   pub object_constructor: Option<Value>,
   /// Array constructor for this realm.
   pub array_constructor: Option<Value>,
+  /// Original Array @@species identity getter, retained for guarded invocation.
+  pub array_species_getter: Option<Value>,
   /// Function constructor for this realm.
   pub function_constructor: Option<Value>,
   /// String constructor for this realm.
@@ -126,6 +128,8 @@ pub struct Intrinsics {
   pub finalization_registry_prototype: Option<Value>,
   /// TypedArray prototype for this realm.
   pub typed_array_prototype: Option<Value>,
+  /// Original typed array length getter, retained for guarded loop execution.
+  pub typed_array_length_getter: Option<Value>,
   /// ArrayBuffer prototype for this realm.
   pub arraybuffer_prototype: Option<Value>,
   /// SharedArrayBuffer prototype for this realm.
@@ -386,7 +390,17 @@ impl Realm {
         .as_ref(),
       "DataView" => self.intrinsics.data_view_constructor.as_ref(),
       "TypedArray" => self.intrinsics.typed_array_constructor.as_ref(),
-      _ => None,
+      _ => self
+        .intrinsics
+        .typed_array_constructors
+        .iter()
+        .find(|constructor| {
+          let Value::BuiltinObject(_, properties) = constructor else {
+            return false;
+          };
+          matches!(properties.borrow().internal_slot("[[TypedArrayName]]"),
+          Some(Value::String(kind)) if kind.as_str_lossy() == name)
+        }),
     }
   }
 

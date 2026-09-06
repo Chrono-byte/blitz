@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 use super::*;
+use crate::value::SymbolId;
 use std::collections::{HashMap, HashSet};
 
 fn mark_realm_callables(
@@ -79,6 +80,18 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   let array_intrinsics =
     builtins::array::install_array_intrinsics(&object_proto_map, &function_proto_map);
   let array_ctor_val = array_intrinsics.constructor;
+  let array_species_getter = if let Value::BuiltinObject(_, properties) = &array_ctor_val {
+    match properties
+      .borrow()
+      .properties
+      .get(&PropertyKey::Symbol(SymbolId::well_known_species()))
+    {
+      Some(PropertyDescriptor::Accessor { get, .. }) => get.clone(),
+      _ => None,
+    }
+  } else {
+    None
+  };
   let array_proto_map = array_intrinsics.prototype;
   let array_iterator_proto = array_intrinsics.iterator_prototype;
   let array_values_builtin = array_intrinsics.values;
@@ -294,9 +307,18 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     biguint64array_ctor_val,
   ];
 
+  let typed_array_length_getter = match typedarray_proto_map
+    .borrow()
+    .properties
+    .get(&PropertyKey::String("length".into()))
+  {
+    Some(PropertyDescriptor::Accessor { get, .. }) => get.clone(),
+    _ => None,
+  };
   let mut intrinsics = Intrinsics {
     object_constructor: Some(object_ctor_val),
     array_constructor: Some(array_ctor_val),
+    array_species_getter,
     function_constructor: Some(function_ctor_val),
     string_constructor: Some(text_intrinsics.string_constructor),
     symbol_constructor: Some(text_intrinsics.symbol_constructor),
@@ -345,6 +367,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
       weak_reference_intrinsics.finalization_registry_prototype,
     ),
     typed_array_prototype: Some(Value::Object(typedarray_proto_map)),
+    typed_array_length_getter,
     arraybuffer_prototype: Some(Value::Object(arraybuffer_proto_map)),
     shared_array_buffer_prototype: Some(Value::Object(sharedarraybuffer_proto_map)),
     data_view_prototype: Some(Value::Object(dataview_proto_map)),

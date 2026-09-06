@@ -3,9 +3,11 @@
 
 mod baseline;
 mod bindings;
+mod numeric_body;
 mod patterns;
 mod regions;
 mod sequences;
+mod string_body;
 
 use crate::binding::BindingCell;
 use crate::bytecode::{
@@ -1196,6 +1198,40 @@ impl Vm {
               registers[abi::RETURN.index()] = result;
               return Ok(None);
             }
+            if op != Opcode::TailCall
+              && count <= abi::REGISTER_ARGUMENT_COUNT
+              && let Value::Closure { proto, env, .. } = &registers[abi::V2_CALL_OPERAND.index()]
+              && let Some(result) = self.try_leaf_callback(
+                proto,
+                env,
+                &registers[abi::FIRST_ARGUMENT.index()..abi::FIRST_ARGUMENT.index() + count],
+                true,
+              )?
+            {
+              registers[abi::RETURN.index()] = result;
+              return Ok(None);
+            }
+            // Builtins consume a borrowed argument slice. Keep register-only
+            // calls in that window instead of allocating and cloning a Vec
+            // that the call boundary immediately copies into its rooted state.
+            if op != Opcode::TailCall
+              && count <= abi::REGISTER_ARGUMENT_COUNT
+              && matches!(
+                registers[abi::V2_CALL_OPERAND.index()],
+                Value::Builtin(_) | Value::BuiltinObject(_, _)
+              )
+            {
+              let callee = &registers[abi::V2_CALL_OPERAND.index()];
+              let args =
+                &registers[abi::FIRST_ARGUMENT.index()..abi::FIRST_ARGUMENT.index() + count];
+              let result = if op == Opcode::CallMethod {
+                self.call_value_with_this(callee, &registers[abi::RECEIVER.index()], args)?
+              } else {
+                self.call_value(callee, args)?
+              };
+              registers[abi::RETURN.index()] = result;
+              return Ok(None);
+            }
             let mut args: Vec<Value> = (0..count.min(abi::REGISTER_ARGUMENT_COUNT))
               .map(|index| {
                 let register = abi::argument_register(index)
@@ -1238,19 +1274,13 @@ impl Vm {
               {
                 registers[abi::RETURN.index()] = result;
               } else {
-                let register_arguments = call_args
-                  .iter()
-                  .take(crate::bytecode::abi::REGISTER_ARGUMENT_COUNT)
-                  .cloned()
-                  .collect::<Vec<_>>();
+                let mut callee_registers =
+                  RegisterState::call_registers(Value::Undefined, &call_args);
                 self.push_call_frame(proto, env, call_args, this_arg, callee.clone())?;
-                let callee_this = self.execution.active.this_value.clone();
+                callee_registers[abi::RECEIVER.index()] = self.execution.active.this_value.clone();
                 let callee_spill_count = self.execution.active.chunk.spill_slot_count as usize;
                 let caller_state = RegisterState {
-                  registers: std::mem::replace(
-                    registers,
-                    std::array::from_fn(|_| Value::Undefined),
-                  ),
+                  registers: std::mem::replace(registers, callee_registers),
                   spill_slots: std::mem::replace(
                     spill_slots,
                     vec![Value::Undefined; callee_spill_count],
@@ -1265,7 +1295,6 @@ impl Vm {
                   .last_mut()
                   .expect("call frame was just pushed")
                   .register_state = Some(caller_state);
-                *registers = RegisterState::call_registers(callee_this, &register_arguments);
                 state.resume_destination = None;
                 if let Some(result) = self.try_run_nested_baseline(registers, false)? {
                   let outcome = self.finish_return(
@@ -1297,11 +1326,8 @@ impl Vm {
                 return Err(self.throw_class_constructor_call_error_for(&callee, proto));
               }
               let call_args = self.prepare_call_args(args, proto)?;
-              let register_arguments = call_args
-                .iter()
-                .take(crate::bytecode::abi::REGISTER_ARGUMENT_COUNT)
-                .cloned()
-                .collect::<Vec<_>>();
+              let mut callee_registers =
+                RegisterState::call_registers(Value::Undefined, &call_args);
               let this_arg = Self::closure_lexical_this(&callee).unwrap_or(Value::Undefined);
               let this_arg = if proto.is_derived_constructor {
                 Value::Uninitialized
@@ -1322,10 +1348,8 @@ impl Vm {
                 frame.upvalues = proto.upvalues.clone();
               }
               self.configure_call_frame(proto, env, call_args, this_arg, callee.clone())?;
-              *registers = RegisterState::call_registers(
-                self.execution.active.this_value.clone(),
-                &register_arguments,
-              );
+              callee_registers[abi::RECEIVER.index()] = self.execution.active.this_value.clone();
+              *registers = callee_registers;
               spill_slots.clear();
               spill_slots.resize(
                 self.execution.active.chunk.spill_slot_count as usize,

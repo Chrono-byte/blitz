@@ -111,8 +111,10 @@ impl Vm {
         unhandled_rejection_hook: None,
       },
       caches: CacheState {
+        closure_prototypes: HashMap::new(),
         module_reads: HashMap::new(),
         active_module_reads: None,
+        callbacks: HashMap::new(),
         property_get: HashMap::new(),
         active_property_get: None,
         property_get_epoch: 0,
@@ -227,8 +229,10 @@ impl Vm {
         unhandled_rejection_hook: self.jobs.unhandled_rejection_hook.clone(),
       },
       caches: CacheState {
+        closure_prototypes: HashMap::new(),
         module_reads: HashMap::new(),
         active_module_reads: None,
+        callbacks: HashMap::new(),
         property_get: HashMap::new(),
         active_property_get: None,
         property_get_epoch: 0,
@@ -314,6 +318,19 @@ impl Vm {
     root: HostRoot,
   ) -> Result<(), RuntimeError> {
     self.memory.release_host_root(root)
+  }
+
+  /// Snapshot native activity without enabling per-opcode profiling. Counters
+  /// include warmups and nested calls; cached plans describe current cache contents.
+  pub fn native_execution_statistics(&self) -> crate::vm::NativeExecutionStats {
+    let mut statistics = self.profiling.jit_stats;
+    statistics.cached_region_plans = self
+      .caches
+      .quickened
+      .values()
+      .map(|plan| plan.regions.len())
+      .sum();
+    statistics
   }
 
   pub(super) fn begin_opcode_profile_run(&mut self) {
@@ -619,12 +636,34 @@ impl Vm {
     &self,
     elems: Vec<Option<Value>>,
   ) -> Value {
+    let length = elems.len();
+    self.new_array_storage(elems, length)
+  }
+
+  /// Allocate an intrinsic array with holes without materializing its elements.
+  pub(crate) fn new_array_with_length(
+    &mut self,
+    length: usize,
+  ) -> Result<Value, RuntimeError> {
+    if length > u32::MAX as usize {
+      return Err(self.throw_range_error("Invalid array length"));
+    }
+    let array = self.new_array_storage(Vec::new(), length);
+    // Match the retention used by the generic constructor return path.
+    self.construction.recent_return_value = Some(array.clone());
+    Ok(array)
+  }
+
+  fn new_array_storage(
+    &self,
+    elems: Vec<Option<Value>>,
+    length: usize,
+  ) -> Value {
     let arr_rc = gc::track_array(Rc::new(RefCell::new(ArrayData::from(elems))));
     let props = gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
-    let len = arr_rc.borrow().len();
     props.borrow_mut().properties.insert(
       PropertyKey::String("length".to_string().into()),
-      array_length_descriptor(len),
+      array_length_descriptor(length),
     );
 
     if let Some(proto) = self
@@ -727,16 +766,6 @@ impl Vm {
     roots.extend(self.memory.temporary.iter().cloned());
     roots.extend(self.memory.kept_alive.iter().cloned());
     self.memory.append_host_roots(&mut roots);
-    for cache in self.caches.property_get.values() {
-      roots.extend(
-        cache
-          .entries
-          .borrow()
-          .iter()
-          .flatten()
-          .map(|entry| entry.value.clone()),
-      );
-    }
     self
       .execution
       .active
@@ -833,6 +862,22 @@ impl Vm {
     {
       roots.push(value);
     }
+    roots.extend(
+      self
+        .realm()
+        .intrinsics
+        .array_species_getter
+        .iter()
+        .cloned(),
+    );
+    roots.extend(
+      self
+        .realm()
+        .intrinsics
+        .typed_array_length_getter
+        .iter()
+        .cloned(),
+    );
     if let Some(value) = self
       .realm_state
       .realm
@@ -1225,6 +1270,8 @@ impl Vm {
     self.caches.module_reads.clear();
     self.caches.active_module_reads = None;
     self.caches.property_get.clear();
+    self.caches.callbacks.clear();
+    self.caches.closure_prototypes.clear();
     self.caches.active_property_get = None;
     gc::reset_allocation_pressure();
     let mut g = self.realm_state.globals.borrow_mut();

@@ -100,6 +100,66 @@ fn typed_array_create_same(
   typed_array_create_with_kind(vm, receiver, &source_kind, length)
 }
 
+/// TypedArrayCreateSameType uses the executing realm's intrinsic, not @@species.
+fn typed_array_create_same_type(
+  vm: &mut Vm,
+  source_kind: &str,
+  length: usize,
+) -> Result<Value, RuntimeError> {
+  let constructor = vm
+    .realm()
+    .get_intrinsic_constructor(source_kind)
+    .ok_or_else(|| vm.throw_type_error("TypedArray intrinsic is unavailable"))?;
+  vm.construct_value(&constructor, &[Value::Number(usize_to_f64(length))])
+}
+
+fn sort_typed_values(
+  vm: &mut Vm,
+  values: &mut [Value],
+  comparator: &Value,
+) -> Result<(), RuntimeError> {
+  use std::cmp::Ordering;
+  crate::ecmascript::semantics::sorting::sort_values(values, |left, right| {
+    if !matches!(comparator, Value::Undefined) {
+      let value = vm.call_value_with_this(
+        comparator,
+        &Value::Undefined,
+        &[left.clone(), right.clone()],
+      )?;
+      let number = vm.to_number_value(&value)?;
+      return Ok(if number.is_nan() || number == 0.0 {
+        Ordering::Equal
+      } else if number < 0.0 {
+        Ordering::Less
+      } else {
+        Ordering::Greater
+      });
+    }
+    if let (Value::BigInt(left), Value::BigInt(right)) = (left, right) {
+      return Ok(left.cmp(right));
+    }
+    let left = vm.to_number_value(left)?;
+    let right = vm.to_number_value(right)?;
+    Ok(if left.is_nan() {
+      if right.is_nan() {
+        Ordering::Equal
+      } else {
+        Ordering::Greater
+      }
+    } else if right.is_nan() {
+      Ordering::Less
+    } else if left == 0.0 && right == 0.0 {
+      right
+        .is_sign_negative()
+        .cmp(&left.is_sign_negative())
+    } else {
+      left
+        .partial_cmp(&right)
+        .expect("non-NaN numbers are ordered")
+    })
+  })
+}
+
 fn typed_array_relative_start(
   vm: &mut Vm,
   value: &Value,
@@ -506,10 +566,10 @@ pub(crate) fn install_typed_arrays(
       let receiver = args.first().cloned().unwrap_or(Value::Undefined);
       let length = typed_array_length(vm, &receiver)?;
       let index = vm.to_number_value(args.get(1).unwrap_or(&Value::Undefined))?;
-      if index.is_nan() || !index.is_finite() {
+      if index.is_infinite() {
         return Ok(Value::Undefined);
       }
-      let index = index.trunc();
+      let index = if index.is_nan() { 0.0 } else { index.trunc() };
       let index = if index < 0.0 {
         length as isize + index as isize
       } else {
@@ -530,7 +590,9 @@ pub(crate) fn install_typed_arrays(
     Rc::new(|vm, args| {
       let receiver = args.first().cloned().unwrap_or(Value::Undefined);
       let length = typed_array_length(vm, &receiver)?;
-      let result = typed_array_create_same(vm, &receiver, length)?;
+      let (_, _, _, kind, _, _, _) = typed_view_details(&receiver)
+        .ok_or_else(|| vm.throw_type_error("TypedArray buffer is detached"))?;
+      let result = typed_array_create_same_type(vm, &kind, length)?;
       for index in 0..length {
         let value = typed_element(vm, &receiver, length - 1 - index)?;
         set_typed_element(vm, &result, index, value)?;
@@ -546,19 +608,31 @@ pub(crate) fn install_typed_arrays(
     Rc::new(|vm, args| {
       let receiver = args.first().cloned().unwrap_or(Value::Undefined);
       let length = typed_array_length(vm, &receiver)?;
-      let index = vm.to_number_value(args.get(1).unwrap_or(&Value::Undefined))?;
-      let index = if index.is_nan() {
-        0
-      } else if index < 0.0 {
-        length as isize + index.trunc() as isize
+      let (_, _, _, kind, _, _, _) = typed_view_details(&receiver)
+        .ok_or_else(|| vm.throw_type_error("TypedArray buffer is detached"))?;
+      let number = vm.to_number_value(args.get(1).unwrap_or(&Value::Undefined))?;
+      let relative_index = if number.is_nan() { 0.0 } else { number.trunc() };
+      let index = if relative_index < 0.0 {
+        usize_to_f64(length) + relative_index
       } else {
-        index.trunc() as isize
+        relative_index
       };
-      if index < 0 || index as usize >= length {
+      let replacement = args.get(2).unwrap_or(&Value::Undefined);
+      let replacement = if kind.starts_with("Big") {
+        Value::BigInt(crate::ecmascript::builtins::primitives::to_bigint(
+          vm,
+          replacement,
+        )?)
+      } else {
+        Value::Number(vm.to_number_value(replacement)?)
+      };
+      if index < 0.0
+        || typed_view_details(&receiver)
+          .is_none_or(|(_, _, _, _, current_length, _, _)| index >= usize_to_f64(current_length))
+      {
         return Err(vm.throw_range_error("TypedArray.prototype.with index out of range"));
       }
-      let replacement = args.get(2).cloned().unwrap_or(Value::Undefined);
-      let result = typed_array_create_same(vm, &receiver, length)?;
+      let result = typed_array_create_same_type(vm, &kind, length)?;
       for offset in 0..length {
         let value = if offset == index as usize {
           replacement.clone()
@@ -576,15 +650,23 @@ pub(crate) fn install_typed_arrays(
     "toSorted",
     1.0,
     Rc::new(|vm, args| {
+      let comparator = args.get(1).cloned().unwrap_or(Value::Undefined);
+      if !matches!(comparator, Value::Undefined) && !Vm::is_callable_value(&comparator) {
+        return Err(vm.throw_type_error("TypedArray sort comparefn is not callable"));
+      }
       let receiver = args.first().cloned().unwrap_or(Value::Undefined);
       let length = typed_array_length(vm, &receiver)?;
-      let result = typed_array_create_same(vm, &receiver, length)?;
-      for index in 0..length {
-        let value = typed_element(vm, &receiver, index)?;
+      let (_, _, _, kind, _, _, _) = typed_view_details(&receiver)
+        .ok_or_else(|| vm.throw_type_error("TypedArray buffer is detached"))?;
+      let result = typed_array_create_same_type(vm, &kind, length)?;
+      let mut values = (0..length)
+        .map(|index| typed_element(vm, &receiver, index))
+        .collect::<Result<Vec<_>, _>>()?;
+      sort_typed_values(vm, &mut values, &comparator)?;
+      for (index, value) in values.into_iter().enumerate() {
         set_typed_element(vm, &result, index, value)?;
       }
-      let sort = vm.get_property_host(&result, &PropertyKey::String("sort".into()))?;
-      vm.call_value_with_this(&sort, &result, args.get(1..).unwrap_or(&[]))
+      Ok(result)
     }),
   );
   install_typed_method(
@@ -993,33 +1075,7 @@ pub(crate) fn install_typed_arrays(
       let mut values = (0..length)
         .map(|index| typed_element(vm, &receiver, index))
         .collect::<Result<Vec<_>, _>>()?;
-      for left in 0..values.len() {
-        for right in left + 1..values.len() {
-          let order = if matches!(compare, Value::Undefined) {
-            let a = vm.to_number_value(&values[left])?;
-            let b = vm.to_number_value(&values[right])?;
-            if a.is_nan() {
-              b.is_nan()
-            } else if b.is_nan() {
-              true
-            } else if a == 0.0 && b == 0.0 {
-              a.is_sign_negative() || !b.is_sign_negative()
-            } else {
-              a <= b
-            }
-          } else {
-            let comparison = vm.call_value_with_this(
-              &compare,
-              &Value::Undefined,
-              &[values[left].clone(), values[right].clone()],
-            )?;
-            vm.to_number_value(&comparison)? <= 0.0
-          };
-          if !order {
-            values.swap(left, right);
-          }
-        }
-      }
+      sort_typed_values(vm, &mut values, &compare)?;
       for (index, value) in values.into_iter().enumerate() {
         set_typed_element(vm, &receiver, index, value)?;
       }
@@ -1041,6 +1097,9 @@ pub(crate) fn install_typed_arrays(
       ctor_map
         .borrow_mut()
         .set_internal_slot("[[DefersInstanceAllocation]]", Value::Bool(true));
+      ctor_map
+        .borrow_mut()
+        .set_internal_slot("[[TypedArrayName]]", Value::String($name.into()));
       let arraybuffer_proto_rc = Rc::clone(arraybuffer_proto_map);
       let ctor_fn: BuiltinFn = {
         let proto_map_rc = proto_map.clone();
@@ -1197,10 +1256,9 @@ pub(crate) fn install_typed_arrays(
               vm, &ctor_name, &value,
             )?;
             let start = byte_offset + idx * $element_count;
-            let mut data = backing_data.borrow_mut();
-            for (offset, byte) in bytes.into_iter().enumerate() {
-              data[start + offset] = Some(Value::Number(f64::from(byte)));
-            }
+            backing_data
+              .borrow_mut()
+              .write_bytes(start, &bytes);
           }
           Ok(new_byte_view(
             instance_proto,

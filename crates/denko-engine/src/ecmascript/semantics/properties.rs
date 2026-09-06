@@ -62,7 +62,7 @@ pub(crate) fn own_property_descriptor(
         && let Some(idx) = canonical_index_key(s)
         && let Some(idx) = idx.to_usize()
         && idx < array_length(&props_ref)
-        && let Some(Some(value)) = arr.borrow().get(idx).cloned()
+        && let Some(Some(value)) = arr.borrow().element_cloned(idx)
       {
         return Some(PropertyDescriptor::Data {
           value,

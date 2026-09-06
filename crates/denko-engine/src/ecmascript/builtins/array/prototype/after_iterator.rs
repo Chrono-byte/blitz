@@ -3,6 +3,56 @@
 
 use super::*;
 
+/// FlattenIntoArray writes each result before observing the next source element.
+fn flatten_into_array(
+  vm: &mut Vm,
+  target: &Value,
+  source: &Value,
+  length: usize,
+  depth: f64,
+  mut target_index: usize,
+  mapper: Option<(&Value, &Value)>,
+) -> Result<usize, RuntimeError> {
+  for index in 0..length {
+    let key = PropertyKey::String(index.to_string().into());
+    if !vm.has_property_host(source, &key)? {
+      continue;
+    }
+    let mut element = vm.get_property_host(source, &key)?;
+    if let Some((callback, this_arg)) = mapper {
+      element = vm.call_value_with_this(
+        callback,
+        this_arg,
+        &[element, Value::Number(usize_to_f64(index)), source.clone()],
+      )?;
+    }
+    if depth > 0.0 && is_array_value(vm, &element)? {
+      let element_length = array_like_length(vm, &element)?;
+      target_index = flatten_into_array(
+        vm,
+        target,
+        &element,
+        element_length,
+        depth - 1.0,
+        target_index,
+        None,
+      )?;
+    } else {
+      if target_index >= 9_007_199_254_740_991usize {
+        return Err(vm.throw_type_error("Flattened array exceeds the maximum safe length"));
+      }
+      create_data_property_or_throw(
+        vm,
+        target,
+        &Value::String(target_index.to_string().into()),
+        element,
+      )?;
+      target_index += 1;
+    }
+  }
+  Ok(target_index)
+}
+
 pub(in crate::ecmascript::builtins::array) fn install_after_iterator(
   array_proto_map: &Rc<RefCell<ObjectData>>,
   function_proto_map: &Rc<RefCell<ObjectData>>,
@@ -95,27 +145,22 @@ pub(in crate::ecmascript::builtins::array) fn install_after_iterator(
     PKey::String("at".to_string().into()),
     PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(move |vm, args| {
-        let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+        let receiver = vm.to_object_value(args.first().cloned().unwrap_or(Value::Undefined))?;
         let len = array_like_length(vm, &receiver)?;
-        let index = vm.to_number_value(args.get(1).unwrap_or(&Value::Undefined))?;
-        if index.is_nan() {
-          return Ok(Value::Undefined);
-        }
-        let idx = if index < 0.0 {
-          let offset = index.trunc() as isize;
-          len as isize + offset
+        let number = vm.to_number_value(args.get(1).unwrap_or(&Value::Undefined))?;
+        let index = if number.is_nan() { 0.0 } else { number.trunc() };
+        let index = if index < 0.0 {
+          usize_to_f64(len) + index
         } else {
-          index.trunc() as isize
+          index
         };
-        if idx < 0 || idx as usize >= len {
+        if index < 0.0 || index >= usize_to_f64(len) {
           return Ok(Value::Undefined);
         }
-        let key = PKey::String((idx as usize).to_string().into());
-        if vm.has_property_host(&receiver, &key)? {
-          Ok(vm.get_property_host(&receiver, &key)?)
-        } else {
-          Ok(Value::Undefined)
-        }
+        vm.get_property_host(
+          &receiver,
+          &PKey::String((index as usize).to_string().into()),
+        )
       }),
       function_proto_map,
     )),
@@ -310,78 +355,14 @@ pub(in crate::ecmascript::builtins::array) fn install_after_iterator(
     PKey::String("flat".to_string().into()),
     PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(|vm, args| {
-        fn is_array(
-          vm: &mut Vm,
-          value: &Value,
-        ) -> Result<bool, RuntimeError> {
-          match value {
-            Value::Array(..) => Ok(true),
-            Value::Proxy(proxy) => {
-              let target = {
-                let proxy = proxy.borrow();
-                if proxy.is_revoked() {
-                  return Err(vm.throw_type_error("Cannot inspect a revoked Proxy"));
-                }
-                proxy.target.clone()
-              };
-              is_array(vm, &target)
-            }
-            _ => Ok(false),
-          }
-        }
-
-        fn flatten_into(
-          vm: &mut Vm,
-          source: &Value,
-          length: usize,
-          depth: f64,
-          output: &mut Vec<Option<Value>>,
-        ) -> Result<(), RuntimeError> {
-          for index in 0..length {
-            let key = PKey::String(index.to_string().into());
-            if !vm.has_property_host(source, &key)? {
-              continue;
-            }
-            let element = vm.get_property_host(source, &key)?;
-            if depth > 0.0 && is_array(vm, &element)? {
-              let element_length = array_like_length(vm, &element)?;
-              flatten_into(vm, &element, element_length, depth - 1.0, output)?;
-            } else {
-              if output.len() >= 9_007_199_254_740_991usize {
-                return Err(vm.throw_type_error("Array.prototype.flat result is too large"));
-              }
-              output.push(Some(element));
-            }
-          }
-          Ok(())
-        }
-
-        let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+        let receiver = vm.to_object_value(args.first().cloned().unwrap_or(Value::Undefined))?;
+        let len = array_like_length(vm, &receiver)?;
         let depth = match args.get(1) {
           None | Some(Value::Undefined) => 1.0,
-          Some(value) => {
-            let number = vm.to_number_value(value)?;
-            if number.is_nan() || number <= 0.0 {
-              0.0
-            } else {
-              number.trunc()
-            }
-          }
+          Some(value) => vm.to_number_value(value)?.max(0.0).trunc(),
         };
-
-        let len = array_like_length(vm, &receiver)?;
-        let mut out: Vec<Option<Value>> = Vec::new();
-        flatten_into(vm, &receiver, len, depth, &mut out)?;
-
         let result = array_species_create(vm, &receiver, 0)?;
-        for (index, value) in out.into_iter().flatten().enumerate() {
-          create_data_property_or_throw(
-            vm,
-            &result,
-            &Value::String(index.to_string().into()),
-            value,
-          )?;
-        }
+        flatten_into_array(vm, &result, &receiver, len, depth, 0, None)?;
         Ok(result)
       }),
       function_proto_map,
@@ -601,65 +582,23 @@ pub(in crate::ecmascript::builtins::array) fn install_after_iterator(
     PKey::String("flatMap".to_string().into()),
     PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(|vm, args| {
-        fn is_array(
-          vm: &mut Vm,
-          value: &Value,
-        ) -> Result<bool, RuntimeError> {
-          match value {
-            Value::Array(..) => Ok(true),
-            Value::Proxy(proxy) => {
-              let target = {
-                let proxy = proxy.borrow();
-                if proxy.is_revoked() {
-                  return Err(vm.throw_type_error("Cannot inspect a revoked Proxy"));
-                }
-                proxy.target.clone()
-              };
-              is_array(vm, &target)
-            }
-            _ => Ok(false),
-          }
-        }
-
-        let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+        let receiver = vm.to_object_value(args.first().cloned().unwrap_or(Value::Undefined))?;
+        let len = array_like_length(vm, &receiver)?;
         let callback = args.get(1).cloned().unwrap_or(Value::Undefined);
-        if !callback.is_callable() {
+        if !Vm::is_callable_value(&callback) {
           return Err(vm.throw_type_error("Array.prototype.flatMap callback is not callable"));
         }
         let this_arg = args.get(2).cloned().unwrap_or(Value::Undefined);
-        let len = array_like_length(vm, &receiver)?;
-        let mut out: Vec<Option<Value>> = Vec::new();
-        for i in 0..len {
-          let key = PKey::String(i.to_string().into());
-          if vm.has_property_host(&receiver, &key)? {
-            let item = vm.get_property_host(&receiver, &key)?;
-            let mapped = vm.call_value_with_this(
-              &callback,
-              &this_arg,
-              &[item, Value::Number(usize_to_f64(i)), receiver.clone()],
-            )?;
-            if is_array(vm, &mapped)? {
-              let mapped_len = array_like_length(vm, &mapped)?;
-              for mapped_index in 0..mapped_len {
-                let mapped_key = PKey::String(mapped_index.to_string().into());
-                if vm.has_property_host(&mapped, &mapped_key)? {
-                  out.push(Some(vm.get_property_host(&mapped, &mapped_key)?));
-                }
-              }
-            } else {
-              out.push(Some(mapped));
-            }
-          }
-        }
         let result = array_species_create(vm, &receiver, 0)?;
-        for (index, value) in out.into_iter().flatten().enumerate() {
-          create_data_property_or_throw(
-            vm,
-            &result,
-            &Value::String(index.to_string().into()),
-            value,
-          )?;
-        }
+        flatten_into_array(
+          vm,
+          &result,
+          &receiver,
+          len,
+          1.0,
+          0,
+          Some((&callback, &this_arg)),
+        )?;
         Ok(result)
       }),
       function_proto_map,
@@ -883,7 +822,7 @@ pub(in crate::ecmascript::builtins::array) fn install_after_iterator(
     ("findIndex", 1.0),
     ("findLast", 1.0),
     ("findLastIndex", 1.0),
-    ("flat", 1.0),
+    ("flat", 0.0),
     ("flatMap", 1.0),
     ("pop", 0.0),
     ("reduceRight", 1.0),

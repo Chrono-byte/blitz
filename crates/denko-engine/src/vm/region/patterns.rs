@@ -92,7 +92,7 @@ pub(super) const NUMERIC_ADD_CALL_LOOP: &[Opcode] = &[
   Opcode::Jump,
 ];
 
-pub(super) const DENSE_ARRAY_PUSH_LOOP: &[Opcode] = &[
+pub(super) const DENSE_ARRAY_PUSH_BODY: &[Opcode] = &[
   Opcode::LoadLocal,
   Opcode::Const,
   Opcode::CompareJump,
@@ -108,18 +108,6 @@ pub(super) const DENSE_ARRAY_PUSH_LOOP: &[Opcode] = &[
   Opcode::Move,
   Opcode::CallMethod,
   Opcode::Move,
-  Opcode::CloneLocalCell,
-  Opcode::LoadLocal,
-  Opcode::Neg,
-  Opcode::Neg,
-  Opcode::Const,
-  Opcode::Move,
-  Opcode::Increment,
-  Opcode::StoreLocal,
-  Opcode::LoadLocal,
-  Opcode::LoadLocal,
-  Opcode::StoreLocal,
-  Opcode::Jump,
 ];
 
 pub(super) const DENSE_MASKED_READ_LOOP: &[Opcode] = &[

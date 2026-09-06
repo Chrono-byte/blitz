@@ -2,10 +2,21 @@
 
 //! Immutable native-region plans decoded from verified portable bytecode.
 
+pub(super) mod numeric_body;
+pub(in crate::vm) mod typed_view;
+pub(super) use typed_view::TypedViewRegion;
+mod string_body;
+pub(super) use numeric_body::NumericOperation;
+pub(super) use string_body::StringBodyRegion;
 mod patterns;
+pub(super) use numeric_body::NumericBodyRegion;
+mod array_read_sum;
+mod property_chain;
+pub(super) use array_read_sum::ArrayReadSumRegion;
+pub(super) use property_chain::PropertyChainRegion;
 
 use crate::bytecode::{
-  Chunk, Function, Opcode, decode_aux16, decode_compare_jump, decode_rd, decode_rs,
+  Chunk, Function, Instruction, Opcode, decode_aux16, decode_compare_jump, decode_rd, decode_rs,
 };
 use patterns::*;
 
@@ -30,7 +41,12 @@ impl RegionId {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum NativeRegion {
+  NumericBody(NumericBodyRegion),
+  StringBody(StringBodyRegion),
   NumericLoop(NumericLoopRegion),
+  PropertyChain(PropertyChainRegion),
+  ArrayReadSum(ArrayReadSumRegion),
+  TypedView(TypedViewRegion),
   DenseArrayPush(DenseArrayPushRegion),
   DenseMaskedRead(DenseMaskedReadRegion),
   OwnMethodNumericLoop(OwnMethodNumericLoopRegion),
@@ -42,7 +58,12 @@ pub(super) enum NativeRegion {
 impl NativeRegion {
   pub(super) fn cost(self) -> RegionCost {
     match self {
+      Self::StringBody(_) => RegionCost { max_iterations: 64 },
+      Self::NumericBody(_) => RegionCost { max_iterations: 64 },
       Self::NumericLoop(region) => region.program.cost(),
+      Self::TypedView(_) => RegionCost { max_iterations: 64 },
+      Self::ArrayReadSum(_) => RegionCost { max_iterations: 64 },
+      Self::PropertyChain(_) => RegionCost { max_iterations: 64 },
       Self::DenseArrayPush(_) => RegionCost { max_iterations: 64 },
       Self::DenseMaskedRead(_) => RegionCost { max_iterations: 64 },
       Self::OwnMethodNumericLoop(region) => region.program.cost(),
@@ -191,6 +212,20 @@ pub(crate) struct PreparedDenseMaskedReadRegion {
   pub(crate) iterations: u32,
 }
 
+/// Values materialized at a native array-loop boundary.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum ArrayPushValue {
+  Index,
+  NegatedIndex,
+  NextIndex,
+  Limit,
+  Step,
+  Receiver,
+  MethodKey,
+  Method,
+  Length,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct DenseArrayPushRegion {
   pub(super) entry_pc: usize,
@@ -198,10 +233,11 @@ pub(super) struct DenseArrayPushRegion {
   pub(super) index_slot: usize,
   pub(super) array_slot: usize,
   pub(super) call_temporary_slot: usize,
-  pub(super) increment_temporary_slot: usize,
+  pub(super) increment_temporary_slot: Option<usize>,
+  pub(super) clones_index_cell: bool,
+  pub(super) register_writeback: [Option<ArrayPushValue>; 16],
   pub(super) index_register: usize,
   pub(super) limit_register: usize,
-  pub(super) step_register: usize,
   pub(super) limit: f64,
   pub(super) step: f64,
 }
@@ -581,72 +617,192 @@ impl DenseArrayPushRegion {
     code: &Chunk,
     pc: usize,
   ) -> Option<Self> {
-    let words = code
-      .words
-      .get(pc..pc + DENSE_ARRAY_PUSH_LOOP.len())?;
-    if !words
+    use ArrayPushValue as V;
+    let words = code.words.get(pc..)?;
+    let body_length = DENSE_ARRAY_PUSH_BODY.len();
+    let body = words.get(..body_length)?;
+    if !body
       .iter()
-      .zip(DENSE_ARRAY_PUSH_LOOP)
+      .zip(DENSE_ARRAY_PUSH_BODY)
       .all(|(word, expected)| opcode(*word) == *expected)
     {
       return None;
     }
-
-    let index_slot = decode_aux16(words[0]) as usize;
-    let array_slot = decode_aux16(words[3]) as usize;
-    let call_temporary_slot = decode_aux16(words[4]) as usize;
-    let increment_temporary_slot = decode_aux16(words[22]) as usize;
-    let (condition, left, right, exit_offset) = decode_compare_jump(words[2]);
-    let jump_payload = ((words[26] >> 8) & 0x00ff_ffff) as i32;
-    let jump_offset = if jump_payload & 0x0080_0000 != 0 {
-      jump_payload | !0x00ff_ffff
-    } else {
-      jump_payload
-    };
-    let completed_pc = pc + words.len();
-    let actual_exit = (pc as i64 + 3 + exit_offset as i64) as usize;
-    let actual_backedge = (pc as i64 + words.len() as i64 + jump_offset as i64) as usize;
-    if condition != 2
-      || left != decode_rd(words[0])
-      || right != decode_rd(words[1])
-      || actual_exit != completed_pc
-      || actual_backedge != pc
-      || decode_aux16(words[5]) as usize != call_temporary_slot
-      || decode_aux16(words[6]) as usize != call_temporary_slot
-      || decode_aux16(words[9]) as usize != index_slot
-      || decode_aux16(words[16]) as usize != index_slot
-      || decode_aux16(words[23]) as usize != index_slot
-      || decode_aux16(words[24]) as usize != increment_temporary_slot
-      || decode_aux16(words[25]) as usize != index_slot
+    let index_slot = decode_aux16(body[0]) as usize;
+    let array_slot = decode_aux16(body[3]) as usize;
+    let call_temporary_slot = decode_aux16(body[4]) as usize;
+    if index_slot == array_slot
       || index_slot == call_temporary_slot
-      || index_slot == increment_temporary_slot
-      || call_temporary_slot == increment_temporary_slot
+      || array_slot == call_temporary_slot
     {
       return None;
     }
-    let Some(crate::bytecode::Constant::String(method_key)) = code
-      .constants
-      .get(decode_aux16(words[7]) as usize)
-    else {
-      return None;
-    };
-    if method_key.as_str_lossy() != "push" {
+    let index_register = decode_rd(body[0]) as usize;
+    let limit_register = decode_rd(body[1]) as usize;
+    let limit = number_constant(code, body[1])?;
+    let (condition, left, right, exit_offset) = decode_compare_jump(body[2]);
+    if condition != 2
+      || left as usize != index_register
+      || right as usize != limit_register
+      || left == right
+    {
       return None;
     }
+    let mut registers = [None; 16];
+    registers[index_register] = Some(V::Index);
+    registers[limit_register] = Some(V::Limit);
+    let mut receiver_stored = false;
+    for &word in &body[3..] {
+      let rd = decode_rd(word) as usize;
+      let rs = decode_rs(word) as usize;
+      match opcode(word) {
+        Opcode::LoadLocal => {
+          let slot = decode_aux16(word) as usize;
+          registers[rd] = Some(
+            if slot == array_slot || (slot == call_temporary_slot && receiver_stored) {
+              V::Receiver
+            } else if slot == index_slot {
+              V::Index
+            } else {
+              return None;
+            },
+          );
+        }
+        Opcode::StoreLocal => {
+          if decode_aux16(word) as usize != call_temporary_slot
+            || registers[rd] != Some(V::Receiver)
+          {
+            return None;
+          }
+          receiver_stored = true;
+        }
+        Opcode::Const => {
+          if !matches!(code.constants.get(decode_aux16(word) as usize), Some(crate::bytecode::Constant::String(key)) if key.as_str_lossy() == "push")
+          {
+            return None;
+          }
+          registers[rd] = Some(V::MethodKey);
+        }
+        Opcode::GetProperty => {
+          if registers[rd] != Some(V::Receiver) || registers[rs] != Some(V::MethodKey) {
+            return None;
+          }
+          registers[rd] = Some(V::Method);
+        }
+        Opcode::Move => registers[rd] = Some(registers[rs]?),
+        Opcode::CallMethod => {
+          if decode_aux16(word) != 1
+            || registers[0] != Some(V::Method)
+            || registers[1] != Some(V::Receiver)
+            || registers[2] != Some(V::Index)
+          {
+            return None;
+          }
+          registers[0] = Some(V::Length);
+        }
+        _ => return None,
+      }
+    }
 
-    Some(Self {
-      entry_pc: pc,
-      completed_pc,
-      index_slot,
-      array_slot,
-      call_temporary_slot,
-      increment_temporary_slot,
-      index_register: decode_rd(words[0]) as usize,
-      limit_register: decode_rd(words[1]) as usize,
-      step_register: decode_rd(words[19]) as usize,
-      limit: number_constant(code, words[1])?,
-      step: number_constant(code, words[19])?,
-    })
+    // Decode the update by its data flow, covering assignment, compound assignment,
+    // and increment without depending on one register allocation or loop binding form.
+    let mut clones_index_cell = false;
+    let mut increment_temporary_slot = None;
+    let mut step = None;
+    let mut stored_index = false;
+    let mut computed_next = false;
+    for offset in body_length..body_length + 14 {
+      let word = *words.get(offset)?;
+      let rd = decode_rd(word) as usize;
+      let rs = decode_rs(word) as usize;
+      let slot = decode_aux16(word) as usize;
+      match opcode(word) {
+        Opcode::CloneLocalCell if offset == body_length && slot == index_slot => {
+          clones_index_cell = true
+        }
+        Opcode::LoadLocal => {
+          registers[rd] = Some(if slot == index_slot {
+            if stored_index { V::NextIndex } else { V::Index }
+          } else if increment_temporary_slot == Some(slot) {
+            V::NextIndex
+          } else {
+            return None;
+          });
+        }
+        Opcode::Const if step.is_none() => {
+          let value = number_constant(code, word)?;
+          if !value.is_finite() || value <= 0.0 {
+            return None;
+          }
+          step = Some(value);
+          registers[rd] = Some(V::Step);
+        }
+        Opcode::Neg => {
+          registers[rd] = Some(match registers[rs]? {
+            V::Index => V::NegatedIndex,
+            V::NegatedIndex => V::Index,
+            _ => return None,
+          })
+        }
+        Opcode::Move => registers[rd] = Some(registers[rs]?),
+        Opcode::Add | Opcode::Increment => {
+          if computed_next
+            || registers[rd] != Some(V::Index)
+            || registers[rs] != Some(V::Step)
+            || (opcode(word) == Opcode::Increment && step != Some(1.0))
+          {
+            return None;
+          }
+          registers[rd] = Some(V::NextIndex);
+          computed_next = true;
+        }
+        Opcode::StoreLocal => {
+          if registers[rd] != Some(V::NextIndex) {
+            return None;
+          }
+          if slot == index_slot {
+            if stored_index {
+              return None;
+            }
+            stored_index = true;
+          } else if increment_temporary_slot.is_none()
+            && slot != array_slot
+            && slot != call_temporary_slot
+          {
+            increment_temporary_slot = Some(slot);
+          } else {
+            return None;
+          }
+        }
+        Opcode::Jump => {
+          let completed_pc = pc + offset + 1;
+          let backedge = completed_pc as i64 + Instruction::decode(word).ok()?.operand_i24() as i64;
+          if !stored_index
+            || !computed_next
+            || backedge != pc as i64
+            || pc as i64 + 3 + exit_offset as i64 != completed_pc as i64
+          {
+            return None;
+          }
+          return Some(Self {
+            entry_pc: pc,
+            completed_pc,
+            index_slot,
+            array_slot,
+            call_temporary_slot,
+            increment_temporary_slot,
+            clones_index_cell,
+            index_register,
+            limit_register,
+            register_writeback: registers,
+            limit,
+            step: step?,
+          });
+        }
+        _ => return None,
+      }
+    }
+    None
   }
 }
 
@@ -1621,5 +1777,51 @@ impl NumericLoopRegion {
       },
       program: NumericProgramDraft::counted(NumericAddend::Prepared).validate()?,
     })
+  }
+}
+
+#[cfg(test)]
+mod array_push_decode_tests {
+  use super::*;
+
+  #[test]
+  fn counted_push_rejects_wrong_register_flow_and_call_arity() {
+    let session = crate::parser::Parser::parse_source(crate::js!(
+      r#"
+      function fill() { var values = []; for (var i = 0; i < 100; i++) values.push(i); }
+    "#
+    ))
+    .expect("parse");
+    let root = crate::compiler::compile_session(&session).expect("compile");
+    let code = &root.functions[0].chunk;
+    let region = (0..code.words.len())
+      .find_map(|pc| DenseArrayPushRegion::decode(code, pc))
+      .expect("recognized loop");
+    for (offset, replacement) in [
+      (
+        10,
+        crate::bytecode::encode_register_instruction(Opcode::Move, 2, 8),
+      ),
+      (
+        13,
+        crate::bytecode::encode_aux16_instruction(Opcode::CallMethod, 0, 2),
+      ),
+    ] {
+      let mut changed = (**code).clone();
+      changed.words[region.entry_pc + offset] = replacement;
+      assert!(DenseArrayPushRegion::decode(&changed, region.entry_pc).is_none());
+    }
+    let mut changed = (**code).clone();
+    let step = changed
+      .words
+      .iter()
+      .enumerate()
+      .skip(region.entry_pc + 15)
+      .find(|(_, word)| opcode(**word) == Opcode::Const)
+      .map(|(_, word)| decode_aux16(*word) as usize)
+      .expect("step constant");
+    changed.constants[step] = crate::bytecode::Constant::Number(2.0);
+    // Increment adds one regardless of its unused source register.
+    assert!(DenseArrayPushRegion::decode(&changed, region.entry_pc).is_none());
   }
 }

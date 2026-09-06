@@ -915,3 +915,142 @@ fn strings_use_utf16_indices_and_code_point_iteration() {
     "#
   ));
 }
+
+#[test]
+fn modern_collections_preserve_observable_operations() {
+  run(crate::js!(
+    r#"
+    function check(value, message) { if (!value) throw new Error(message); }
+    const target = {};
+    const source = [1, 2];
+    source.constructor = { [Symbol.species]: function () { return target; } };
+    const flattened = source.flatMap(function (value, index) {
+      if (index === 1) check(target[0] === 1, "flatMap writes before next callback");
+      return [value];
+    });
+    check(flattened === target && target[1] === 2, "species target receives values");
+    Array.prototype.flatMap.call("a", function (value, index, receiver) {
+      check(typeof receiver === "object" && receiver[0] === "a", "mapper sees boxed source");
+      return [value];
+    });
+
+    const original = {};
+    let closed = 0;
+    const entries = {
+      [Symbol.iterator]() { return this; },
+      next() { return { value: { get 0() { throw original; } }, done: false }; },
+      return() { closed++; throw new Error("close failure"); }
+    };
+    try { Object.fromEntries(entries); throw new Error("must throw"); }
+    catch (error) { check(error === original && closed === 1, "close preserves original throw"); }
+    const object = Object.fromEntries([["__proto__", 9]]);
+    check(Object.hasOwn(object, "__proto__") && object.__proto__ === 9,
+      "fromEntries defines own properties");
+
+    const proxy = new Proxy({ length: 2, 0: 3, 1: 4 }, {
+      has() { throw new Error("unexpected HasProperty"); }
+    });
+    check(Array.prototype.at.call(proxy, -1) === 4, "at uses Get");
+    check(Array.prototype.toReversed.call(proxy)[0] === 4, "toReversed uses Get");
+    check(Array.prototype.toSorted.call(proxy)[0] === 3, "toSorted uses Get");
+    const holes = new Array(2);
+    for (const copy of [holes.toReversed(), holes.toSorted(), holes.toSpliced(), holes.with(0, 1)]) {
+      check(Object.hasOwn(copy, 0) && Object.hasOwn(copy, 1), "copies materialize holes");
+    }
+    check([1, 2].toSpliced().length === 2, "no arguments retains all elements");
+    check([1, 2].toSpliced(undefined).length === 0, "explicit undefined deletes all elements");
+  "#
+  ));
+}
+
+#[test]
+fn typed_array_copies_use_intrinsics_and_stable_numeric_sort() {
+  run(crate::js!(
+    r#"
+    function check(value, message) { if (!value) throw new Error(message); }
+    const Original = Uint8Array;
+    const source = new Original([3, 1, 2]);
+    Object.defineProperty(source, "constructor", { get() { throw new Error("constructor read"); } });
+    Object.defineProperty(Original, "name", { value: "Renamed" });
+    Original.prototype.sort = function () { throw new Error("sort property read"); };
+    globalThis.Uint8Array = function () { throw new Error("global constructor read"); };
+    check(source.toSorted().join() === "1,2,3", "toSorted uses intrinsic and internal sorting");
+    check(source.toReversed().join() === "2,1,3", "toReversed ignores species");
+    let conversions = 0;
+    const replacement = { valueOf() { conversions++; return 8; } };
+    check(source.with(-0.5, replacement)[0] === 8 && conversions === 1,
+      "with normalizes negative zero and converts once");
+    try { source.with(9, replacement); } catch (error) { check(error instanceof RangeError, "range error"); }
+    check(conversions === 2, "replacement converts before bounds check");
+    const sorted = new Float64Array([NaN, 0, -0, -1]).toSorted();
+    check(sorted[0] === -1 && 1 / sorted[1] === -Infinity && 1 / sorted[2] === Infinity
+      && Number.isNaN(sorted[3]), "signed zeros and NaN ordering");
+    check(new BigInt64Array([3n, -2n, 1n]).toSorted().join() === "-2,1,3", "BigInt ordering");
+    const stable = new Original([21, 11, 22, 12]).toSorted((a, b) => a % 10 - b % 10);
+    check(stable.join() === "21,11,22,12", "equal comparisons preserve input order");
+  "#
+  ));
+}
+
+#[test]
+fn array_literal_counts_preserve_high_byte_with_holes_and_spreads() {
+  let elements = (0..300)
+    .map(|index| index.to_string())
+    .collect::<Vec<_>>()
+    .join(",");
+  let template = crate::js!(
+    r#"
+    const ordinary = [ELEMENTS];
+    const spread = [ELEMENTS, ...[300, 301], , 303];
+    if (ordinary.length !== 300 || ordinary[299] !== 299 || spread.length !== 304
+      || spread[300] !== 300 || spread[301] !== 301 || 302 in spread || spread[303] !== 303) {
+      throw new Error("wide array literal operand was truncated");
+    }
+  "#
+  );
+  run(&template.replace("ELEMENTS", &elements));
+}
+
+#[test]
+fn dense_append_preserves_length_descriptors_and_partial_writes() {
+  run(crate::js!(
+    r#"
+    function check(value, message) { if (!value) throw new Error(message); }
+    const array = [];
+    check(array.push(1, 2, 3) === 3 && array.length === 3 && array[2] === 3, "append updates length");
+    const length = Object.getOwnPropertyDescriptor(array, "length");
+    check(length.writable && !length.enumerable && !length.configurable, "length attributes preserved");
+    array.length = 5;
+    check(array.push(6) === 6 && !(3 in array) && !(4 in array) && array[5] === 6, "holes preserved");
+    const prototype = {};
+    Object.defineProperty(prototype, "1", { configurable: true, set(value) {
+      check(value === 8 && this[0] === 7, "preceding append visible to setter");
+      throw new Error("stop");
+    }});
+    const partial = [];
+    Object.setPrototypeOf(partial, prototype);
+    let stopped = false;
+    try { Array.prototype.push.call(partial, 7, 8, 9); } catch (error) { stopped = error.message === "stop"; }
+    check(stopped && partial.length === 1 && partial[0] === 7 && !(2 in partial), "partial writes preserved");
+    const events = [];
+    const proxyPrototype = new Proxy({}, { set(target, key, value, receiver) {
+      events.push(key);
+      return Reflect.set(target, key, value, receiver);
+    }});
+    const proxied = [];
+    Object.setPrototypeOf(proxied, proxyPrototype);
+    check(Array.prototype.push.call(proxied, 4, 5) === 2 && events.join() === "0,1",
+      "proxy prototype observes each element write");
+    const frozen = [];
+    Object.freeze(frozen);
+    let threw = false;
+    try { frozen.push(); } catch (error) { threw = error instanceof TypeError; }
+    check(threw, "zero-argument push still sets length");
+    const sealed = [1];
+    Object.preventExtensions(sealed);
+    threw = false;
+    try { sealed.push(2); } catch (error) { threw = error instanceof TypeError; }
+    check(threw && sealed.length === 1, "nonextensible array cannot grow");
+  "#
+  ));
+}

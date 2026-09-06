@@ -1,42 +1,200 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use super::*;
+mod array_read_sum;
+mod typed_view;
 
 impl Vm {
-  fn try_dense_array_push_region(
+  fn try_property_chain_region(
     &mut self,
-    region: crate::vm::region::DenseArrayPushRegion,
+    region: crate::vm::region::PropertyChainRegion,
     registers: &mut [Value; 16],
   ) -> Result<bool, RuntimeError> {
     if self.execution.active.pc != region.entry_pc
-      || self.execution.active.arguments.object.is_some()
       || self
         .execution
         .active
         .lexical_env
         .borrow()
         .has_object_environment()
-      || self
+      || [region.index_slot, region.accumulator_slot]
+        .into_iter()
+        .any(|slot| {
+          slot < self.execution.active.arguments.mapped_count
+            || self
+              .execution
+              .active
+              .slots
+              .as_ref()
+              .and_then(|slots| slots.immutable.get(slot))
+              .copied()
+              .unwrap_or(false)
+        })
+    {
+      return Ok(false);
+    }
+    let number = |slot| {
+      self
         .execution
         .active
         .locals
-        .get(region.index_slot)
-        .is_some_and(|cell| cell.strong_count() != 1)
+        .get(slot)
+        .and_then(|cell: &BindingCell| match cell.value() {
+          Value::Number(value) => Some(value),
+          _ => None,
+        })
+    };
+    let Some(index) = number(region.index_slot) else {
+      return Ok(false);
+    };
+    // A skipped body must not inspect the object or disturb its key register.
+    if index.partial_cmp(&region.limit) != Some(std::cmp::Ordering::Less) {
+      registers[region.index_register] = Value::Number(index);
+      registers[region.limit_register] = Value::Number(region.limit);
+      self.execution.active.pc = region.completed_pc;
+      return Ok(true);
+    }
+    let Some(accumulator) = number(region.accumulator_slot) else {
+      return Ok(false);
+    };
+    let Some(mut value) = self
+      .execution
+      .active
+      .locals
+      .get(region.object_slot)
+      .map(BindingCell::value)
+    else {
+      return Ok(false);
+    };
+    let mut last_key = None;
+    for constant in &region.key_constants[..region.key_count] {
+      let Some(crate::bytecode::Constant::String(key)) = self
+        .execution
+        .active
+        .chunk
+        .constants
+        .get(*constant)
+      else {
+        return Ok(false);
+      };
+      let Value::Object(object) = value else {
+        return Ok(false);
+      };
+      let next = {
+        let object = object.borrow();
+        // Exotic objects can have internal property semantics even when the
+        // physical property table happens to contain a matching data entry.
+        if !object.internal_slots.is_empty() {
+          return Ok(false);
+        }
+        match object
+          .properties
+          .get(&PropertyKey::String(key.clone()))
+        {
+          Some(PropertyDescriptor::Data { value, .. }) => value.clone(),
+          _ => return Ok(false),
+        }
+      };
+      value = next;
+      last_key = Some(key.clone());
+    }
+    let Value::Number(addend) = value else {
+      return Ok(false);
+    };
+    let mut prepared = crate::vm::region::PreparedNumericRegion {
+      index,
+      limit: region.limit,
+      accumulator,
+      step: region.step,
+      addend,
+      iterations: 0,
+      shape: crate::vm::region::NumericRegionShape::AddPrepared,
+    };
+    let execution = self
+      .profiling
+      .jit
+      .execute_numeric_region(
+        &mut prepared,
+        self.interrupts.native_poll(),
+        crate::vm::jit::NUMERIC_ACTIVATION_LIMIT,
+      )
+      .map_err(RuntimeError::from)?;
+    let outcome = match execution {
+      crate::vm::jit::NumericRegionExecution::Unavailable => return Ok(false),
+      crate::vm::jit::NumericRegionExecution::Executed(outcome) => outcome,
+    };
+    if outcome.iterations > 0 {
+      self.execution.active.locals[region.index_slot].set(Value::Number(prepared.index));
+      self.execution.active.locals[region.accumulator_slot]
+        .set(Value::Number(prepared.accumulator));
+      registers[region.key_register] =
+        Value::String(last_key.expect("validated nonempty property chain"));
+    }
+    // Both the backedge and completed exits have executed the next comparison.
+    registers[region.index_register] = Value::Number(prepared.index);
+    registers[region.limit_register] = Value::Number(region.limit);
+    self.execution.active.pc = if prepared.index < prepared.limit {
+      region.entry_pc
+    } else {
+      region.completed_pc
+    };
+    self.profiling.jit_stats.native_loop_entries = self
+      .profiling
+      .jit_stats
+      .native_loop_entries
+      .saturating_add(1);
+    self.profiling.jit_stats.native_loop_iterations = self
+      .profiling
+      .jit_stats
+      .native_loop_iterations
+      .saturating_add(u64::from(outcome.iterations));
+    if let crate::vm::jit::NumericRegionExit::Interrupted {
+      observed_generation,
+    } = outcome.exit
+    {
+      self.interrupts.acknowledge(observed_generation);
+      return Err(RuntimeError::execution_interrupted());
+    }
+    self.poll_execution_interrupt()?;
+    Ok(true)
+  }
+
+  fn try_dense_array_push_region(
+    &mut self,
+    region: crate::vm::region::DenseArrayPushRegion,
+    registers: &mut [Value; 16],
+  ) -> Result<bool, RuntimeError> {
+    if self.execution.active.pc != region.entry_pc
+      || self
+        .execution
+        .active
+        .lexical_env
+        .borrow()
+        .has_object_environment()
+      || (region.clones_index_cell
+        && self
+          .execution
+          .active
+          .locals
+          .get(region.index_slot)
+          .is_some_and(|cell| cell.strong_count() != 1))
       || [
-        region.index_slot,
-        region.call_temporary_slot,
+        Some(region.index_slot),
+        Some(region.call_temporary_slot),
         region.increment_temporary_slot,
       ]
       .into_iter()
+      .flatten()
       .any(|slot| {
-        self
-          .execution
-          .active
-          .slots
-          .as_ref()
-          .and_then(|slots| slots.immutable.get(slot))
-          .copied()
-          .unwrap_or(false)
+        slot < self.execution.active.arguments.mapped_count
+          || self
+            .execution
+            .active
+            .slots
+            .as_ref()
+            .and_then(|slots| slots.immutable.get(slot))
+            .copied()
+            .unwrap_or(false)
       })
     {
       return Ok(false);
@@ -88,38 +246,61 @@ impl Vm {
           .properties
           .get(&PropertyKey::String("length".into()))
           .is_some_and(|descriptor| {
-            !matches!(descriptor, PropertyDescriptor::Data { writable: true, .. })
+            !matches!(descriptor, PropertyDescriptor::Data { value: Value::Number(length), writable: true, .. } if *length == usize_to_f64(elements.borrow().len()))
           })
       {
         return Ok(false);
       }
       properties.get_prototype()
     };
-    let mut canonical_push = false;
+    let mut canonical_push = None;
+    let mut plain_chain = false;
     for _ in 0..MAX_PROTOTYPE_DEPTH {
-      let Value::Object(object) = prototype else {
-        break;
+      let object = match prototype {
+        Value::Null => {
+          plain_chain = true;
+          break;
+        }
+        Value::Object(ref object) => Rc::clone(object),
+        _ => return Ok(false),
       };
       let object = object.borrow();
-      if object
-        .properties
-        .keys()
-        .any(&property_key_is_index)
+      if !object.internal_slots.is_empty()
+        || object
+          .properties
+          .keys()
+          .any(&property_key_is_index)
       {
         return Ok(false);
       }
-      if let Some(descriptor) = object
-        .properties
-        .get(&PropertyKey::String("push".into()))
+      if canonical_push.is_none()
+        && let Some(descriptor) = object
+          .properties
+          .get(&PropertyKey::String("push".into()))
       {
-        canonical_push = matches!(descriptor, PropertyDescriptor::Data { value: Value::BuiltinObject(_, properties), .. } if matches!(properties.borrow().internal_slot("[[DenkoArrayPush]]"), Some(Value::Bool(true))));
-        break;
+        match descriptor {
+          PropertyDescriptor::Data {
+            value: Value::BuiltinObject(_, properties),
+            ..
+          } if matches!(
+            properties
+              .borrow()
+              .internal_slot("[[DenkoArrayPush]]"),
+            Some(Value::Bool(true))
+          ) =>
+          {
+            if let PropertyDescriptor::Data { value, .. } = descriptor {
+              canonical_push = Some(value.clone());
+            }
+          }
+          _ => return Ok(false),
+        }
       }
       prototype = object.get_prototype();
     }
-    if !canonical_push {
+    let Some(canonical_push) = canonical_push.filter(|_| plain_chain) else {
       return Ok(false);
-    }
+    };
     let mut prepared = crate::vm::region::PreparedArrayPushRegion {
       index,
       limit: region.limit,
@@ -134,15 +315,15 @@ impl Vm {
     {
       return Ok(false);
     }
+    if prepared.iterations == 0 {
+      return Ok(false);
+    }
     if prepared.iterations > 64 {
       return Err(RuntimeError::from(
         "native dense array loop exceeded its batch bound",
       ));
     }
-    let values = prepared.values[..prepared.iterations as usize]
-      .iter()
-      .map(|value| Some(Value::Number(*value)))
-      .collect::<Vec<_>>();
+    let values = &prepared.values[..prepared.iterations as usize];
     let new_length = elements
       .borrow()
       .len()
@@ -151,7 +332,7 @@ impl Vm {
     let Some(new_length) = new_length else {
       return Ok(false);
     };
-    elements.borrow_mut().extend(values);
+    elements.borrow_mut().append_numeric_batch(values);
     if let Some(PropertyDescriptor::Data { value, .. }) = properties
       .borrow_mut()
       .properties
@@ -161,17 +342,34 @@ impl Vm {
     }
     let receiver = Value::Array(Rc::clone(&elements), Rc::clone(&properties));
     self.bump_object_generation(&receiver);
-    ensure_slot(
-      &mut self.execution.active.locals,
-      region.increment_temporary_slot,
-    );
-    self.execution.active.locals[region.increment_temporary_slot]
-      .set(Value::Number(prepared.index));
+    if let Some(slot) = region.increment_temporary_slot {
+      ensure_slot(&mut self.execution.active.locals, slot);
+      self.execution.active.locals[slot].set(Value::Number(prepared.index));
+    }
+    self.execution.active.locals[region.call_temporary_slot].set(receiver.clone());
     self.execution.active.locals[region.index_slot].set(Value::Number(prepared.index));
+    let previous_index = prepared.values[prepared.iterations as usize - 1];
+    for (register, value) in registers
+      .iter_mut()
+      .zip(region.register_writeback)
+    {
+      use crate::vm::region::ArrayPushValue as V;
+      if let Some(value_kind) = value {
+        *register = match value_kind {
+          V::Index => Value::Number(previous_index),
+          V::NegatedIndex => Value::Number(-previous_index),
+          V::NextIndex => Value::Number(prepared.index),
+          V::Limit => Value::Number(region.limit),
+          V::Step => Value::Number(region.step),
+          V::Receiver => receiver.clone(),
+          V::MethodKey => Value::String("push".into()),
+          V::Method => canonical_push.clone(),
+          V::Length => Value::Number(usize_to_f64(new_length)),
+        };
+      }
+    }
     registers[region.index_register] = Value::Number(prepared.index);
     registers[region.limit_register] = Value::Number(region.limit);
-    registers[0] = Value::Number(usize_to_f64(new_length));
-    registers[region.step_register] = Value::Number(region.step);
     self.execution.active.pc = if prepared.index < region.limit {
       region.entry_pc
     } else {
@@ -1121,9 +1319,24 @@ impl Vm {
     else {
       return Ok(false);
     };
-    match region {
+    let executed = match region {
+      crate::vm::region::NativeRegion::StringBody(region) => {
+        self.try_string_body_region(region, registers)
+      }
+      crate::vm::region::NativeRegion::NumericBody(region) => {
+        self.try_numeric_body_region(region, registers)
+      }
       crate::vm::region::NativeRegion::NumericLoop(region) => {
         self.try_numeric_loop_region(region, registers)
+      }
+      crate::vm::region::NativeRegion::TypedView(region) => {
+        self.try_typed_view_region(region, registers)
+      }
+      crate::vm::region::NativeRegion::ArrayReadSum(region) => {
+        self.try_array_read_sum_region(region, registers)
+      }
+      crate::vm::region::NativeRegion::PropertyChain(region) => {
+        self.try_property_chain_region(region, registers)
       }
       crate::vm::region::NativeRegion::DenseArrayPush(region) => {
         self.try_dense_array_push_region(region, registers)
@@ -1143,7 +1356,15 @@ impl Vm {
       crate::vm::region::NativeRegion::OwnMethodBinaryLoop(region) => {
         self.try_own_method_binary_loop_region(region, registers)
       }
+    }?;
+    if !executed {
+      self.profiling.jit_stats.native_region_fallbacks = self
+        .profiling
+        .jit_stats
+        .native_region_fallbacks
+        .saturating_add(1);
     }
+    Ok(executed)
   }
 
   fn try_numeric_loop_region(

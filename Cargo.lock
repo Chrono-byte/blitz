@@ -509,6 +509,7 @@ dependencies = [
  "oxc_syntax",
  "postcard",
  "regex-js",
+ "rustc-hash",
  "rustyline",
  "serde",
  "serde_json",

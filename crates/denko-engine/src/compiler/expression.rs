@@ -19,7 +19,7 @@
 //! instructions that are finalized as bytecode v2.
 
 use super::emit::LoweringOpcode;
-use crate::value::Value;
+use crate::{CompilerError, value::Value};
 use oxc_ast::ast as oast;
 
 const LINE: u32 = 1;
@@ -291,6 +291,49 @@ impl super::Compiler {
         self.emit_function_index(idx, LINE);
       }
       OExpr::ObjectExpression(obj) => {
+        // Plain static data fields need no descriptor objects or helper calls.
+        // Keys and values are still evaluated in source order, and BuildObject
+        // defines fresh own data properties rather than invoking inherited setters.
+        let plain_data = obj.properties.len() <= u8::MAX as usize
+          && obj.properties.iter().all(|property| {
+            let oast::ObjectPropertyKind::ObjectProperty(property) = property else {
+              return false;
+            };
+            matches!(property.kind, oast::PropertyKind::Init)
+              && !property.computed
+              && !property.method
+              && !Self::is_anonymous_function_definition(&property.value)
+              && match &property.key {
+                oast::PropertyKey::StaticIdentifier(key) => key.name != "__proto__",
+                oast::PropertyKey::Identifier(key) => key.name != "__proto__",
+                oast::PropertyKey::StringLiteral(key) => key.value != "__proto__",
+                oast::PropertyKey::NumericLiteral(_) => true,
+                _ => false,
+              }
+          });
+        if plain_data {
+          for property in &obj.properties {
+            let oast::ObjectPropertyKind::ObjectProperty(property) = property else {
+              unreachable!("validated plain data property");
+            };
+            let key = match &property.key {
+              oast::PropertyKey::StaticIdentifier(key) => key.name.to_string(),
+              oast::PropertyKey::Identifier(key) => key.name.to_string(),
+              oast::PropertyKey::StringLiteral(key) => key.value.to_string(),
+              oast::PropertyKey::NumericLiteral(key) => super::numeric_property_key(key.value),
+              _ => unreachable!("validated static property key"),
+            };
+            self.emit_constant(Value::String(key.clone().into()), LINE);
+            if property.shorthand {
+              self.emit_get_binding(&key);
+            } else {
+              self.compile_expr_oast(&property.value)?;
+            }
+          }
+          self.emit(LoweringOpcode::BuildObject, LINE);
+          self.emit_byte(obj.properties.len() as u8, LINE);
+          return Ok(());
+        }
         self.emit(LoweringOpcode::BuildObject, LINE);
         self.emit_byte(0, LINE);
         let home_object_slot = self.alloc_temp_local("object_literal_home");
@@ -527,6 +570,9 @@ impl super::Compiler {
         }
       }
       OExpr::ArrayExpression(arr) => {
+        let count = u16::try_from(arr.elements.len()).map_err(|_| {
+          CompilerError::from("Array literal exceeds the 65535-element bytecode limit")
+        })?;
         let has_spread = arr
           .elements
           .iter()
@@ -550,8 +596,7 @@ impl super::Compiler {
               }
             }
           }
-          self.emit(LoweringOpcode::BuildArray, LINE);
-          self.emit_byte(self.constant_index_to_u8(arr.elements.len())?, LINE);
+          self.emit_with_payload(LoweringOpcode::BuildArray, u32::from(count), LINE);
           for el in &arr.elements {
             if matches!(el, oast::ArrayExpressionElement::SpreadElement(_)) {
               self.emit(LoweringOpcode::True, LINE);
@@ -559,10 +604,8 @@ impl super::Compiler {
               self.emit(LoweringOpcode::False, LINE);
             }
           }
-          self.emit(LoweringOpcode::BuildArray, LINE);
-          self.emit_byte(self.constant_index_to_u8(arr.elements.len())?, LINE);
+          self.emit_with_payload(LoweringOpcode::BuildArray, u32::from(count), LINE);
           self.emit(LoweringOpcode::ArrayFromSpread, LINE);
-          self.emit_byte(self.constant_index_to_u8(arr.elements.len())?, LINE);
         } else {
           for el in &arr.elements {
             if let Some(expr) = el.as_expression() {
@@ -571,8 +614,7 @@ impl super::Compiler {
               self.emit_constant(Value::Uninitialized, LINE);
             }
           }
-          self.emit(LoweringOpcode::BuildArray, LINE);
-          self.emit_byte(self.constant_index_to_u8(arr.elements.len())?, LINE);
+          self.emit_with_payload(LoweringOpcode::BuildArray, u32::from(count), LINE);
         }
       }
       OExpr::Identifier(id) => {

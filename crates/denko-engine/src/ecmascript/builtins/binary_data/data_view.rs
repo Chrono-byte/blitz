@@ -6,6 +6,7 @@ use std::rc::Rc;
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;
 
+use crate::ecmascript::semantics::byte_views::EncodedTypedElement;
 use crate::ecmascript::semantics::{
   array_buffer_backing, is_array_buffer, set_builtin_length, set_builtin_name, usize_to_f64,
 };
@@ -36,7 +37,7 @@ fn data_view_details(
     return Err(vm.throw_type_error("DataView method called on incompatible receiver"));
   };
   let object = object.borrow();
-  let Some(buffer) = object.internal_slot(DATA_VIEW_BUFFER) else {
+  let Some(buffer) = object.internal_slot(DATA_VIEW_BUFFER).cloned() else {
     return Err(vm.throw_type_error("DataView method called on incompatible receiver"));
   };
   let base = match object.internal_slot(DATA_VIEW_BYTE_OFFSET) {
@@ -49,9 +50,16 @@ fn data_view_details(
     _ => None,
   }
   .ok_or_else(|| vm.throw_type_error("DataView method called on incompatible receiver"))?;
-  let data = array_buffer_backing(buffer)
-    .ok_or_else(|| vm.throw_type_error("Cannot perform DataView operation on a detached buffer"))?;
+  drop(object);
   let offset = to_index(vm, byte_offset)?;
+  let data = array_buffer_backing(&buffer)
+    .ok_or_else(|| vm.throw_type_error("Cannot perform DataView operation on a detached buffer"))?;
+  if base
+    .checked_add(length)
+    .is_none_or(|end| end > data.borrow().len())
+  {
+    return Err(vm.throw_type_error("DataView is outside its buffer"));
+  }
   if offset
     .checked_add(size)
     .is_none_or(|end| end > length)
@@ -65,14 +73,12 @@ fn read_bytes(
   data: &Rc<RefCell<ArrayData>>,
   offset: usize,
   size: usize,
-) -> Vec<u8> {
-  data.borrow().clone_elements()[offset..offset + size]
-    .iter()
-    .map(|value| match value {
-      Some(Value::Number(value)) => value.to_u8().unwrap_or(0),
-      _ => 0,
-    })
-    .collect()
+) -> [u8; 8] {
+  let mut bytes = [0; 8];
+  data
+    .borrow()
+    .read_bytes(offset, &mut bytes[..size]);
+  bytes
 }
 
 fn write_bytes(
@@ -80,11 +86,7 @@ fn write_bytes(
   offset: usize,
   bytes: &[u8],
 ) {
-  let mut values = data.borrow().clone_elements();
-  for (index, byte) in bytes.iter().enumerate() {
-    values[offset + index] = Some(Value::Number(f64::from(*byte)));
-  }
-  *data.borrow_mut() = ArrayData::from(values);
+  data.borrow_mut().write_bytes(offset, bytes);
 }
 
 fn little_endian(args: &[Value]) -> bool {
@@ -124,7 +126,7 @@ fn install_getter(
       let offset = args.get(1).cloned().unwrap_or(Value::Undefined);
       let (data, offset) = data_view_details(vm, &receiver, &offset, size)?;
       Ok(decode(
-        &read_bytes(&data, offset, size),
+        &read_bytes(&data, offset, size)[..size],
         little_endian(args),
       ))
     }),
@@ -143,7 +145,7 @@ fn install_setter(
   function_prototype: &Rc<RefCell<ObjectData>>,
   name: &str,
   size: usize,
-  encode: fn(&mut crate::Vm, &Value, bool) -> Result<Vec<u8>, crate::RuntimeError>,
+  encode: fn(&mut crate::Vm, &Value, bool) -> Result<EncodedTypedElement, crate::RuntimeError>,
 ) {
   let builtin = crate::ecmascript::semantics::builtin_object(
     Rc::new(move |vm, args| {
@@ -153,7 +155,39 @@ fn install_setter(
       let little_endian = args.get(3).is_some_and(Value::is_truthy);
       let (data, offset) = data_view_details(vm, &receiver, &offset, size)?;
       let bytes = encode(vm, &value, little_endian)?;
-      write_bytes(&data, offset, &bytes);
+      // Value conversion can detach or resize the buffer. Revalidate before
+      // touching the captured backing store.
+      let Value::Object(object) = &receiver else {
+        unreachable!("validated DataView");
+      };
+      let (buffer, view_end) = {
+        let object = object.borrow();
+        let buffer = object
+          .internal_slot(DATA_VIEW_BUFFER)
+          .cloned()
+          .expect("validated DataView buffer");
+        let base = match object.internal_slot(DATA_VIEW_BYTE_OFFSET) {
+          Some(Value::Number(n)) => n.to_usize(),
+          _ => None,
+        };
+        let length = match object.internal_slot(DATA_VIEW_BYTE_LENGTH) {
+          Some(Value::Number(n)) => n.to_usize(),
+          _ => None,
+        };
+        (
+          buffer,
+          base
+            .zip(length)
+            .and_then(|(base, length)| base.checked_add(length)),
+        )
+      };
+      let current = array_buffer_backing(&buffer).ok_or_else(|| {
+        vm.throw_type_error("Cannot perform DataView operation on a detached buffer")
+      })?;
+      if !Rc::ptr_eq(&current, &data) || view_end.is_none_or(|end| end > current.borrow().len()) {
+        return Err(vm.throw_type_error("DataView is outside its buffer"));
+      }
+      write_bytes(&current, offset, &bytes);
       Ok(Value::Undefined)
     }),
     function_prototype,
@@ -170,14 +204,16 @@ fn unsigned(
   bytes: &[u8],
   little: bool,
 ) -> u64 {
-  let bytes = if little {
-    bytes.iter().rev().copied().collect()
+  if little {
+    bytes
+      .iter()
+      .rev()
+      .fold(0_u64, |value, byte| (value << 8) | u64::from(*byte))
   } else {
-    bytes.to_vec()
-  };
-  bytes
-    .into_iter()
-    .fold(0_u64, |value, byte| (value << 8) | u64::from(byte))
+    bytes
+      .iter()
+      .fold(0_u64, |value, byte| (value << 8) | u64::from(*byte))
+  }
 }
 
 fn signed(
@@ -197,14 +233,15 @@ fn integer_bytes(
   value: i128,
   size: usize,
   little: bool,
-) -> Vec<u8> {
-  let mut bytes = (0..size)
-    .map(|index| ((value >> (index * 8)) & 0xff) as u8)
-    .collect::<Vec<_>>();
-  if !little {
-    bytes.reverse();
+) -> EncodedTypedElement {
+  let mut bytes = [0; 8];
+  for (index, byte) in bytes[..size].iter_mut().enumerate() {
+    *byte = ((value >> (index * 8)) & 0xff) as u8;
   }
-  bytes
+  if !little {
+    bytes[..size].reverse();
+  }
+  EncodedTypedElement::from_prefix(bytes, size)
 }
 
 fn number_bytes(
@@ -212,7 +249,7 @@ fn number_bytes(
   value: &Value,
   size: usize,
   little: bool,
-) -> Result<Vec<u8>, crate::RuntimeError> {
+) -> Result<EncodedTypedElement, crate::RuntimeError> {
   let value = vm.to_number_value(value)?;
   let integer = if value.is_finite() {
     value.trunc()
@@ -227,17 +264,17 @@ fn bigint_bytes(
   value: &Value,
   size: usize,
   little: bool,
-) -> Result<Vec<u8>, crate::RuntimeError> {
+) -> Result<EncodedTypedElement, crate::RuntimeError> {
   let Value::BigInt(value) = value else {
     return Err(vm.throw_type_error("DataView BigInt methods require a BigInt value"));
   };
   let modulus = BigInt::from(1_u8) << (size * 8);
   let normalized = ((value % &modulus) + &modulus) % &modulus;
-  let mut bytes = normalized.to_u64().unwrap_or(0).to_le_bytes()[..size].to_vec();
+  let mut bytes = normalized.to_u64().unwrap_or(0).to_le_bytes();
   if !little {
-    bytes.reverse();
+    bytes[..size].reverse();
   }
-  Ok(bytes)
+  Ok(EncodedTypedElement::from_prefix(bytes, size))
 }
 
 fn get_u8(
@@ -305,49 +342,49 @@ fn set_u8(
   vm: &mut crate::Vm,
   value: &Value,
   _: bool,
-) -> Result<Vec<u8>, crate::RuntimeError> {
+) -> Result<EncodedTypedElement, crate::RuntimeError> {
   number_bytes(vm, value, 1, true)
 }
 fn set_i8(
   vm: &mut crate::Vm,
   value: &Value,
   _: bool,
-) -> Result<Vec<u8>, crate::RuntimeError> {
+) -> Result<EncodedTypedElement, crate::RuntimeError> {
   number_bytes(vm, value, 1, true)
 }
 fn set_u16(
   vm: &mut crate::Vm,
   value: &Value,
   little: bool,
-) -> Result<Vec<u8>, crate::RuntimeError> {
+) -> Result<EncodedTypedElement, crate::RuntimeError> {
   number_bytes(vm, value, 2, little)
 }
 fn set_i16(
   vm: &mut crate::Vm,
   value: &Value,
   little: bool,
-) -> Result<Vec<u8>, crate::RuntimeError> {
+) -> Result<EncodedTypedElement, crate::RuntimeError> {
   number_bytes(vm, value, 2, little)
 }
 fn set_u32(
   vm: &mut crate::Vm,
   value: &Value,
   little: bool,
-) -> Result<Vec<u8>, crate::RuntimeError> {
+) -> Result<EncodedTypedElement, crate::RuntimeError> {
   number_bytes(vm, value, 4, little)
 }
 fn set_i32(
   vm: &mut crate::Vm,
   value: &Value,
   little: bool,
-) -> Result<Vec<u8>, crate::RuntimeError> {
+) -> Result<EncodedTypedElement, crate::RuntimeError> {
   number_bytes(vm, value, 4, little)
 }
 fn set_f32(
   vm: &mut crate::Vm,
   value: &Value,
   little: bool,
-) -> Result<Vec<u8>, crate::RuntimeError> {
+) -> Result<EncodedTypedElement, crate::RuntimeError> {
   Ok(integer_bytes(
     f32::to_bits(vm.to_number_value(value)? as f32) as i128,
     4,
@@ -358,7 +395,7 @@ fn set_f64(
   vm: &mut crate::Vm,
   value: &Value,
   little: bool,
-) -> Result<Vec<u8>, crate::RuntimeError> {
+) -> Result<EncodedTypedElement, crate::RuntimeError> {
   Ok(integer_bytes(
     f64::to_bits(vm.to_number_value(value)?) as i128,
     8,
@@ -369,14 +406,14 @@ fn set_bi64(
   vm: &mut crate::Vm,
   value: &Value,
   little: bool,
-) -> Result<Vec<u8>, crate::RuntimeError> {
+) -> Result<EncodedTypedElement, crate::RuntimeError> {
   bigint_bytes(vm, value, 8, little)
 }
 fn set_bu64(
   vm: &mut crate::Vm,
   value: &Value,
   little: bool,
-) -> Result<Vec<u8>, crate::RuntimeError> {
+) -> Result<EncodedTypedElement, crate::RuntimeError> {
   bigint_bytes(vm, value, 8, little)
 }
 
@@ -539,7 +576,8 @@ pub(crate) fn install_data_view(
     (
       "setInt8",
       1,
-      set_i8 as fn(&mut crate::Vm, &Value, bool) -> Result<Vec<u8>, crate::RuntimeError>,
+      set_i8
+        as fn(&mut crate::Vm, &Value, bool) -> Result<EncodedTypedElement, crate::RuntimeError>,
     ),
     ("setUint8", 1, set_u8),
     ("setInt16", 2, set_i16),

@@ -43,6 +43,338 @@ mod test {
   use super::*;
 
   #[test]
+  fn numeric_map_results_survive_generic_consumers_and_mutations() {
+    let source = crate::js!(
+      r#"
+      function mapped() { return [3, -0, 2, 1].map(function(value) { return value * 1; }); }
+      var values = mapped();
+      var ok = Object.is(values[1], -0) && values.length === 4;
+      ok = ok && values.slice(1).join(',') === '0,2,1';
+      ok = ok && values.concat([5]).join(',') === '3,0,2,1,5';
+      ok = ok && Array.from(values).join(',') === '3,0,2,1';
+      ok = ok && Object.keys(values).join(',') === '0,1,2,3';
+      ok = ok && JSON.stringify(values) === '[3,0,2,1]';
+      values[1] = 'changed';
+      ok = ok && values.join(',') === '3,changed,2,1';
+      values = mapped();
+      delete values[1];
+      ok = ok && !(1 in values) && values.length === 4;
+      var holes = values.map(function(value) { return value * 2; });
+      ok = ok && !(1 in holes) && holes[2] === 4 && holes.length === 4;
+      values = mapped();
+      values.length = 2;
+      values.push(9);
+      ok = ok && values.join(',') === '3,0,9';
+      values = mapped();
+      var removed = values.splice(1, 2, 'x');
+      ok = ok && removed.join(',') === '0,2' && values.join(',') === '3,x,1';
+      values = mapped();
+      values.reverse();
+      ok = ok && values.join(',') === '1,2,0,3';
+      values.sort();
+      ok = ok && values.join(',') === '0,1,2,3';
+      values = mapped();
+      var reads = 0;
+      Object.defineProperty(values, '1', {get() { reads++; return 9; }, configurable: true});
+      var readBack = values.map(function(value) { return value * 2; });
+      ok = ok && reads === 1 && readBack.join(',') === '6,18,4,2';
+      values = mapped();
+      Object.freeze(values);
+      ok = ok && !Reflect.set(values, '0', 99) && values[0] === 3;
+      globalThis.numericMapConsumersOk = ok;
+    "#
+    );
+    for enabled in [true, false] {
+      let (vm, _) = run_script_with_optimizations(source, enabled);
+      assert_eq!(
+        vm.get_global("numericMapConsumersOk"),
+        Some(Value::Bool(true))
+      );
+      if enabled {
+        assert!(
+          vm.native_execution_statistics()
+            .batched_callback_calls
+            >= 28
+        );
+      }
+    }
+  }
+
+  #[test]
+  fn numeric_map_callbacks_preserve_numbers_and_argument_positions() {
+    let source = crate::js!(
+      r#"
+      function square(value) { return value * value; }
+      function addIndex(value, index) { return value + index; }
+      var squares = [1, 2, 3, 4].map(square);
+      var indexed = [10, 10, 10].map(addIndex);
+      var special = [-0, NaN, Infinity, -Infinity].map(function (value) { return value / 2; });
+      globalThis.numericMapOk = squares.join(',') === '1,4,9,16'
+        && indexed.join(',') === '10,11,12' && Object.is(special[0], -0)
+        && Number.isNaN(special[1]) && special[2] === Infinity && special[3] === -Infinity;
+    "#
+    );
+    for enabled in [true, false] {
+      let (vm, _) = run_script_with_optimizations(source, enabled);
+      assert_eq!(vm.get_global("numericMapOk"), Some(Value::Bool(true)));
+      assert_eq!(
+        vm.native_execution_statistics()
+          .batched_callback_calls,
+        if enabled { 11 } else { 0 }
+      );
+    }
+  }
+
+  #[test]
+  fn callback_plans_are_shared_by_fresh_closures() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+      for (var i = 0; i < 1000; i = i + 1) {
+        globalThis.latestMap = [2, 3].map(function (value) { return value * value; });
+      }
+    "#
+    ));
+    assert_eq!(
+      vm.native_execution_statistics()
+        .batched_callback_calls,
+      2000
+    );
+    assert_eq!(vm.caches.callbacks.len(), 1);
+  }
+
+  #[test]
+  fn leaf_callbacks_fall_back_for_coercion_accessors_and_special_functions() {
+    let source = crate::js!(
+      r#"
+      function square(value) { return value * value; }
+      function read(value) { return value.active; }
+      var coercions = 0;
+      var reads = 0;
+      var object = {valueOf() { coercions++; return 3; }};
+      var numbers = [object, '4', 5n].map(square);
+      var first = [{active: true}].filter(read).length;
+      var getter = [{get active() { reads++; return true; }}].filter(read).length;
+      var inherited = [Object.create({active: true})].filter(read).length;
+      var proxied = [new Proxy({active: true}, {get(target, key) { reads++; return target[key]; }})].filter(read).length;
+      var record = {active: false};
+      var before = [record].filter(read).length;
+      record.active = true;
+      var after = [record].filter(read).length;
+      var defaults = 0;
+      var defaulted = [undefined].map(function (value = (++defaults)) { return value; });
+      var rest = [3].map(function (...values) { return values.length; });
+      var generated = [4].map(function* (value) { return value; });
+      var received = [5].map(function () { return this.marker; }, {marker: 9});
+      globalThis.leafFallbackOk = numbers[0] === 9 && numbers[1] === 16 && numbers[2] === 25n
+        && coercions === 2 && reads === 2 && first + getter + inherited + proxied === 4
+        && before === 0 && after === 1 && defaulted[0] === 1 && defaults === 1
+        && rest[0] === 3 && generated[0].next().value === 4 && received[0] === 9;
+    "#
+    );
+    for enabled in [true, false] {
+      let (vm, _) = run_script_with_optimizations(source, enabled);
+      assert_eq!(vm.get_global("leafFallbackOk"), Some(Value::Bool(true)));
+      if enabled {
+        assert!(
+          vm.native_execution_statistics()
+            .leaf_callback_fallbacks
+            >= 6
+        );
+      }
+    }
+  }
+
+  #[test]
+  fn map_observes_species_and_defines_each_result_before_the_next_callback() {
+    let source = crate::js!(
+      r#"
+      var log = '';
+      var output = {};
+      var input = [2, 3];
+      input.constructor = {[Symbol.species]: function (length) {
+        log += 'species' + length + ';';
+        return new Proxy(output, {defineProperty(target, key, descriptor) {
+          log += 'define' + key + ';';
+          return Reflect.defineProperty(target, key, descriptor);
+        }});
+      }};
+      input.map(function (value, index) {
+        log += 'callback' + index + ';';
+        if (index === 1 && output[0] !== 4) throw new Error('delayed definition');
+        return value * 2;
+      });
+      var lengthFirst = '';
+      try { Array.prototype.map.call({get length() { lengthFirst += 'length'; return 0; }}, null); }
+      catch (error) { lengthFirst += error instanceof TypeError ? 'error' : 'wrong'; }
+      globalThis.mapOrderOk = log === 'species2;callback0;define0;callback1;define1;'
+        && !Object.hasOwn(output, 'length') && output[1] === 6 && lengthFirst === 'lengtherror';
+    "#
+    );
+    for enabled in [true, false] {
+      let (vm, _) = run_script_with_optimizations(source, enabled);
+      assert_eq!(vm.get_global("mapOrderOk"), Some(Value::Bool(true)));
+    }
+  }
+
+  #[test]
+  fn intrinsic_species_allocation_preserves_getters_and_custom_results() {
+    let source = crate::js!(
+      r#"
+      var calls = 0;
+      var source = [2, , 4];
+      source.constructor = { get [Symbol.species]() { calls++; return Array; } };
+      var first = source.map(function (value) { return value * value; });
+      var second = source.filter(function () { return true; });
+      var custom = {};
+      source.constructor = {[Symbol.species]: function (length) {
+        custom.requestedLength = length;
+        return custom;
+      }};
+      var third = source.map(function (value) { return value * value; });
+      globalThis.speciesAllocationOk = calls === 2 && first.length === 3
+        && !Object.hasOwn(first, '1') && first[2] === 16
+        && Object.getPrototypeOf(first) === Array.prototype
+        && second.length === 2 && second[1] === 4
+        && third === custom && custom.requestedLength === 3
+        && custom[0] === 4 && custom[2] === 16 && !Object.hasOwn(custom, 'length');
+    "#
+    );
+    let (vm, _) = run_script(source);
+    assert_eq!(
+      vm.get_global("speciesAllocationOk"),
+      Some(Value::Bool(true))
+    );
+  }
+
+  #[test]
+  fn numeric_map_guards_holes_descriptors_and_aliased_species_results() {
+    let source = crate::js!(
+      r#"
+      function square(value) { return value * value; }
+      var source = [2, , 4];
+      var sparse = source.map(square);
+      var trailing = [2, , ,].map(square);
+      var reads = 0;
+      var accessor = [2, 3];
+      Object.defineProperty(accessor, '1', {get() { reads++; return 5; }});
+      var mappedAccessor = accessor.map(square);
+      var alias = [2, 3];
+      alias.constructor = {[Symbol.species]: function () { return alias; }};
+      var same = alias.map(square);
+      var readonly = [2];
+      readonly.constructor = {[Symbol.species]: function () {
+        var result = [0];
+        Object.defineProperty(result, '0', {value: 0, writable: false, configurable: false});
+        return result;
+      }};
+      var threw = false;
+      try { readonly.map(square); } catch (error) { threw = error instanceof TypeError; }
+      globalThis.mapGuardsOk = sparse.length === 3 && !Object.hasOwn(sparse, '1')
+        && trailing.length === 3 && !Object.hasOwn(trailing, '2')
+        && sparse[0] === 4 && sparse[2] === 16 && reads === 1 && mappedAccessor[1] === 25
+        && same === alias && alias[0] === 4 && alias[1] === 9 && threw;
+    "#
+    );
+    for enabled in [true, false] {
+      let (vm, _) = run_script_with_optimizations(source, enabled);
+      assert_eq!(vm.get_global("mapGuardsOk"), Some(Value::Bool(true)));
+      assert_eq!(
+        vm.native_execution_statistics()
+          .batched_callback_calls,
+        0
+      );
+    }
+  }
+
+  #[test]
+  fn map_roots_incremental_results_across_callback_collection() {
+    let globals = test_globals();
+    globals.borrow_mut().properties.insert(
+      PropertyKey::String("collectNow".into()),
+      PropertyDescriptor::ordinary_data(Value::Builtin(Rc::new(|vm, _| {
+        vm.collect_garbage_prototype();
+        Ok(Value::Undefined)
+      }))),
+    );
+    let source = crate::js!(
+      r#"
+      var result = [1, 2, 3].map(function (value) {
+        collectNow();
+        return {nested: {value: value}};
+      });
+      globalThis.mapCollectionOk = result[0].nested.value === 1
+        && result[1].nested.value === 2 && result[2].nested.value === 3;
+    "#
+    );
+    let session = Parser::parse_source(source).expect("parse");
+    let code = compiler::compile_session(&session).expect("compile");
+    let mut vm = Vm::new(globals);
+    vm.run(code).expect("run");
+    assert_eq!(vm.get_global("mapCollectionOk"), Some(Value::Bool(true)));
+  }
+
+  #[test]
+  fn numeric_callback_batch_honors_pending_interruption_before_writes() {
+    let (mut vm, _) = run_script(crate::js!(
+      "function square(value) { return value * value; }"
+    ));
+    let callback = vm.get_global("square").expect("callback");
+    let source = vm.new_array(vec![Some(Value::Number(2.0)); 128]);
+    let target = vm.new_array(vec![Some(Value::Number(7.0)); 128]);
+    vm.interrupt_handle()
+      .request_interrupt()
+      .expect("live VM");
+    let error = vm
+      .try_map_numeric_callback(&source, &target, &callback, 128)
+      .expect_err("interrupted");
+    assert!(error.is_execution_interrupted());
+    let Value::Array(elements, _) = target else {
+      panic!("array result");
+    };
+    assert!(
+      elements
+        .borrow()
+        .iter()
+        .all(|value| matches!(value, Some(Value::Number(7.0))))
+    );
+  }
+
+  #[test]
+  fn numeric_map_batches_preserve_indices_and_existing_storage() {
+    let (mut vm, _) = run_script(crate::js!(
+      "function indexed(value, index) { return value + index; }"
+    ));
+    let callback = vm.get_global("indexed").expect("callback");
+    let source = vm.new_array(vec![Some(Value::Number(10.0)); 130]);
+    let existing = vm.new_array(vec![Some(Value::Number(-1.0)); 130]);
+    let empty = vm
+      .new_array_with_length(130)
+      .expect("array length");
+    for target in [existing, empty] {
+      assert!(
+        vm.try_map_numeric_callback(&source, &target, &callback, 130)
+          .expect("map")
+      );
+      let Value::Array(elements, _) = target else {
+        panic!("array");
+      };
+      let elements = elements.borrow();
+      assert_eq!(elements.len(), 130);
+      for (index, value) in elements.iter().enumerate() {
+        assert_eq!(
+          *value,
+          Some(Value::Number(10.0 + runtime_utils::usize_to_f64(index)))
+        );
+      }
+    }
+    assert_eq!(
+      vm.native_execution_statistics()
+        .batched_callback_calls,
+      260
+    );
+  }
+
+  #[test]
   fn call_abi_preserves_call_semantics() {
     let source = r#"
       function argc() { return arguments.length; }
@@ -1304,6 +1636,400 @@ mod test {
       vm.get_global("client_names"),
       Some(Value::String("Alice,Bob,".to_string().into()))
     );
+  }
+
+  #[cfg(all(unix, target_arch = "x86_64"))]
+  #[test]
+  fn native_property_chains_preserve_numeric_results_and_shared_locals() {
+    let source = crate::js!(
+      r#"
+      function sumChain(object, start, initial) {
+        var sum = initial;
+        var i = start;
+        var observe = function () { return sum + i; };
+        for (; i < 1100; i = i + 0.5) sum = sum + object.a.b;
+        return [sum, i, observe()];
+      }
+      var normal = sumChain({a: {b: 0.1}}, -0, 0);
+      var negativeZero = sumChain({a: {b: -0}}, 0, -0);
+      var infinity = sumChain({a: {b: Infinity}}, 0, 0);
+      var nan = sumChain({a: {b: NaN}}, 0, 0);
+      var skipped = sumChain(null, NaN, 'untouched');
+      globalThis.propertyChainResult = normal[0];
+      globalThis.propertyChainOk = normal[1] === 1100 && normal[2] === normal[0] + 1100
+        && Object.is(negativeZero[0], -0) && infinity[0] === Infinity
+        && Number.isNaN(nan[0]) && skipped[0] === 'untouched' && Number.isNaN(skipped[1]);
+    "#
+    );
+    let (optimized, _) = run_script_with_optimizations(source, true);
+    let (portable, _) = run_script_with_optimizations(source, false);
+    assert_eq!(
+      optimized.get_global("propertyChainResult"),
+      portable.get_global("propertyChainResult")
+    );
+    assert_eq!(
+      optimized.get_global("propertyChainOk"),
+      Some(Value::Bool(true))
+    );
+    assert_eq!(
+      portable.get_global("propertyChainOk"),
+      Some(Value::Bool(true))
+    );
+    assert!(
+      optimized
+        .native_execution_statistics()
+        .native_loop_iterations
+        >= 8800
+    );
+  }
+
+  #[cfg(all(unix, target_arch = "x86_64"))]
+  #[test]
+  fn native_property_chains_fall_back_for_observable_reads_and_coercion() {
+    let source = crate::js!(
+      r#"
+      var reads = 0;
+      function sumChain(object) {
+        var sum = 0;
+        for (var i = 0; i < 100; i = i + 1) sum = sum + object.a.b;
+        return sum;
+      }
+      var accessor = {a: {get b() { reads++; return 2; }}};
+      var proxied = {a: new Proxy({b: 3}, {get(target, key) { reads++; return target[key]; }})};
+      var inherited = {a: Object.create({b: 4})};
+      var coerced = {a: {b: {valueOf() { reads++; return 5; }}}};
+      var text = {a: {b: 'x'}};
+      globalThis.propertyFallbackOk = sumChain(accessor) === 200 && sumChain(proxied) === 300
+        && sumChain(inherited) === 400 && sumChain(coerced) === 500
+        && sumChain(text).length === 101 && reads === 300;
+      function changing() {
+        var sum = 0;
+        var i = 0;
+        var object = {a: {get b() { i = i + 1; return 2; }}};
+        for (; i < 100; i = i + 1) sum = sum + object.a.b;
+        return sum;
+      }
+      globalThis.propertyMutationOk = changing() === 100;
+    "#
+    );
+    for enabled in [true, false] {
+      let (vm, _) = run_script_with_optimizations(source, enabled);
+      assert_eq!(vm.get_global("propertyFallbackOk"), Some(Value::Bool(true)));
+      assert_eq!(vm.get_global("propertyMutationOk"), Some(Value::Bool(true)));
+      assert_eq!(
+        vm.native_execution_statistics()
+          .native_loop_iterations,
+        0
+      );
+    }
+  }
+
+  #[cfg(all(unix, target_arch = "x86_64"))]
+  #[test]
+  fn native_property_chains_recheck_descriptors_and_binding_guards() {
+    let source = crate::js!(
+      r#"
+      function run(object) {
+        var sum = 0;
+        for (var i = 0; i < 100; i = i + 1) sum = sum + object.a.b;
+        return sum;
+      }
+      var reads = 0;
+      var leaf = {};
+      Object.defineProperty(leaf, 'b', {configurable: true, get() {
+        reads++;
+        Object.defineProperty(leaf, 'b', {value: 7, configurable: true});
+        return 2;
+      }});
+      var first = run({a: leaf});
+      Object.defineProperty(leaf, 'b', {value: 3});
+      var second = run({a: leaf});
+      function mapped(i, sum) {
+        var object = {a: {b: 2}};
+        var alias = arguments;
+        for (; i < 100; i = i + 1) sum = sum + object.a.b;
+        return alias[0] + alias[1];
+      }
+      var immutableError = false;
+      function immutable() {
+        const sum = 0;
+        var object = {a: {b: 2}};
+        for (var i = 0; i < 100; i = i + 1) sum = sum + object.a.b;
+      }
+      try { immutable(); } catch (error) { immutableError = error instanceof TypeError; }
+      globalThis.propertyRecheckOk = first === 695 && second === 300 && reads === 1
+        && mapped(0, 0) === 300 && immutableError;
+    "#
+    );
+    let (optimized, _) = run_script_with_optimizations(source, true);
+    let (portable, _) = run_script_with_optimizations(source, false);
+    assert_eq!(
+      optimized.get_global("propertyRecheckOk"),
+      Some(Value::Bool(true))
+    );
+    assert_eq!(
+      portable.get_global("propertyRecheckOk"),
+      Some(Value::Bool(true))
+    );
+    assert_eq!(
+      optimized
+        .native_execution_statistics()
+        .native_loop_iterations,
+      199
+    );
+  }
+
+  #[cfg(all(unix, target_arch = "x86_64"))]
+  #[test]
+  fn asynchronous_interrupt_stops_native_property_chain() {
+    let source = crate::js!(
+      r#"
+      function sumChain() {
+        var object = {a: {b: 2}};
+        var sum = 0;
+        for (var i = 0; i < 1000000000; i = i + 1) sum = sum + object.a.b;
+        return sum;
+      }
+      try { sumChain(); } catch (error) { globalThis.caught = true; }
+      globalThis.completed = true;
+    "#
+    );
+    let session = Parser::parse_source(source).expect("parse");
+    let code = compiler::compile_session(&session).expect("compile");
+    let mut vm = Vm::new(test_globals());
+    let interrupt = vm.interrupt_handle();
+    let requester = std::thread::spawn(move || {
+      std::thread::sleep(std::time::Duration::from_millis(10));
+      interrupt.request_interrupt().expect("live VM");
+    });
+    let error = vm.run(code).expect_err("native loop interrupted");
+    requester.join().expect("requester");
+    assert!(error.is_execution_interrupted());
+    assert!(
+      vm.native_execution_statistics()
+        .native_loop_iterations
+        > 0
+    );
+    assert_eq!(vm.get_global("caught"), None);
+    assert_eq!(vm.get_global("completed"), None);
+  }
+
+  #[cfg(all(unix, target_arch = "x86_64"))]
+  #[test]
+  fn native_array_push_accepts_function_local_counted_updates() {
+    let template = crate::js!(
+      r#"
+      function fill() {
+        var values = [];
+        for (var i = 0; i < 1100; UPDATE) values.push(i);
+        globalThis.finalIndex = i;
+        return values;
+      }
+      var result = fill();
+      globalThis.arrayCheck = result.length + result[1099];
+    "#
+    );
+    for update in [
+      crate::js!("i = i + 1"),
+      crate::js!("i += 1"),
+      crate::js!("i++"),
+    ] {
+      let source = template.replace("UPDATE", update);
+      let (optimized, _) = run_script_with_optimizations(&source, true);
+      let (portable, _) = run_script_with_optimizations(&source, false);
+      assert_eq!(
+        optimized.get_global("arrayCheck"),
+        portable.get_global("arrayCheck")
+      );
+      assert_eq!(
+        optimized.get_global("finalIndex"),
+        Some(Value::Number(1100.0))
+      );
+      assert!(
+        optimized
+          .native_execution_statistics()
+          .native_loop_iterations
+          >= 1100,
+        "{update}"
+      );
+    }
+  }
+
+  #[cfg(all(unix, target_arch = "x86_64"))]
+  #[test]
+  fn native_array_push_preserves_shared_bindings_and_numeric_boundaries() {
+    let source = crate::js!(
+      r#"
+      function fill() {
+        var values = [];
+        var i = -0;
+        var read = function () { return i; };
+        for (; i < 0.5; i = i + 0.25) values.push(i);
+        globalThis.signedZero = 1 / values[0];
+        globalThis.sharedIndex = read();
+        globalThis.fractional = values[1];
+        for (let j = 0; j < 129; j += 1) values.push(j);
+        globalThis.last = values[values.length - 1];
+        globalThis.count = values.length;
+        var large = [];
+        for (var k = 9007199254740990; k < 9007199254740992; k++) large.push(k);
+        globalThis.largeFirst = large[0];
+        globalThis.largeLast = large[1];
+        globalThis.largeIndex = k;
+        var coercions = 0;
+        var initial = { valueOf() { coercions++; return 0; } };
+        var mixed = [];
+        for (var m = initial; m < 3; m = m + 1) mixed.push(m);
+        globalThis.mixedPreserved = mixed[0] === initial && mixed[1] === 1 && mixed[2] === 2;
+        globalThis.coercions = coercions;
+      }
+      fill();
+    "#
+    );
+    let (optimized, _) = run_script_with_optimizations(source, true);
+    let (portable, _) = run_script_with_optimizations(source, false);
+    for name in [
+      "signedZero",
+      "sharedIndex",
+      "fractional",
+      "last",
+      "count",
+      "largeFirst",
+      "largeLast",
+      "largeIndex",
+      "mixedPreserved",
+      "coercions",
+    ] {
+      assert_eq!(
+        optimized.get_global(name),
+        portable.get_global(name),
+        "{name}"
+      );
+    }
+    assert_eq!(
+      optimized.get_global("signedZero"),
+      Some(Value::Number(f64::NEG_INFINITY))
+    );
+    assert_eq!(
+      optimized.get_global("mixedPreserved"),
+      Some(Value::Bool(true))
+    );
+    assert_eq!(optimized.get_global("coercions"), Some(Value::Number(2.0)));
+    assert!(
+      optimized
+        .native_execution_statistics()
+        .native_region_fallbacks
+        > 0
+    );
+    assert!(
+      optimized
+        .native_execution_statistics()
+        .native_loop_iterations
+        >= 135
+    );
+  }
+
+  #[cfg(all(unix, target_arch = "x86_64"))]
+  #[test]
+  fn native_array_push_falls_back_before_observable_operations() {
+    let source = crate::js!(
+      r#"
+      function inheritedSetter() {
+        var values = [];
+        var i = 0;
+        Object.defineProperty(Object.prototype, "0", { configurable: true, set(value) {
+          globalThis.setterIndex = i;
+          globalThis.setterValue = value;
+          i = 1100;
+        }});
+        try { for (; i < 1100; i = i + 1) values.push(i); }
+        finally { delete Object.prototype["0"]; }
+        globalThis.setterLength = values.length;
+        globalThis.setterFinalIndex = i;
+      }
+      function mapped(i) {
+        var values = [];
+        for (; i < 3; i += 1) values.push(i);
+        globalThis.mappedValue = arguments[0];
+      }
+      function changedMethod() {
+        var values = [];
+        var calls = 0;
+        values.push = function(value) { calls++; return value; };
+        for (var i = 0; i < 70; i++) values.push(i);
+        globalThis.overrideCalls = calls;
+        globalThis.overrideLength = values.length;
+      }
+      inheritedSetter(); mapped(0); changedMethod();
+    "#
+    );
+    let (optimized, _) = run_script_with_optimizations(source, true);
+    let (portable, _) = run_script_with_optimizations(source, false);
+    for name in [
+      "setterIndex",
+      "setterValue",
+      "setterLength",
+      "setterFinalIndex",
+      "mappedValue",
+      "overrideCalls",
+      "overrideLength",
+    ] {
+      assert_eq!(
+        optimized.get_global(name),
+        portable.get_global(name),
+        "{name}"
+      );
+    }
+    assert_eq!(
+      optimized.get_global("setterFinalIndex"),
+      Some(Value::Number(1101.0))
+    );
+    assert_eq!(
+      optimized.get_global("mappedValue"),
+      Some(Value::Number(3.0))
+    );
+    assert!(
+      optimized
+        .native_execution_statistics()
+        .native_region_fallbacks
+        > 0
+    );
+    assert_eq!(
+      optimized
+        .native_execution_statistics()
+        .native_loop_iterations,
+      0
+    );
+  }
+
+  #[cfg(all(unix, target_arch = "x86_64"))]
+  #[test]
+  fn asynchronous_interrupt_stops_function_local_native_array_push() {
+    let source = crate::js!(
+      r#"
+      function fill() { var values = []; for (var i = 0; i < 100000000; i = i + 1) values.push(i); }
+      try { fill(); } catch (error) { globalThis.caught = true; }
+      globalThis.completed = true;
+    "#
+    );
+    let session = Parser::parse_source(source).expect("parse");
+    let code = compiler::compile_session(&session).expect("compile");
+    let mut vm = Vm::new(test_globals());
+    let interrupt = vm.interrupt_handle();
+    let requester = std::thread::spawn(move || {
+      std::thread::sleep(std::time::Duration::from_millis(5));
+      interrupt.request_interrupt().expect("live VM");
+    });
+    let error = vm.run(code).expect_err("native loop interrupted");
+    requester.join().expect("requester");
+    assert!(error.is_execution_interrupted());
+    assert!(
+      vm.native_execution_statistics()
+        .native_loop_iterations
+        > 0
+    );
+    assert_eq!(vm.get_global("caught"), None);
+    assert_eq!(vm.get_global("completed"), None);
   }
 
   #[test]
@@ -7071,6 +7797,64 @@ mod test {
       "unexpected assign_result: {:?}",
       assign_result
     );
+  }
+
+  #[test]
+  fn builtin_register_arguments_match_overflow_and_reentrant_calls() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+      const from = Array.from;
+      const receiver = [];
+      const pushed = receiver.push({ value: 11 }, 'second');
+      const nested = from({ length: 2 }, function (_, index) {
+        return Array.of({ value: index }, Math.max(2, 4, 3));
+      });
+      const overflow = Array.of(0, 1, 2, 3, 4, 5, 6, 7, 8);
+      globalThis.builtinArgumentsOk = Math.max() === -Infinity
+        && Math.max(7) === 7 && Math.max(3, 9, 4) === 9
+        && Math.max(0, 1, 2, 3, 4, 5, 6, 7, 8) === 8
+        && pushed === 2 && receiver[0].value === 11 && receiver[1] === 'second'
+        && nested[0][0].value === 0 && nested[1][0].value === 1
+        && nested[1][1] === 4 && overflow.length === 9 && overflow[8] === 8;
+      "#
+    ));
+    assert_eq!(vm.get_global("builtinArgumentsOk"), Some(Value::Bool(true)));
+  }
+
+  #[test]
+  fn builtin_calls_restore_realms_after_callbacks_and_throws() {
+    let source = crate::js!(
+      r#"
+      const foreign = $262.createRealm().global;
+      let callbackRealm = false;
+      const result = foreign.Array.from({ length: 1 }, function () {
+        callbackRealm = Object.getPrototypeOf(Array.of(7)) === Array.prototype;
+        return 9;
+      });
+      const bound = foreign.Array.of.bind(null);
+      const proxied = new Proxy(bound, {});
+      let foreignError = false;
+      try { foreign.JSON.parse('{'); }
+      catch (error) { foreignError = error instanceof foreign.SyntaxError; }
+      let callbackError = false;
+      try {
+        foreign.Array.from({ length: 1 }, function () { throw new TypeError('callback'); });
+      } catch (error) { callbackError = error instanceof TypeError; }
+      let localError = false;
+      try { JSON.parse('{'); }
+      catch (error) { localError = error instanceof SyntaxError; }
+      globalThis.builtinRealmsOk = callbackRealm && foreignError && callbackError && localError
+        && result[0] === 9
+        && Object.getPrototypeOf(result) === foreign.Array.prototype
+        && Object.getPrototypeOf(proxied(3)) === foreign.Array.prototype
+        && Object.getPrototypeOf(Array.of(4)) === Array.prototype;
+    "#
+    );
+    let session = Parser::parse_source(source).expect("parse");
+    let code = compiler::compile_session(&session).expect("compile");
+    let mut vm = Vm::new(crate::test262_support::make_test262_globals());
+    vm.run(code).expect("run");
+    assert_eq!(vm.get_global("builtinRealmsOk"), Some(Value::Bool(true)));
   }
 
   #[test]

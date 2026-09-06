@@ -7,8 +7,9 @@ use std::rc::Rc;
 
 use crate::ecmascript::semantics::{descriptor_value_from_descriptor, property_key_to_value};
 use crate::runtime_utils::{
-  array_from_values, builtin_object, collect_iterable_values, set_builtin_length, set_builtin_name,
-  static_builtin_arg_offset, strict_equal, to_length, usize_to_f64,
+  array_from_values, builtin_object, collect_iterable_values, get_iterator_record, get_method,
+  iterator_step, set_builtin_length, set_builtin_name, static_builtin_arg_offset, strict_equal,
+  to_length, usize_to_f64,
 };
 use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value};
 use crate::{RuntimeError, Vm};
@@ -559,6 +560,7 @@ pub(crate) fn install_object_intrinsics(
           function_prototype,
         );
         set_builtin_length(&builtin, 2.0);
+        set_builtin_name(&builtin, "hasOwn");
         builtin
       }),
     );
@@ -1047,24 +1049,44 @@ pub(crate) fn install_object_intrinsics(
           Rc::new(move |vm, args| {
             let off = static_builtin_arg_offset(vm, args, "Object");
             let iterable = args.get(off).cloned().unwrap_or(Value::Undefined);
-            let entries = collect_iterable_values(vm, &iterable)?;
-            let result = Value::Object(Rc::new(RefCell::new(ObjectData::with_prototype(
-              Value::Object(Rc::clone(&object_proto_for_from_entries)),
+            if matches!(iterable, Value::Undefined | Value::Null) {
+              return Err(vm.throw_type_error("Object.fromEntries requires an iterable"));
+            }
+            let result = Value::Object(crate::gc::track_object(Rc::new(RefCell::new(
+              ObjectData::with_prototype(Value::Object(Rc::clone(&object_proto_for_from_entries))),
             ))));
-            for entry in entries {
-              let entry_obj = vm.to_object_value(entry)?;
-              let key = vm.get_property_host(&entry_obj, &PKey::String("0".to_string().into()))?;
-              let value =
-                vm.get_property_host(&entry_obj, &PKey::String("1".to_string().into()))?;
-              let prop_key = vm.to_property_key(&key)?;
-              let key_value = property_key_to_value(&prop_key);
-              vm.set_property_host(&result, &key_value, value)?;
+            let method = get_method(
+              vm,
+              &iterable,
+              &PKey::Symbol(SymbolId::well_known_iterator()),
+            )?
+            .ok_or_else(|| vm.throw_type_error("Object.fromEntries requires an iterable"))?;
+            let (iterator, next) = get_iterator_record(vm, &iterable, &method)?;
+            while let Some(entry) = iterator_step(vm, &iterator, &next)? {
+              let completion = (|| {
+                if !entry.is_object() {
+                  return Err(vm.throw_type_error("Iterator entry must be an object"));
+                }
+                let key = vm.get_property_host(&entry, &PKey::String("0".into()))?;
+                let value = vm.get_property_host(&entry, &PKey::String("1".into()))?;
+                let property_key = vm.to_property_key(&key)?;
+                if !vm.create_data_property_host(&result, property_key, value)? {
+                  return Err(vm.throw_type_error("Cannot create entry property"));
+                }
+                Ok(())
+              })();
+              if let Err(error) = completion {
+                // IteratorClose with a throw completion preserves the original error.
+                let _ = vm.close_iterator_in_fork(&iterator);
+                return Err(error);
+              }
             }
             Ok(result)
           }),
           function_prototype,
         );
         set_builtin_length(&builtin, 1.0);
+        set_builtin_name(&builtin, "fromEntries");
         builtin
       }),
     );

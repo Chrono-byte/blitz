@@ -14,6 +14,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 mod arguments;
+pub(in crate::vm) mod callbacks;
 mod generators;
 
 impl Vm {
@@ -733,7 +734,7 @@ impl Vm {
             &[target, this_arg_owned.clone(), arguments],
           )
         }
-        Value::Builtin(f) => {
+        Value::Builtin(f) | Value::BuiltinObject(f, _) => {
           let mut call_args: Vec<Value> = Vec::with_capacity(args.len() + 1);
           call_args.push(this_arg_owned.clone());
           call_args.extend_from_slice(args);
@@ -777,55 +778,12 @@ impl Vm {
           }
           Ok(result)
         }
-        Value::BuiltinObject(f, _props) => {
-          let mut call_args: Vec<Value> = Vec::with_capacity(args.len() + 1);
-          call_args.push(this_arg_owned.clone());
-          call_args.extend_from_slice(args);
-          let control_flow_epoch = self.execution.control_flow_epoch;
-          let prev_this = std::mem::replace(&mut self.execution.active.this_value, this_arg_owned);
-          let prev_builtin_this =
-            std::mem::replace(&mut self.execution.builtin_this_arg_prepended, true);
-          let prev_closure_env = self.execution.active.closure_env.clone();
-          let prev_slots = self.execution.active.slots.clone();
-          let prev_lexical_env = Rc::clone(&self.execution.active.lexical_env);
-          let previous_realm = self.enter_function_realm(callee);
-          let result = self.invoke_builtin(f, &call_args);
-          self.leave_function_realm(previous_realm);
-          self.execution.builtin_this_arg_prepended = prev_builtin_this;
-          if self.execution.control_flow_epoch == control_flow_epoch {
-            self.execution.active.this_value = prev_this;
-            self.execution.active.closure_env = prev_closure_env;
-            self.execution.active.slots = prev_slots;
-            self.execution.active.lexical_env = prev_lexical_env;
-          }
-          let result = result?;
-          let result_root_base = self.memory.temporary.len();
-          self.memory.temporary.push(result.clone());
-          let post_call = (|| {
-            if self.execution.interpreter_depth == 0 {
-              self.run_microtasks_if_needed()?;
-            }
-            Ok::<(), RuntimeError>(())
-          })();
-          self.memory.temporary.truncate(result_root_base);
-          post_call?;
-          if matches!(
-            result,
-            Value::Object(_)
-              | Value::Array(..)
-              | Value::Closure { .. }
-              | Value::BuiltinObject(_, _)
-              | Value::Promise(..)
-          ) {
-            self.construction.recent_return_value = Some(result.clone());
-          } else {
-            self.construction.recent_return_value = None;
-          }
-          Ok(result)
-        }
-        Value::Closure { proto, .. } => {
+        Value::Closure { proto, env, .. } => {
           if proto.is_class_constructor && self.construction.new_target.is_none() {
             return Err(self.throw_class_constructor_call_error(proto));
+          }
+          if let Some(result) = self.try_leaf_callback(proto, env, args, false)? {
+            return Ok(result);
           }
           let call_args = self.prepare_call_args(args.to_vec(), proto)?;
           let closure_env = match callee {
@@ -918,11 +876,11 @@ impl Vm {
     self.execution.active.pc = 0;
     self.execution.active.active_function = Some(callee.clone());
     self.execution.active.closure_env = Some(closure_env.clone());
-    self.execution.active.slots = Some(SlotMetadata {
+    self.execution.active.slots = Some(Rc::new(SlotMetadata {
       names: proto.slot_names.clone(),
       immutable: proto.slot_immutable.clone(),
       sloppy_immutable_silent: proto.slot_sloppy_immutable_silent.clone(),
-    });
+    }));
     self.execution.active.yield_star = None;
     self.execution.active.this_value = if proto.is_derived_constructor {
       Value::Uninitialized

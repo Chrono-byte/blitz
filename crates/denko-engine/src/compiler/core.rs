@@ -549,15 +549,6 @@ impl Compiler {
       .map_err(|_| CompilerError::from(format!("Too many constants (max 65535, got {index})")))
   }
 
-  /// Safely converts a constant index (usize) to u8, checking that it doesn't exceed 255.
-  pub(crate) fn constant_index_to_u8(
-    &self,
-    idx: usize,
-  ) -> Result<u8, CompilerError> {
-    u8::try_from(idx)
-      .map_err(|_| CompilerError::from(format!("Too many constants (max 255, got {})", idx)))
-  }
-
   /// Safely converts a global index (usize) to u16, checking that it doesn't exceed 65535.
   pub(crate) fn global_index_to_u16(
     &self,

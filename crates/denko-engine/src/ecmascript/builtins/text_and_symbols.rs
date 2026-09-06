@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 //! Text and symbol builtin functions and prototype methods
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -16,6 +17,17 @@ use crate::runtime_utils::{
 };
 use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value};
 use crate::vm::Vm;
+
+// Borrow primitive strings while retaining observable coercion for other values.
+fn string_argument<'a>(
+  vm: &mut Vm,
+  value: &'a Value,
+) -> Result<Cow<'a, JsString>, crate::errors::RuntimeError> {
+  match value {
+    Value::String(string) => Ok(Cow::Borrowed(string)),
+    _ => vm.to_string(value).map(Cow::Owned),
+  }
+}
 
 thread_local! {
   /// Agent-wide symbol registry used by `Symbol.for` and `Symbol.keyFor`.
@@ -789,13 +801,10 @@ pub(crate) fn install_string_boolean_symbol_builtins(
       let undefined = Value::Undefined;
       let receiver = args.first().unwrap_or(&undefined);
       require_object_coercible(vm, receiver)?;
-      let haystack = vm.to_string(receiver)?;
+      let haystack = string_argument(vm, receiver)?;
       let needle_undefined = Value::Undefined;
       let needle_value = args.get(1).unwrap_or(&needle_undefined);
-      let needle = match needle_value {
-        Value::String(s) => s.clone(),
-        _ => vm.to_string(needle_value)?,
-      };
+      let needle = string_argument(vm, needle_value)?;
       let length = haystack.len();
       let start = if let Some(pos) = args.get(2) {
         let n = vm.to_number_value(pos)?;
@@ -817,6 +826,11 @@ pub(crate) fn install_string_boolean_symbol_builtins(
     }),
     function_proto_map,
   );
+  if let Value::BuiltinObject(_, properties) = &string_index_of {
+    properties
+      .borrow_mut()
+      .set_internal_slot("[[DenkoPureStringOperation]]", Value::Bool(true));
+  }
   set_builtin_name(&string_index_of, "indexOf");
   set_builtin_length(&string_index_of, 1.0);
   string_proto_map.borrow_mut().properties.insert(
@@ -1306,7 +1320,7 @@ pub(crate) fn install_string_boolean_symbol_builtins(
       let undefined = Value::Undefined;
       let receiver = args.first().unwrap_or(&undefined);
       require_object_coercible(vm, receiver)?;
-      let s = vm.to_string(receiver)?;
+      let s = string_argument(vm, receiver)?;
       let pos = match args.get(1) {
         Some(v) => vm.to_number_value(v)?,
         None => 0.0,
@@ -1325,6 +1339,11 @@ pub(crate) fn install_string_boolean_symbol_builtins(
     }),
     function_proto_map,
   );
+  if let Value::BuiltinObject(_, properties) = &string_char_code_at {
+    properties
+      .borrow_mut()
+      .set_internal_slot("[[DenkoPureStringOperation]]", Value::Bool(true));
+  }
   set_builtin_name(&string_char_code_at, "charCodeAt");
   set_builtin_length(&string_char_code_at, 1.0);
   string_proto_map.borrow_mut().properties.insert(
@@ -1372,7 +1391,7 @@ pub(crate) fn install_string_boolean_symbol_builtins(
       let undefined = Value::Undefined;
       let receiver = args.first().unwrap_or(&undefined);
       require_object_coercible(vm, receiver)?;
-      let s = vm.to_string(receiver)?;
+      let s = string_argument(vm, receiver)?;
       let len = s.len().to_isize().unwrap_or(isize::MAX);
       let to_int = |vm: &mut Vm, v: &Value| -> Result<isize, crate::errors::RuntimeError> {
         let n = vm.to_number_value(v)?;
@@ -1418,6 +1437,11 @@ pub(crate) fn install_string_boolean_symbol_builtins(
     }),
     function_proto_map,
   );
+  if let Value::BuiltinObject(_, properties) = &string_slice {
+    properties
+      .borrow_mut()
+      .set_internal_slot("[[DenkoPureStringOperation]]", Value::Bool(true));
+  }
   set_builtin_name(&string_slice, "slice");
   set_builtin_length(&string_slice, 2.0);
   string_proto_map.borrow_mut().properties.insert(

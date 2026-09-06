@@ -22,6 +22,8 @@ pub mod numbers;
 pub mod properties;
 /// ShadowRealm implementation.
 pub mod shadowrealm;
+/// Stable ordering of captured values with abrupt comparator completion.
+pub(crate) mod sorting;
 /// URI encoding/decoding functions.
 pub mod uri;
 

@@ -6,8 +6,10 @@
 
 use std::cell::Cell;
 use std::cell::RefCell;
-use std::collections::HashSet;
 use std::rc::{Rc, Weak};
+
+// Collector sets contain VM-assigned identities, never JavaScript property keys.
+use rustc_hash::FxHashSet;
 
 use crate::binding::BindingCell;
 use crate::value::{
@@ -110,7 +112,7 @@ thread_local! {
 /// Take registries that acquired unreachable targets during the preceding collection.
 pub(crate) fn take_pending_finalization_cleanups() -> Vec<Rc<RefCell<ObjectData>>> {
   PENDING_FINALIZATION_CLEANUPS.with(|pending| {
-    let mut seen = HashSet::new();
+    let mut seen = FxHashSet::default();
     pending
       .borrow_mut()
       .drain(..)
@@ -304,11 +306,11 @@ pub fn collect_with_env_roots(
       let clear_envs_aggressively = false;
 
       {
-        let mut marked_objects: HashSet<usize> = HashSet::new();
-        let mut marked_arrays: HashSet<usize> = HashSet::new();
-        let mut marked_proxies: HashSet<usize> = HashSet::new();
-        let mut marked_envs: HashSet<EnvironmentIdentity> = HashSet::new();
-        let mut marked_promises: HashSet<usize> = HashSet::new();
+        let mut marked_objects: FxHashSet<usize> = FxHashSet::default();
+        let mut marked_arrays: FxHashSet<usize> = FxHashSet::default();
+        let mut marked_proxies: FxHashSet<usize> = FxHashSet::default();
+        let mut marked_envs: FxHashSet<EnvironmentIdentity> = FxHashSet::default();
+        let mut marked_promises: FxHashSet<usize> = FxHashSet::default();
 
         for root in roots {
           mark_value(
@@ -467,11 +469,11 @@ pub fn collect_with_env_roots(
 #[allow(clippy::too_many_lines)]
 fn mark_value(
   value: &Value,
-  marked_objects: &mut HashSet<usize>,
-  marked_arrays: &mut HashSet<usize>,
-  marked_proxies: &mut HashSet<usize>,
-  marked_envs: &mut HashSet<EnvironmentIdentity>,
-  marked_promises: &mut HashSet<usize>,
+  marked_objects: &mut FxHashSet<usize>,
+  marked_arrays: &mut FxHashSet<usize>,
+  marked_proxies: &mut FxHashSet<usize>,
+  marked_envs: &mut FxHashSet<EnvironmentIdentity>,
+  marked_promises: &mut FxHashSet<usize>,
 ) {
   match value {
     Value::Object(obj) => mark_object(
@@ -485,15 +487,18 @@ fn mark_value(
     Value::Array(arr, props) => {
       let arr_ptr = Rc::as_ptr(arr) as usize;
       if marked_arrays.insert(arr_ptr) {
-        for elem in arr.borrow().iter().flatten() {
-          mark_value(
-            elem,
-            marked_objects,
-            marked_arrays,
-            marked_proxies,
-            marked_envs,
-            marked_promises,
-          );
+        let elements = arr.borrow();
+        if !elements.is_packed_numeric() {
+          for elem in elements.iter().flatten() {
+            mark_value(
+              elem,
+              marked_objects,
+              marked_arrays,
+              marked_proxies,
+              marked_envs,
+              marked_promises,
+            );
+          }
         }
       }
       mark_object(
@@ -643,11 +648,11 @@ fn mark_value(
 
 fn mark_object(
   obj: &Rc<RefCell<ObjectData>>,
-  marked_objects: &mut HashSet<usize>,
-  marked_arrays: &mut HashSet<usize>,
-  marked_proxies: &mut HashSet<usize>,
-  marked_envs: &mut HashSet<EnvironmentIdentity>,
-  marked_promises: &mut HashSet<usize>,
+  marked_objects: &mut FxHashSet<usize>,
+  marked_arrays: &mut FxHashSet<usize>,
+  marked_proxies: &mut FxHashSet<usize>,
+  marked_envs: &mut FxHashSet<EnvironmentIdentity>,
+  marked_promises: &mut FxHashSet<usize>,
 ) {
   let ptr = Rc::as_ptr(obj) as usize;
   if !marked_objects.insert(ptr) {
@@ -745,10 +750,10 @@ fn mark_object(
 
 fn weak_key_is_marked(
   key: &WeakKey,
-  marked_objects: &HashSet<usize>,
-  marked_arrays: &HashSet<usize>,
-  marked_proxies: &HashSet<usize>,
-  marked_promises: &HashSet<usize>,
+  marked_objects: &FxHashSet<usize>,
+  marked_arrays: &FxHashSet<usize>,
+  marked_proxies: &FxHashSet<usize>,
+  marked_promises: &FxHashSet<usize>,
 ) -> bool {
   match key {
     WeakKey::Object(value) | WeakKey::Closure(value) | WeakKey::BuiltinObject(value) => value
@@ -770,10 +775,10 @@ fn weak_key_is_marked(
 
 fn weak_value_is_marked(
   value: &WeakValue,
-  marked_objects: &HashSet<usize>,
-  marked_arrays: &HashSet<usize>,
-  marked_proxies: &HashSet<usize>,
-  marked_promises: &HashSet<usize>,
+  marked_objects: &FxHashSet<usize>,
+  marked_arrays: &FxHashSet<usize>,
+  marked_proxies: &FxHashSet<usize>,
+  marked_promises: &FxHashSet<usize>,
 ) -> bool {
   match value {
     WeakValue::Primitive(_) => false,
@@ -807,10 +812,10 @@ fn weak_value_is_marked(
 }
 
 fn process_weak_references(
-  marked_objects: &HashSet<usize>,
-  marked_arrays: &HashSet<usize>,
-  marked_proxies: &HashSet<usize>,
-  marked_promises: &HashSet<usize>,
+  marked_objects: &FxHashSet<usize>,
+  marked_arrays: &FxHashSet<usize>,
+  marked_proxies: &FxHashSet<usize>,
+  marked_promises: &FxHashSet<usize>,
 ) {
   let registries = HEAP.with(|heap| {
     heap
@@ -867,11 +872,11 @@ fn process_weak_references(
 }
 
 fn mark_ephemeron_values(
-  marked_objects: &mut HashSet<usize>,
-  marked_arrays: &mut HashSet<usize>,
-  marked_proxies: &mut HashSet<usize>,
-  marked_envs: &mut HashSet<EnvironmentIdentity>,
-  marked_promises: &mut HashSet<usize>,
+  marked_objects: &mut FxHashSet<usize>,
+  marked_arrays: &mut FxHashSet<usize>,
+  marked_proxies: &mut FxHashSet<usize>,
+  marked_envs: &mut FxHashSet<EnvironmentIdentity>,
+  marked_promises: &mut FxHashSet<usize>,
 ) {
   loop {
     let marked_before = marked_objects.len()
@@ -925,10 +930,10 @@ fn mark_ephemeron_values(
 }
 
 fn prune_dead_ephemerons(
-  marked_objects: &HashSet<usize>,
-  marked_arrays: &HashSet<usize>,
-  marked_proxies: &HashSet<usize>,
-  marked_promises: &HashSet<usize>,
+  marked_objects: &FxHashSet<usize>,
+  marked_arrays: &FxHashSet<usize>,
+  marked_proxies: &FxHashSet<usize>,
+  marked_promises: &FxHashSet<usize>,
 ) {
   HEAP.with(|heap| {
     for object in heap
@@ -969,11 +974,11 @@ fn prune_dead_ephemerons(
 
 fn mark_env(
   env: &crate::closure_environment::ClosureEnvironment,
-  marked_objects: &mut HashSet<usize>,
-  marked_arrays: &mut HashSet<usize>,
-  marked_proxies: &mut HashSet<usize>,
-  marked_envs: &mut HashSet<EnvironmentIdentity>,
-  marked_promises: &mut HashSet<usize>,
+  marked_objects: &mut FxHashSet<usize>,
+  marked_arrays: &mut FxHashSet<usize>,
+  marked_proxies: &mut FxHashSet<usize>,
+  marked_envs: &mut FxHashSet<EnvironmentIdentity>,
+  marked_promises: &mut FxHashSet<usize>,
 ) {
   let ptr = env.identity();
   if !marked_envs.insert(EnvironmentIdentity::Closure(ptr)) {
@@ -998,21 +1003,30 @@ fn mark_env(
 
 fn mark_environment_record(
   env: &Rc<RefCell<crate::environment::EnvironmentRecord>>,
-  marked_objects: &mut HashSet<usize>,
-  marked_arrays: &mut HashSet<usize>,
-  marked_proxies: &mut HashSet<usize>,
-  marked_envs: &mut HashSet<EnvironmentIdentity>,
-  marked_promises: &mut HashSet<usize>,
+  marked_objects: &mut FxHashSet<usize>,
+  marked_arrays: &mut FxHashSet<usize>,
+  marked_proxies: &mut FxHashSet<usize>,
+  marked_envs: &mut FxHashSet<EnvironmentIdentity>,
+  marked_promises: &mut FxHashSet<usize>,
 ) {
   let ptr = Rc::as_ptr(env) as usize;
   if !marked_envs.insert(EnvironmentIdentity::Lexical(ptr)) {
     return;
   }
-  let mut values = Vec::new();
-  env.borrow().collect_binding_values(&mut values);
-  for value in values {
+  let env = env.borrow();
+  for value in env.own_binding_values() {
     mark_value(
       &value,
+      marked_objects,
+      marked_arrays,
+      marked_proxies,
+      marked_envs,
+      marked_promises,
+    );
+  }
+  if let Some(outer) = env.outer() {
+    mark_environment_record(
+      &outer,
       marked_objects,
       marked_arrays,
       marked_proxies,
@@ -1076,6 +1090,44 @@ mod tests {
     let env = crate::closure_environment::ClosureEnvironment::new(Vec::new());
     register_closure_environment(&env);
     env
+  }
+
+  #[test]
+  fn marking_shared_outer_scope_records_each_environment_once() {
+    use crate::environment::EnvironmentRecord;
+
+    let shared_value = Rc::new(RefCell::new(ObjectData::new()));
+    let outer = Rc::new(RefCell::new(EnvironmentRecord::new(None)));
+    outer.borrow_mut().create_mutable_binding(
+      "shared".to_string(),
+      BindingCell::new(Value::Object(Rc::clone(&shared_value))),
+      true,
+    );
+    let left = Rc::new(RefCell::new(EnvironmentRecord::new(Some(Rc::clone(
+      &outer,
+    )))));
+    let right = Rc::new(RefCell::new(EnvironmentRecord::new(Some(Rc::clone(
+      &outer,
+    )))));
+    let mut objects = FxHashSet::default();
+    let mut arrays = FxHashSet::default();
+    let mut proxies = FxHashSet::default();
+    let mut environments = FxHashSet::default();
+    let mut promises = FxHashSet::default();
+    for root in [&left, &right] {
+      mark_environment_record(
+        root,
+        &mut objects,
+        &mut arrays,
+        &mut proxies,
+        &mut environments,
+        &mut promises,
+      );
+    }
+
+    assert!(objects.contains(&(Rc::as_ptr(&shared_value) as usize)));
+    assert!(environments.contains(&EnvironmentIdentity::Lexical(Rc::as_ptr(&outer) as usize)));
+    assert_eq!(environments.len(), 3);
   }
 
   fn closure_properties(value: &Value) -> Option<Weak<RefCell<ObjectData>>> {

@@ -99,13 +99,10 @@ pub(super) type Microtask = Box<dyn FnMut(&mut Vm) -> Result<(), crate::errors::
 pub(super) type DynamicImportJob =
   Box<dyn FnMut(&mut Vm) -> Result<(), crate::errors::RuntimeError>>;
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub(super) struct PropertyGetIcEntry {
-  pub(super) epoch: u64,
-  pub(super) receiver_identity: usize,
-  pub(super) receiver_generation: u64,
-  pub(super) key: crate::value::PropertyKey,
-  pub(super) value: Value,
+  /// A validated position, never a cached property value or receiver identity.
+  pub(super) property_index: usize,
 }
 
 pub(super) type UnhandledRejectionHookInner = dyn FnMut(&mut Vm, Value, Value);
@@ -180,7 +177,7 @@ pub(crate) struct ExecutionContext {
   pub(crate) locals: Vec<BindingCell>,
   pub(crate) this_value: Value,
   pub(crate) closure_env: Option<crate::closure_environment::ClosureEnvironment>,
-  pub(crate) slots: Option<SlotMetadata>,
+  pub(crate) slots: Option<Rc<SlotMetadata>>,
   pub(crate) lexical_env: Rc<RefCell<EnvironmentRecord>>,
   pub(crate) variable_env: Rc<RefCell<EnvironmentRecord>>,
   pub(crate) yield_star: Option<YieldStarState>,
@@ -284,7 +281,21 @@ pub(super) struct ModuleReadCache {
   pub(super) cells: RefCell<Vec<Option<BindingCell>>>,
 }
 
+/// Retaining the owner prevents its address from being reused as a cache key.
+/// Only compiled metadata is shared; each closure owns its properties and cells.
+pub(super) struct CachedClosurePrototype {
+  pub(super) _owner: Arc<Chunk>,
+  pub(super) prototype: Rc<Function>,
+  pub(super) properties:
+    indexmap::IndexMap<crate::value::PropertyKey, crate::value::PropertyDescriptor>,
+  pub(super) constructor_properties:
+    indexmap::IndexMap<crate::value::PropertyKey, crate::value::PropertyDescriptor>,
+}
+
 pub(super) struct CacheState {
+  pub(super) closure_prototypes: HashMap<(usize, usize), CachedClosurePrototype>,
+  pub(super) callbacks:
+    HashMap<(usize, usize), crate::vm::runtime::calls::callbacks::CachedCallback>,
   pub(super) module_reads: HashMap<usize, Rc<ModuleReadCache>>,
   pub(super) active_module_reads: Option<Rc<ModuleReadCache>>,
   pub(super) property_get: HashMap<usize, Rc<PropertyGetCache>>,

@@ -13,6 +13,9 @@ use crate::runtime_utils::{set_builtin_length, set_builtin_name, syntax_error, t
 use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value};
 use crate::{RuntimeError, Vm};
 
+#[cfg(test)]
+mod plain_record_tests;
+
 fn value_identity(value: &Value) -> Option<usize> {
   match value {
     Value::Object(object) => Some(Rc::as_ptr(object) as usize),
@@ -216,6 +219,14 @@ fn parse_value(
 
 fn quote_json_string(value: &js_string::JsString) -> String {
   let mut output = String::with_capacity(value.len() + 2);
+  append_quoted_json_string(&mut output, value);
+  output
+}
+
+fn append_quoted_json_string(
+  output: &mut String,
+  value: &js_string::JsString,
+) {
   output.push('"');
   for unit in value.code_units() {
     match unit {
@@ -233,7 +244,109 @@ fn quote_json_string(value: &js_string::JsString) -> String {
     }
   }
   output.push('"');
-  output
+}
+
+/// Serialize shallow ordinary records without temporary holders, descriptors,
+/// or per-property output strings. Decline everything that can execute JS.
+pub(crate) fn stringify_plain_record(value: &Value) -> Option<String> {
+  let Value::Object(object) = value else {
+    return None;
+  };
+  let to_json = PropertyKey::String("toJSON".into());
+  let mut prototype = value.clone();
+  let mut plain_chain = false;
+  for _ in 0..64 {
+    match prototype {
+      Value::Null => {
+        plain_chain = true;
+        break;
+      }
+      Value::Object(ref data) => {
+        let next = {
+          let data = data.borrow();
+          if !data.internal_slots.is_empty()
+            || data.module_namespace_exports.is_some()
+            || data.properties.contains_key(&to_json)
+          {
+            return None;
+          }
+          data.get_prototype()
+        };
+        prototype = next;
+      }
+      _ => return None,
+    }
+  }
+  if !plain_chain {
+    return None;
+  }
+  let object = object.borrow();
+  if object.properties.len() > 256
+    || object
+      .properties
+      .contains_key(&PropertyKey::String("[[PrimitiveValue]]".into()))
+  {
+    return None;
+  }
+  let mut properties = Vec::with_capacity(object.properties.len());
+  for (key, descriptor) in &object.properties {
+    let PropertyKey::String(key) = key else {
+      continue;
+    };
+    match descriptor {
+      PropertyDescriptor::Data {
+        enumerable: false, ..
+      }
+      | PropertyDescriptor::Accessor {
+        enumerable: false, ..
+      } => continue,
+      PropertyDescriptor::Data { value, .. } => {
+        if !matches!(
+          value,
+          Value::Null
+            | Value::Bool(_)
+            | Value::Number(_)
+            | Value::String(_)
+            | Value::Undefined
+            | Value::Symbol(_, _)
+        ) {
+          return None;
+        }
+        let index = key.parse::<u32>().ok().filter(|index| {
+          *index != u32::MAX
+            && crate::runtime_utils::decimal_u64_eq_str(u64::from(*index), key.as_str_lossy())
+        });
+        properties.push((index, key, value));
+      }
+      _ => return None,
+    }
+  }
+  // Stable sorting preserves insertion order for the non-index string keys.
+  properties.sort_by_key(|(index, _, _)| index.map_or(u64::MAX, u64::from));
+  let mut output = String::with_capacity(properties.len() * 12 + 2);
+  output.push('{');
+  let mut first = true;
+  for (_, key, value) in properties {
+    if matches!(value, Value::Undefined | Value::Symbol(_, _)) {
+      continue;
+    }
+    if !first {
+      output.push(',');
+    }
+    first = false;
+    append_quoted_json_string(&mut output, key);
+    output.push(':');
+    match value {
+      Value::Null => output.push_str("null"),
+      Value::Bool(value) => output.push_str(if *value { "true" } else { "false" }),
+      Value::Number(value) if value.is_finite() => output.push_str(&js_number_to_string(*value)),
+      Value::Number(_) => output.push_str("null"),
+      Value::String(value) => append_quoted_json_string(&mut output, value),
+      _ => unreachable!("validated primitive JSON property"),
+    }
+  }
+  output.push('}');
+  Some(output)
 }
 
 fn boxed_primitive(value: &Value) -> Option<Value> {
@@ -534,6 +647,12 @@ pub(crate) fn create_json_object(
         .get(offset + 2)
         .cloned()
         .unwrap_or(Value::Undefined);
+      if matches!(replacer, Value::Undefined)
+        && matches!(space, Value::Undefined)
+        && let Some(output) = stringify_plain_record(&value)
+      {
+        return Ok(Value::String(output.into()));
+      }
       let property_list = replacer_property_list(vm, &replacer)?;
       let mut state = StringifyState {
         replacer: Vm::is_callable_value(&replacer).then_some(replacer),
@@ -557,6 +676,11 @@ pub(crate) fn create_json_object(
     function_prototype,
   );
   set_builtin_name(&stringify, "stringify");
+  if let Value::BuiltinObject(_, properties) = &stringify {
+    properties
+      .borrow_mut()
+      .set_internal_slot("[[DenkoPlainJSONSerializer]]", Value::Bool(true));
+  }
   set_builtin_length(&stringify, 3.0);
   object.borrow_mut().properties.insert(
     PropertyKey::String("stringify".into()),

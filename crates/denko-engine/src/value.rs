@@ -59,7 +59,7 @@
 
 use indexmap::IndexMap;
 use js_string::JsString;
-use std::cell::RefCell;
+use std::cell::{Cell, OnceCell, RefCell};
 use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
 use std::rc::Weak;
@@ -284,53 +284,362 @@ pub enum PropertyDescriptor {
 /// This wrapper keeps the storage layout centralized so the runtime can evolve
 /// beyond a plain `Vec<Option<Value>>` without changing every array consumer.
 #[derive(Clone, Debug)]
+enum ArrayStorage {
+  Bytes {
+    bytes: Vec<u8>,
+    values: OnceCell<Vec<Option<Value>>>,
+  },
+  Values(Vec<Option<Value>>),
+  Numbers {
+    numbers: Vec<f64>,
+    // Compatibility for callers requiring borrowed Values. Numeric reads and GC
+    // do not populate this view. Every mutation discards or takes the view.
+    values: OnceCell<Vec<Option<Value>>>,
+  },
+}
+
+#[derive(Clone, Debug)]
 pub struct ArrayData {
-  elements: Vec<Option<Value>>,
+  storage: ArrayStorage,
+  dense_numeric: Cell<Option<bool>>,
 }
 
 impl ArrayData {
   /// Create backing storage from dense elements.
   pub fn new(elements: Vec<Option<Value>>) -> Self {
-    Self { elements }
+    let dense_numeric = Cell::new(elements.is_empty().then_some(true));
+    Self {
+      storage: ArrayStorage::Values(elements),
+      dense_numeric,
+    }
   }
 
-  /// Return a cloned copy of the dense elements.
-  pub fn clone_elements(&self) -> Vec<Option<Value>> {
-    self.elements.clone()
+  pub(crate) fn from_bytes(bytes: Vec<u8>) -> Self {
+    Self {
+      storage: ArrayStorage::Bytes {
+        bytes,
+        values: OnceCell::new(),
+      },
+      dense_numeric: Cell::new(Some(true)),
+    }
   }
 
-  /// Remove and return every dense element, leaving an empty backing store.
-  pub fn take_elements(&mut self) -> Vec<Option<Value>> {
-    std::mem::take(&mut self.elements)
+  pub(crate) fn packed_bytes(&self) -> Option<&[u8]> {
+    match &self.storage {
+      ArrayStorage::Bytes { bytes, .. } => Some(bytes),
+      _ => None,
+    }
   }
 
-  /// Return the array contents as packed numbers if every element is a
-  /// present `Number` value.
-  pub fn dense_numbers(&self) -> Option<Vec<f64>> {
-    let mut out = Vec::with_capacity(self.elements.len());
-    for slot in &self.elements {
-      match slot {
-        Some(Value::Number(n)) => out.push(*n),
-        _ => return None,
+  pub(crate) fn packed_bytes_mut(&mut self) -> Option<&mut [u8]> {
+    match &mut self.storage {
+      ArrayStorage::Bytes { bytes, values } => {
+        values.take();
+        Some(bytes)
+      }
+      _ => None,
+    }
+  }
+
+  pub(crate) fn read_bytes(
+    &self,
+    start: usize,
+    output: &mut [u8],
+  ) -> bool {
+    let Some(end) = start
+      .checked_add(output.len())
+      .filter(|end| *end <= self.len())
+    else {
+      return false;
+    };
+    if let Some(bytes) = self.packed_bytes() {
+      output.copy_from_slice(&bytes[start..end]);
+      return true;
+    }
+    for (offset, slot) in output.iter_mut().enumerate() {
+      let Some(number) = self.numeric_element(start + offset) else {
+        return false;
+      };
+      if !number.is_finite() || !(0.0..=255.0).contains(&number) {
+        return false;
+      }
+      *slot = number as u8;
+    }
+    true
+  }
+
+  pub(crate) fn write_bytes(
+    &mut self,
+    start: usize,
+    input: &[u8],
+  ) -> bool {
+    let Some(end) = start
+      .checked_add(input.len())
+      .filter(|end| *end <= self.len())
+    else {
+      return false;
+    };
+    if let Some(bytes) = self.packed_bytes_mut() {
+      bytes[start..end].copy_from_slice(input);
+      return true;
+    }
+    match &mut self.storage {
+      ArrayStorage::Numbers { numbers, values } => {
+        values.take();
+        for (slot, byte) in numbers[start..end].iter_mut().zip(input) {
+          *slot = f64::from(*byte);
+        }
+      }
+      ArrayStorage::Values(values) => {
+        for (slot, byte) in values[start..end].iter_mut().zip(input) {
+          *slot = Some(Value::Number(f64::from(*byte)));
+        }
+        self.dense_numeric.set(None);
+      }
+      ArrayStorage::Bytes { .. } => unreachable!("packed branch handled"),
+    }
+    true
+  }
+
+  /// Number of stored slots, without materializing boxed numeric values.
+  pub fn len(&self) -> usize {
+    match &self.storage {
+      ArrayStorage::Bytes { bytes, .. } => bytes.len(),
+      ArrayStorage::Values(values) => values.len(),
+      ArrayStorage::Numbers { numbers, .. } => numbers.len(),
+    }
+  }
+
+  pub fn is_empty(&self) -> bool {
+    self.len() == 0
+  }
+
+  pub(crate) fn is_packed_numeric(&self) -> bool {
+    matches!(
+      self.storage,
+      ArrayStorage::Numbers { .. } | ArrayStorage::Bytes { .. }
+    )
+  }
+
+  /// Read an element without populating the compatibility view.
+  pub(crate) fn element_cloned(
+    &self,
+    index: usize,
+  ) -> Option<Option<Value>> {
+    match &self.storage {
+      ArrayStorage::Bytes { bytes, .. } => bytes
+        .get(index)
+        .map(|byte| Some(Value::Number(f64::from(*byte)))),
+      ArrayStorage::Values(values) => values.get(index).cloned(),
+      ArrayStorage::Numbers { numbers, .. } => numbers
+        .get(index)
+        .map(|n| Some(Value::Number(*n))),
+    }
+  }
+
+  #[inline]
+  pub(crate) fn numeric_element(
+    &self,
+    index: usize,
+  ) -> Option<f64> {
+    match &self.storage {
+      ArrayStorage::Bytes { bytes, .. } => bytes.get(index).map(|byte| f64::from(*byte)),
+      ArrayStorage::Values(values) => match values.get(index) {
+        Some(Some(Value::Number(n))) => Some(*n),
+        _ => None,
+      },
+      ArrayStorage::Numbers { numbers, .. } => numbers.get(index).copied(),
+    }
+  }
+
+  /// Whether every dense slot holds a number. Cache the scan until storage changes.
+  pub(crate) fn is_dense_numeric(&self) -> bool {
+    if let Some(numeric) = self.dense_numeric.get() {
+      return numeric;
+    }
+    let numeric = match &self.storage {
+      ArrayStorage::Numbers { .. } | ArrayStorage::Bytes { .. } => true,
+      ArrayStorage::Values(values) => values
+        .iter()
+        .all(|slot| matches!(slot, Some(Value::Number(_)))),
+    };
+    self.dense_numeric.set(Some(numeric));
+    numeric
+  }
+
+  pub fn reserve(
+    &mut self,
+    additional: usize,
+  ) {
+    match &mut self.storage {
+      ArrayStorage::Bytes { bytes, .. } => bytes.reserve(additional),
+      ArrayStorage::Values(values) => values.reserve(additional),
+      ArrayStorage::Numbers { numbers, .. } => numbers.reserve(additional),
+    }
+  }
+
+  pub fn push(
+    &mut self,
+    element: Option<Value>,
+  ) {
+    if let (ArrayStorage::Numbers { numbers, values }, Some(Value::Number(n))) =
+      (&mut self.storage, &element)
+    {
+      values.take();
+      numbers.push(*n);
+      return;
+    }
+    let numeric = matches!(element, Some(Value::Number(_)));
+    let known = self.dense_numeric.get();
+    self.deref_mut().push(element);
+    self
+      .dense_numeric
+      .set(if numeric { known } else { Some(false) });
+  }
+
+  pub fn clear(&mut self) {
+    match &mut self.storage {
+      ArrayStorage::Bytes { bytes, values } => {
+        bytes.clear();
+        values.take();
+      }
+      ArrayStorage::Values(values) => values.clear(),
+      ArrayStorage::Numbers { numbers, values } => {
+        numbers.clear();
+        values.take();
       }
     }
-    Some(out)
+    self.dense_numeric.set(Some(true));
   }
 
-  /// Replace the dense contents with packed numbers.
+  pub fn clone_elements(&self) -> Vec<Option<Value>> {
+    match &self.storage {
+      ArrayStorage::Bytes { bytes, .. } => bytes
+        .iter()
+        .map(|byte| Some(Value::Number(f64::from(*byte))))
+        .collect(),
+      ArrayStorage::Values(values) => values.clone(),
+      ArrayStorage::Numbers { numbers, .. } => numbers
+        .iter()
+        .map(|number| Some(Value::Number(*number)))
+        .collect(),
+    }
+  }
+
+  pub fn take_elements(&mut self) -> Vec<Option<Value>> {
+    let elements = std::mem::take(self.deref_mut());
+    self.dense_numeric.set(Some(true));
+    elements
+  }
+
+  pub fn dense_numbers(&self) -> Option<Vec<f64>> {
+    match &self.storage {
+      ArrayStorage::Bytes { bytes, .. } => Some(
+        bytes
+          .iter()
+          .map(|byte| f64::from(*byte))
+          .collect(),
+      ),
+      ArrayStorage::Numbers { numbers, .. } => Some(numbers.clone()),
+      ArrayStorage::Values(values) => values
+        .iter()
+        .map(|slot| match slot {
+          Some(Value::Number(n)) => Some(*n),
+          _ => None,
+        })
+        .collect(),
+    }
+  }
+
   pub fn write_dense_numbers(
     &mut self,
     numbers: &[f64],
   ) {
-    debug_assert_eq!(self.elements.len(), numbers.len());
-    self.elements.clear();
-    self.elements.reserve(numbers.len());
-    self.elements.extend(
-      numbers
-        .iter()
-        .copied()
-        .map(|n| Some(Value::Number(n))),
-    );
+    debug_assert_eq!(self.len(), numbers.len());
+    self.storage = ArrayStorage::Numbers {
+      numbers: numbers.to_vec(),
+      values: OnceCell::new(),
+    };
+    self.dense_numeric.set(Some(true));
+  }
+
+  pub(crate) fn reserve_numeric_result(
+    &mut self,
+    additional: usize,
+  ) {
+    if self.is_empty() {
+      self.storage = ArrayStorage::Numbers {
+        numbers: Vec::new(),
+        values: OnceCell::new(),
+      };
+      self.dense_numeric.set(Some(true));
+    }
+    self.reserve(additional);
+  }
+
+  /// Append a proven numeric batch, packing existing dense numbers once.
+  /// Mixed or holey storage retains its generic representation.
+  pub(crate) fn append_numeric_batch(
+    &mut self,
+    batch: &[f64],
+  ) {
+    if !self.is_packed_numeric() && self.is_dense_numeric() {
+      let numbers = self
+        .dense_numbers()
+        .expect("validated dense numbers");
+      self.storage = ArrayStorage::Numbers {
+        numbers,
+        values: OnceCell::new(),
+      };
+      self.dense_numeric.set(Some(true));
+    }
+    let known = self.dense_numeric.get();
+    self.write_numeric_batch(self.len(), batch);
+    self.dense_numeric.set(known);
+  }
+
+  /// Append/overwrite a mapped batch. Empty results adopt packed storage;
+  /// existing generic species results retain their not-yet-written slots.
+  pub(crate) fn write_numeric_batch(
+    &mut self,
+    start: usize,
+    batch: &[f64],
+  ) {
+    assert!(start <= self.len());
+    if matches!(self.storage, ArrayStorage::Bytes { .. }) {
+      let numbers = self
+        .dense_numbers()
+        .expect("byte values are numbers");
+      self.storage = ArrayStorage::Numbers {
+        numbers,
+        values: OnceCell::new(),
+      };
+    }
+    match &mut self.storage {
+      ArrayStorage::Bytes { .. } => unreachable!("converted byte storage"),
+      ArrayStorage::Numbers { numbers, values } => {
+        values.take();
+        let existing = batch.len().min(numbers.len() - start);
+        numbers[start..start + existing].copy_from_slice(&batch[..existing]);
+        numbers.extend_from_slice(&batch[existing..]);
+        self.dense_numeric.set(Some(true));
+      }
+      ArrayStorage::Values(values) => {
+        let existing = batch.len().min(values.len() - start);
+        for (slot, n) in values[start..start + existing]
+          .iter_mut()
+          .zip(batch)
+        {
+          *slot = Some(Value::Number(*n));
+        }
+        values.extend(
+          batch[existing..]
+            .iter()
+            .map(|n| Some(Value::Number(*n))),
+        );
+        self.dense_numeric.set(None);
+      }
+    }
   }
 
   /// Fill a dense numeric array range using vector-friendly chunked writes.
@@ -411,15 +720,50 @@ impl From<Vec<Option<Value>>> for ArrayData {
 
 impl Deref for ArrayData {
   type Target = Vec<Option<Value>>;
-
   fn deref(&self) -> &Self::Target {
-    &self.elements
+    match &self.storage {
+      ArrayStorage::Values(values) => values,
+      ArrayStorage::Numbers { numbers, values } => values.get_or_init(|| {
+        numbers
+          .iter()
+          .map(|n| Some(Value::Number(*n)))
+          .collect()
+      }),
+      ArrayStorage::Bytes { bytes, values } => values.get_or_init(|| {
+        bytes
+          .iter()
+          .map(|byte| Some(Value::Number(f64::from(*byte))))
+          .collect()
+      }),
+    }
   }
 }
 
 impl DerefMut for ArrayData {
   fn deref_mut(&mut self) -> &mut Self::Target {
-    &mut self.elements
+    self.dense_numeric.set(None);
+    let materialized = match &mut self.storage {
+      ArrayStorage::Numbers { numbers, values } => Some(values.take().unwrap_or_else(|| {
+        numbers
+          .iter()
+          .map(|n| Some(Value::Number(*n)))
+          .collect()
+      })),
+      ArrayStorage::Bytes { bytes, values } => Some(values.take().unwrap_or_else(|| {
+        bytes
+          .iter()
+          .map(|byte| Some(Value::Number(f64::from(*byte))))
+          .collect()
+      })),
+      ArrayStorage::Values(_) => None,
+    };
+    if let Some(values) = materialized {
+      self.storage = ArrayStorage::Values(values);
+    }
+    match &mut self.storage {
+      ArrayStorage::Values(values) => values,
+      _ => unreachable!("materialized storage"),
+    }
   }
 }
 
@@ -471,6 +815,9 @@ impl Uint8ArrayByteView {
     if !attached {
       return None;
     }
+    if self.byte_offset.checked_add(self.length)? > self.data.borrow().len() {
+      return None;
+    }
     let end = offset.checked_add(length)?;
     if end > self.length {
       return None;
@@ -504,17 +851,12 @@ impl Uint8ArrayByteView {
     index: usize,
   ) -> Option<u8> {
     let range = self.attached_range(index, 1)?;
+    let mut byte = [0];
     self
       .data
       .borrow()
-      .get(range.start)
-      .and_then(|slot| slot.as_ref())
-      .and_then(|value| match value {
-        Value::Number(number) if number.is_finite() && (0.0..=255.0).contains(number) => {
-          Some(*number as u8)
-        }
-        _ => None,
-      })
+      .read_bytes(range.start, &mut byte)
+      .then_some(byte[0])
   }
 
   /// Copy bytes from this view into an owned host buffer.
@@ -527,17 +869,7 @@ impl Uint8ArrayByteView {
     let Some(range) = self.attached_range(offset, output.len()) else {
       return false;
     };
-    let data = self.data.borrow();
-    for (destination, source) in output.iter_mut().zip(range) {
-      let Some(Value::Number(byte)) = data.get(source).and_then(|slot| slot.as_ref()) else {
-        return false;
-      };
-      if !byte.is_finite() || !(0.0..=255.0).contains(byte) {
-        return false;
-      }
-      *destination = *byte as u8;
-    }
-    true
+    self.data.borrow().read_bytes(range.start, output)
   }
 
   /// Write one byte into the view.
@@ -560,11 +892,10 @@ impl Uint8ArrayByteView {
     let Some(range) = self.attached_range(offset, bytes.len()) else {
       return false;
     };
-    let mut data = self.data.borrow_mut();
-    for (destination, byte) in range.zip(bytes.iter().copied()) {
-      data[destination] = Some(Value::Number(f64::from(byte)));
-    }
-    true
+    self
+      .data
+      .borrow_mut()
+      .write_bytes(range.start, bytes)
   }
 }
 
@@ -1426,8 +1757,8 @@ mod tests {
   use super::*;
 
   #[test]
-  fn value_layout_does_not_grow_with_short_strings() {
-    assert!(std::mem::size_of::<Value>() <= 64);
+  fn value_layout_stays_compact() {
+    assert!(std::mem::size_of::<Value>() <= 40);
   }
 
   #[test]
@@ -1459,6 +1790,189 @@ mod tests {
     let props = Rc::new(RefCell::new(ObjectData::new()));
     let value = Value::BuiltinObject(Rc::new(|_, _| Ok(Value::Undefined)), props);
     assert_eq!(format!("{}", value), "[Native Function]");
+  }
+
+  #[test]
+  fn packed_byte_storage_preserves_compatibility_and_bounds() {
+    let mut data = ArrayData::from_bytes(vec![1, 2, 3, 4]);
+    let mut bytes = [0; 2];
+    assert!(data.read_bytes(1, &mut bytes));
+    assert_eq!(bytes, [2, 3]);
+    assert!(data.write_bytes(1, &[255, 128]));
+    assert_eq!(data.element_cloned(1), Some(Some(Value::Number(255.0))));
+    assert!(!data.write_bytes(3, &[0, 0]));
+    assert_eq!(data.packed_bytes(), Some(&[1, 255, 128, 4][..]));
+    // Populate the borrowed Value view, then make a byte-native mutation.
+    assert_eq!(data.get(1), Some(&Some(Value::Number(255.0))));
+    assert!(data.write_bytes(1, &[8]));
+    assert_eq!(data.get(1), Some(&Some(Value::Number(8.0))));
+    data[0] = None;
+    assert!(data.packed_bytes().is_none());
+    assert!(!data.read_bytes(0, &mut bytes));
+    assert!(data.write_bytes(0, &[7]));
+    assert!(data.read_bytes(0, &mut bytes));
+    assert_eq!(bytes, [7, 8]);
+  }
+
+  #[test]
+  fn packed_array_reads_and_batches_preserve_storage_and_number_bits() {
+    let mut arr = ArrayData::new(Vec::new());
+    arr.reserve_numeric_result(4);
+    arr.write_numeric_batch(0, &[-0.0, f64::NAN, f64::INFINITY]);
+    assert!(arr.is_packed_numeric());
+    assert_eq!(arr.len(), 3);
+    assert_eq!(
+      arr.numeric_element(0).unwrap().to_bits(),
+      (-0.0_f64).to_bits()
+    );
+    assert!(matches!(arr.element_cloned(2), Some(Some(Value::Number(n))) if n.is_infinite()));
+    assert_eq!(arr.clone_elements().len(), 3);
+    let ArrayStorage::Numbers { values, .. } = &arr.storage else {
+      panic!("packed");
+    };
+    assert!(values.get().is_none());
+    // Borrowed compatibility reads may materialize; later packed writes discard it.
+    assert!(matches!(arr.first(), Some(Some(Value::Number(n))) if n.is_sign_negative()));
+    arr.write_numeric_batch(1, &[2.0, 3.0, 4.0]);
+    assert_eq!(arr.dense_numbers(), Some(vec![-0.0, 2.0, 3.0, 4.0]));
+    let ArrayStorage::Numbers { values, .. } = &arr.storage else {
+      panic!("packed");
+    };
+    assert!(values.get().is_none());
+    arr.push(Some(Value::Number(5.0)));
+    assert!(arr.is_packed_numeric());
+    arr[1] = None;
+    assert!(!arr.is_packed_numeric());
+    assert!(!arr.is_dense_numeric());
+    assert_eq!(arr.element_cloned(1), Some(None));
+    assert_eq!(arr.numeric_element(4), Some(5.0));
+  }
+
+  #[test]
+  fn packed_arrays_remain_unmaterialized_during_gc_and_trace_demoted_children() {
+    let mut storage = ArrayData::new(Vec::new());
+    storage.reserve_numeric_result(2);
+    storage.write_numeric_batch(0, &[1.0, 2.0]);
+    let data = crate::gc::track_array(Rc::new(RefCell::new(storage)));
+    let props = crate::gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
+    let root = Value::Array(Rc::clone(&data), props);
+    assert!(
+      crate::gc::collect(std::slice::from_ref(&root))
+        .deferred
+        .is_none()
+    );
+    {
+      let data = data.borrow();
+      let ArrayStorage::Numbers { numbers, values } = &data.storage else {
+        panic!("packed");
+      };
+      assert_eq!(numbers, &[1.0, 2.0]);
+      assert!(values.get().is_none());
+    }
+    let child = crate::gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
+    child.borrow_mut().properties.insert(
+      PropertyKey::String("alive".into()),
+      PropertyDescriptor::Data {
+        value: Value::Number(42.0),
+        writable: true,
+        enumerable: true,
+        configurable: true,
+      },
+    );
+    data.borrow_mut()[0] = Some(Value::Object(Rc::clone(&child)));
+    assert!(!data.borrow().is_packed_numeric());
+    assert!(
+      crate::gc::collect(std::slice::from_ref(&root))
+        .deferred
+        .is_none()
+    );
+    assert!(matches!(
+      child
+        .borrow()
+        .properties
+        .get(&PropertyKey::String("alive".into())),
+      Some(PropertyDescriptor::Data {
+        value: Value::Number(42.0),
+        ..
+      })
+    ));
+  }
+
+  #[test]
+  fn numeric_append_batches_pack_numbers_and_preserve_mixed_inputs() {
+    let mut numbers = ArrayData::new(vec![Some(Value::Number(-0.0))]);
+    numbers.append_numeric_batch(&[1.0, f64::INFINITY]);
+    assert!(numbers.is_packed_numeric());
+    assert_eq!(
+      numbers.numeric_element(0).unwrap().to_bits(),
+      (-0.0_f64).to_bits()
+    );
+    numbers.append_numeric_batch(&[3.0]);
+    assert_eq!(numbers.len(), 4);
+    assert_eq!(numbers.numeric_element(3), Some(3.0));
+    let mut mixed = ArrayData::new(vec![Some(Value::Bool(true)), None]);
+    mixed.append_numeric_batch(&[1.0, 2.0]);
+    assert!(!mixed.is_packed_numeric());
+    assert_eq!(
+      mixed.clone_elements(),
+      vec![
+        Some(Value::Bool(true)),
+        None,
+        Some(Value::Number(1.0)),
+        Some(Value::Number(2.0))
+      ]
+    );
+  }
+
+  #[test]
+  fn numeric_batches_preserve_unwritten_generic_species_slots() {
+    let mut arr = ArrayData::new(vec![Some(Value::Bool(true)); 3]);
+    arr.reserve_numeric_result(0);
+    arr.write_numeric_batch(0, &[2.0]);
+    assert_eq!(arr.element_cloned(1), Some(Some(Value::Bool(true))));
+    assert!(!arr.is_dense_numeric());
+    arr.write_numeric_batch(1, &[3.0, 4.0]);
+    assert!(arr.is_dense_numeric());
+  }
+
+  #[test]
+  fn array_data_numeric_kind_tracks_mutable_storage_access() {
+    let mut arr = ArrayData::new(vec![Some(Value::Number(1.0))]);
+    assert!(arr.is_dense_numeric());
+    assert_eq!(arr.dense_numeric.get(), Some(true));
+    arr[0] = Some(Value::Bool(true));
+    assert_eq!(arr.dense_numeric.get(), None);
+    assert!(!arr.is_dense_numeric());
+    arr[0] = Some(Value::Number(f64::NAN));
+    assert!(arr.is_dense_numeric());
+    arr.resize(2, None);
+    assert!(!arr.is_dense_numeric());
+    for slot in arr.iter_mut() {
+      *slot = Some(Value::Number(-0.0));
+    }
+    assert!(arr.is_dense_numeric());
+    let mut cloned = arr.clone();
+    cloned[0] = None;
+    assert!(!cloned.is_dense_numeric());
+    assert!(arr.is_dense_numeric());
+    arr.clear();
+    assert!(arr.is_dense_numeric());
+  }
+
+  #[test]
+  fn array_data_numeric_kind_survives_controlled_numeric_mutations() {
+    let mut arr = ArrayData::new(Vec::new());
+    arr.reserve(4);
+    arr.push(Some(Value::Number(1.0)));
+    arr.push(Some(Value::Number(f64::INFINITY)));
+    assert_eq!(arr.dense_numeric.get(), Some(true));
+    arr.push(None);
+    assert!(!arr.is_dense_numeric());
+    arr.write_dense_numbers(&[1.0, 2.0, 3.0]);
+    assert_eq!(arr.dense_numeric.get(), Some(true));
+    assert_eq!(arr.take_elements().len(), 3);
+    assert_eq!(arr.dense_numeric.get(), Some(true));
+    assert!(arr.is_dense_numeric());
   }
 
   #[test]

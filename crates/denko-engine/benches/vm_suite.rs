@@ -25,7 +25,7 @@ const COLD_START_FIXTURES: [&str; 4] = [
 ];
 
 /// Fixtures for fast execution benchmarking (executed once per benchmark).
-const FAST_EXEC_FIXTURES: [&str; 18] = [
+const FAST_EXEC_FIXTURES: [&str; 21] = [
   "parse_numbers",
   "parse_numbers_bases",
   "uri_encode",
@@ -44,6 +44,9 @@ const FAST_EXEC_FIXTURES: [&str; 18] = [
   "dense_array_last_index_of",
   "json_stringify",
   "deep_object_nesting",
+  "closure_environment_creation",
+  "records_pipeline",
+  "typed_array_sort",
 ];
 
 /// Fixtures for slow execution benchmarking (executed once per benchmark).

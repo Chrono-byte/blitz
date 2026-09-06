@@ -190,14 +190,9 @@ pub(crate) fn install_array_buffer(
       }
       let source = array_buffer_backing(&receiver)
         .ok_or_else(|| vm.throw_type_error("ArrayBuffer was detached during slice"))?;
-      let values = source.borrow().clone_elements();
-      let mut result_data = result_backing.borrow_mut();
-      let mut result_values = result_data.clone_elements();
-      for (index, value) in values[start..end].iter().cloned().enumerate() {
-        result_values[index] = value;
-      }
-      *result_data = crate::value::ArrayData::new(result_values);
-      drop(result_data);
+      let mut bytes = vec![0; new_length];
+      source.borrow().read_bytes(start, &mut bytes);
+      result_backing.borrow_mut().write_bytes(0, &bytes);
       Ok(result)
     }),
     function_proto_map,

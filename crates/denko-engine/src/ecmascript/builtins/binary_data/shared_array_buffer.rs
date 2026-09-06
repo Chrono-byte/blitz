@@ -95,8 +95,9 @@ pub(crate) fn install_shared_array_buffer(
       let start = start.min(end);
       let (result, backing) =
         new_array_buffer(Value::Object(Rc::clone(&slice_proto)), end - start, true);
-      let values = source.borrow().clone_elements();
-      *backing.borrow_mut() = crate::value::ArrayData::from(values[start..end].to_vec());
+      let mut bytes = vec![0; end - start];
+      source.borrow().read_bytes(start, &mut bytes);
+      backing.borrow_mut().write_bytes(0, &bytes);
       Ok(result)
     }),
     function_proto_map,

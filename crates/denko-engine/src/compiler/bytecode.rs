@@ -877,13 +877,13 @@ impl Lowering {
           );
         }
         LoweringOpcode::BuildArray => {
-          let count = arg as usize;
+          let count = instruction.operand_u16();
           stage_window(&mut lowered, &plan, instruction.inputs.as_slice(), line)?;
           let destination = plan.get(instruction.output()?)?;
           let rd = destination_register(destination, 0);
           emit(
             &mut lowered,
-            encode_aux16_instruction(instruction.opcode, rd, count as u16),
+            encode_aux16_instruction(instruction.opcode, rd, count),
             line,
           );
           store_location(&mut lowered, destination, rd, line);
@@ -1412,7 +1412,7 @@ fn window_size(
     LoweringOpcode::CallMethod => count
       .saturating_add(2)
       .saturating_add(count.saturating_sub(6)),
-    LoweringOpcode::BuildArray => count,
+    LoweringOpcode::BuildArray => (payload & 0xFFFF) as usize,
     LoweringOpcode::BuildObject => count.saturating_mul(2),
     LoweringOpcode::SuperConstruct => count,
     _ => 0,
@@ -1521,7 +1521,7 @@ fn operation_shape(
     | LoweringOpcode::IteratorNext
     | LoweringOpcode::IteratorClose
     | LoweringOpcode::GetAsyncIterator => ValueShape::new(1, true),
-    LoweringOpcode::BuildArray => ValueShape::new(arg, true),
+    LoweringOpcode::BuildArray => ValueShape::new((payload & 0xFFFF) as usize, true),
     LoweringOpcode::BuildObject => ValueShape::new(arg.saturating_mul(2), true),
     LoweringOpcode::Call | LoweringOpcode::TailCall | LoweringOpcode::Construct => {
       ValueShape::new(arg + 1, true)

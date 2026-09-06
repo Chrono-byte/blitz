@@ -38,6 +38,7 @@ pub(crate) struct ByteViewDetails {
 }
 
 pub(crate) struct ByteViewIndexInfo {
+  pub(crate) buffer: Value,
   pub(crate) data: Rc<RefCell<ArrayData>>,
   pub(crate) kind: String,
   pub(crate) byte_offset: usize,
@@ -92,10 +93,7 @@ pub(crate) fn new_array_buffer(
   length: usize,
   shared: bool,
 ) -> (Value, Rc<RefCell<ArrayData>>) {
-  let data = Rc::new(RefCell::new(ArrayData::from(vec![
-    Some(Value::Number(0.0));
-    length
-  ])));
+  let data = Rc::new(RefCell::new(ArrayData::from_bytes(vec![0; length])));
   let mut object = ObjectData::with_prototype(prototype);
   object.set_internal_slot(
     ARRAY_BUFFER_DATA_SLOT,
@@ -197,6 +195,9 @@ pub(crate) fn byte_view_details(value: &Value) -> Option<ByteViewDetails> {
   if bytes_per_element != typed_array_bytes_per_element(kind.as_str_lossy())? {
     return None;
   }
+  if byte_offset.checked_add(length.checked_mul(bytes_per_element)?)? > data.borrow().len() {
+    return None;
+  }
   Some(ByteViewDetails {
     object: Rc::clone(object),
     buffer,
@@ -235,6 +236,7 @@ impl Vm {
 pub(crate) fn byte_view_index_info(value: &Value) -> Option<ByteViewIndexInfo> {
   let details = byte_view_details(value)?;
   Some(ByteViewIndexInfo {
+    buffer: details.buffer,
     data: details.data,
     kind: details.kind,
     byte_offset: details.byte_offset,
@@ -255,19 +257,23 @@ pub(crate) fn byte_view_index_value(
     .byte_offset
     .checked_add(index.checked_mul(info.bytes_per_element)?)?;
   let data = info.data.borrow();
-  let bytes = (0..info.bytes_per_element)
-    .map(|offset| {
-      data
-        .get(start + offset)
-        .and_then(|slot| slot.as_ref())
-        .and_then(|value| match value {
-          Value::Number(number) => number.to_u8(),
-          _ => None,
-        })
-        .unwrap_or(0)
-    })
-    .collect::<Vec<_>>();
-  decode_typed_element(&info.kind, &bytes)
+  if let Some(bytes) = data.packed_bytes() {
+    return decode_typed_element(
+      &info.kind,
+      bytes.get(start..start + info.bytes_per_element)?,
+    );
+  }
+  let mut bytes = [0; 8];
+  for (offset, byte) in bytes[..info.bytes_per_element]
+    .iter_mut()
+    .enumerate()
+  {
+    *byte = data
+      .numeric_element(start + offset)
+      .and_then(|number| number.to_u8())
+      .unwrap_or(0);
+  }
+  decode_typed_element(&info.kind, &bytes[..info.bytes_per_element])
 }
 
 pub(crate) fn write_byte_view_index(
@@ -280,13 +286,19 @@ pub(crate) fn write_byte_view_index(
     return Ok(());
   }
   let bytes = encode_typed_element(vm, &info.kind, value)?;
-  let start = info.byte_offset + index * info.bytes_per_element;
-  let mut data = info.data.borrow_mut();
-  for (offset, byte) in bytes.into_iter().enumerate() {
-    if let Some(slot) = data.get_mut(start + offset) {
-      *slot = Some(Value::Number(f64::from(byte)));
-    }
+  let Some(current) = array_buffer_backing(&info.buffer) else {
+    return Ok(());
+  };
+  if !Rc::ptr_eq(&current, &info.data)
+    || info
+      .byte_offset
+      .checked_add(info.length.saturating_mul(info.bytes_per_element))
+      .is_none_or(|end| end > current.borrow().len())
+  {
+    return Ok(());
   }
+  let start = info.byte_offset + index * info.bytes_per_element;
+  current.borrow_mut().write_bytes(start, &bytes);
   Ok(())
 }
 
@@ -321,11 +333,41 @@ pub(crate) fn decode_typed_element(
   Some(value)
 }
 
+pub(crate) struct EncodedTypedElement {
+  bytes: [u8; 8],
+  length: usize,
+}
+
+impl EncodedTypedElement {
+  pub(crate) fn from_prefix(
+    bytes: [u8; 8],
+    length: usize,
+  ) -> Self {
+    assert!(length <= bytes.len());
+    Self { bytes, length }
+  }
+}
+
+impl<const N: usize> From<[u8; N]> for EncodedTypedElement {
+  fn from(value: [u8; N]) -> Self {
+    let mut bytes = [0; 8];
+    bytes[..N].copy_from_slice(&value);
+    Self { bytes, length: N }
+  }
+}
+
+impl std::ops::Deref for EncodedTypedElement {
+  type Target = [u8];
+  fn deref(&self) -> &[u8] {
+    &self.bytes[..self.length]
+  }
+}
+
 pub(crate) fn encode_typed_element(
   vm: &mut Vm,
   kind: &str,
   value: &Value,
-) -> Result<Vec<u8>, RuntimeError> {
+) -> Result<EncodedTypedElement, RuntimeError> {
   if matches!(kind, "BigInt64Array" | "BigUint64Array") {
     let value = crate::ecmascript::builtins::primitives::to_bigint(vm, value)?;
     let modulus = BigInt::from(1u8) << 64;
@@ -337,29 +379,29 @@ pub(crate) fn encode_typed_element(
       .to_u64()
       .expect("BigInt modulo 2^64 is representable");
     return Ok(match kind {
-      "BigInt64Array" | "BigUint64Array" => bits.to_le_bytes().to_vec(),
+      "BigInt64Array" | "BigUint64Array" => bits.to_le_bytes().into(),
       _ => unreachable!(),
     });
   }
   let number = vm.to_number_value(value)?;
   let bytes = match kind {
-    "Uint8Array" => vec![number.trunc().rem_euclid(256.0) as u8],
-    "Int8Array" => vec![number.trunc().rem_euclid(256.0) as u8],
-    "Uint8ClampedArray" => vec![encode_uint8_clamped(number)],
+    "Uint8Array" => [number.trunc().rem_euclid(256.0) as u8].into(),
+    "Int8Array" => [number.trunc().rem_euclid(256.0) as u8].into(),
+    "Uint8ClampedArray" => [encode_uint8_clamped(number)].into(),
     "Uint16Array" => (number.trunc().rem_euclid(65_536.0) as u16)
       .to_le_bytes()
-      .to_vec(),
+      .into(),
     "Int16Array" => (number.trunc().rem_euclid(65_536.0) as u16)
       .to_le_bytes()
-      .to_vec(),
+      .into(),
     "Uint32Array" => (number.trunc().rem_euclid(4_294_967_296.0) as u32)
       .to_le_bytes()
-      .to_vec(),
+      .into(),
     "Int32Array" => (number.trunc().rem_euclid(4_294_967_296.0) as u32)
       .to_le_bytes()
-      .to_vec(),
-    "Float32Array" => (number as f32).to_le_bytes().to_vec(),
-    "Float64Array" => number.to_le_bytes().to_vec(),
+      .into(),
+    "Float32Array" => (number as f32).to_le_bytes().into(),
+    "Float64Array" => number.to_le_bytes().into(),
     _ => return Err(vm.throw_type_error("Unknown typed array kind")),
   };
   Ok(bytes)
@@ -414,4 +456,95 @@ pub(crate) fn byte_view_index_from_key(key: &PropertyKey) -> Option<usize> {
     return None;
   }
   number.to_usize()
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn packed_byte_views_share_endian_storage_and_honor_detachment() {
+    let (buffer, data) = new_array_buffer(Value::Null, 16, false);
+    let view = new_byte_view(
+      Value::Null,
+      buffer.clone(),
+      Rc::clone(&data),
+      "Float64Array",
+      1,
+      8,
+    );
+    assert!(
+      data
+        .borrow_mut()
+        .write_bytes(8, &(-0.0_f64).to_le_bytes())
+    );
+    assert!(
+      matches!(byte_view_index_value(&view, 0), Some(Value::Number(n)) if n.to_bits() == (-0.0_f64).to_bits())
+    );
+    assert_eq!(data.borrow().packed_bytes().unwrap().len(), 16);
+    let host = Uint8ArrayByteView::new(buffer.clone(), Rc::clone(&data), 8, 8);
+    let mut output = [0; 8];
+    assert!(host.read_into(0, &mut output));
+    assert_eq!(output, (-0.0_f64).to_le_bytes());
+    assert!(host.write_from(0, &42.5_f64.to_le_bytes()));
+    assert_eq!(byte_view_index_value(&view, 0), Some(Value::Number(42.5)));
+    let Value::Object(object) = buffer else {
+      panic!("buffer object");
+    };
+    object
+      .borrow_mut()
+      .set_internal_slot(ARRAY_BUFFER_DATA_SLOT, Value::Null);
+    assert!(byte_view_index_value(&view, 0).is_none());
+    assert!(!host.read_into(0, &mut output));
+    assert!(!host.write_from(0, &[0]));
+  }
+
+  #[test]
+  fn byte_access_revalidates_buffers_after_user_coercion() {
+    let source = r#"
+      var buffer=new ArrayBuffer(16);var view=new DataView(buffer);
+      view.setFloat64(0,13.5,true);
+      var exact=view.getFloat64(0,true)===13.5;
+      var offset={valueOf:function(){view.marker=7;return 0;}};
+      exact=exact&&view.getFloat64(offset,true)===13.5&&view.marker===7;
+      var caughtOffset=false;
+      try { view.getInt8({valueOf:function(){$262.detachArrayBuffer(buffer);return 0;}}); } catch(e) { caughtOffset=e instanceof TypeError; }
+      var second=new ArrayBuffer(8);var setter=new DataView(second);var caughtValue=false;
+      try { setter.setFloat64(0,{valueOf:function(){$262.detachArrayBuffer(second);return 3;}},true); } catch(e) { caughtValue=e instanceof TypeError; }
+      var third=new ArrayBuffer(4);var typed=new Uint32Array(third);
+      typed[0]={valueOf:function(){$262.detachArrayBuffer(third);return 7;}};
+      var shared=new SharedArrayBuffer(8);var sharedView=new DataView(shared);
+      sharedView.setUint32(0,16909060,false);
+      var result=exact&&caughtOffset&&caughtValue&&typed[0]===undefined&&sharedView.getUint32(0,true)===67305985;
+    "#;
+    let session = crate::parser::Parser::parse_source(source).expect("parse");
+    let code = crate::compiler::compile_repl_session(&session).expect("compile");
+    let mut vm = Vm::new(crate::test262_support::make_test262_globals());
+    vm.run(code).expect("evaluate");
+    assert_eq!(vm.get_global("result"), Some(Value::Bool(true)));
+  }
+
+  #[test]
+  fn shared_buffers_keep_aliases_and_shortened_storage_is_checked() {
+    let (buffer, data) = new_array_buffer(Value::Null, 4, true);
+    assert_eq!(array_buffer_is_shared(&buffer), Some(true));
+    let view = new_byte_view(
+      Value::Null,
+      buffer.clone(),
+      Rc::clone(&data),
+      "Uint32Array",
+      1,
+      0,
+    );
+    let host = Uint8ArrayByteView::new(buffer, Rc::clone(&data), 0, 4);
+    assert!(host.write_from(0, &[1, 2, 3, 4]));
+    assert_eq!(
+      byte_view_index_value(&view, 0),
+      Some(Value::Number(67_305_985.0))
+    );
+    // Host mutation through the compatibility API invalidates packed storage.
+    data.borrow_mut().truncate(2);
+    assert_eq!(host.len(), 0);
+    assert!(!host.write_from(0, &[9]));
+  }
 }

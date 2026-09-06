@@ -170,3 +170,41 @@ fn short_ascii_slices_preserve_code_unit_boundaries_and_stable_views() {
     }
   }
 }
+
+#[test]
+fn short_unicode_substrings_use_inline_storage_without_losing_code_units() {
+  let value = JsString::new("a longer héllo 😀 string");
+  let slice = value.slice(10..13).unwrap();
+  assert_eq!(slice.to_string_lossy(), "éll");
+  assert!(matches!(slice.repr, Repr::Inline(_)));
+  for units in [
+    vec![0xd800],
+    vec![0xdc00],
+    vec![0xd83d, 0xde00],
+    vec![0xe9, 0x6c, 0x6c],
+  ] {
+    let value = JsString::from_utf16(units.clone());
+    assert!(matches!(value.repr, Repr::Inline(_)));
+    assert_eq!(value.len(), units.len());
+    assert_eq!(value.as_slice(), units);
+    assert_eq!(value.to_string_lossy(), String::from_utf16_lossy(&units));
+  }
+}
+
+#[test]
+fn inline_and_heap_unicode_slices_match_exact_utf16_ranges() {
+  for text in ["é😀x", "a😀b", "héllo", "longer 😀é漢 text"] {
+    let value = JsString::new(text);
+    let units: Vec<_> = text.encode_utf16().collect();
+    for start in 0..=units.len() {
+      for end in start..=units.len() {
+        let slice = value.slice(start..end).unwrap();
+        assert_eq!(slice.as_slice(), &units[start..end]);
+        assert_eq!(
+          slice.to_string_lossy(),
+          String::from_utf16_lossy(&units[start..end])
+        );
+      }
+    }
+  }
+}

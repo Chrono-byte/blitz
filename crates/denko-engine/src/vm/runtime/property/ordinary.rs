@@ -196,7 +196,7 @@ pub(in crate::vm::runtime) fn get_property(
       }
       if let Some(i) = array_index_from_key(key)
         && i < array_length(&props_ref)
-        && let Some(opt_value) = arr.borrow().get(i).cloned()
+        && let Some(opt_value) = arr.borrow().element_cloned(i)
         && let Some(value) = opt_value
       {
         return Ok(value);

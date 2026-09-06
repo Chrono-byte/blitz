@@ -8,6 +8,8 @@ mod abi;
 pub(crate) mod artifact;
 pub(crate) mod ir;
 pub(crate) mod native;
+pub(crate) mod numeric_body;
+pub(crate) mod typed_view;
 mod worker;
 
 use crate::bytecode::{Chunk, Constant, Instruction, InstructionIndex, Opcode};
@@ -277,14 +279,31 @@ impl FunctionId {
   }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct JitStats {
-  pub(crate) baseline_entries: u64,
-  pub(crate) baseline_returns: u64,
-  pub(crate) interpreter_resumes: u64,
-  pub(crate) native_loop_entries: u64,
-  pub(crate) native_loop_iterations: u64,
+/// A read-only snapshot of native execution activity in a VM.
+#[derive(Clone, Copy, Debug, Default, serde::Serialize)]
+pub struct NativeExecutionStats {
+  /// Guarded callback returns evaluated directly in Rust, not generated code.
+  pub leaf_callback_calls: u64,
+  /// Subset of leaf callbacks evaluated by a guarded array-map loop.
+  pub batched_callback_calls: u64,
+  pub leaf_callback_fallbacks: u64,
+  /// Entries into baseline native code.
+  pub baseline_entries: u64,
+  /// Returns completed by baseline native code.
+  pub baseline_returns: u64,
+  /// Resumptions of the interpreter from baseline code.
+  pub interpreter_resumes: u64,
+  /// Successfully executed native loop batches.
+  pub native_loop_entries: u64,
+  /// Loop iterations executed by native regions.
+  pub native_loop_iterations: u64,
+  /// Recognized regions declined by runtime guards.
+  pub native_region_fallbacks: u64,
+  /// Region plans currently retained in the VM's quickening cache.
+  pub cached_region_plans: usize,
 }
+
+pub(crate) type JitStats = NativeExecutionStats;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct CodeVersionId(u64);
@@ -515,6 +534,9 @@ impl DirectCallTarget {
 
 #[derive(Default)]
 pub(crate) struct JitRuntime {
+  numeric_bodies: HashMap<(usize, usize), Rc<numeric_body::CompiledNumericBody>>,
+  typed_views: HashMap<(usize, usize), Rc<typed_view::CompiledTypedView>>,
+  prepared_numeric_bodies: HashMap<(usize, usize), Rc<numeric_body::PreparedNumericBody>>,
   pub(crate) code: Vec<Vec<JitCode>>,
   next_version: u64,
   numeric_regions: [NumericRegionCode; 5],

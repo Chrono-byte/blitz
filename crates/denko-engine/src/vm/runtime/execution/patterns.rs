@@ -257,6 +257,24 @@ pub(super) fn build_quickened_sites(
         regions.push(crate::vm::region::NativeRegion::NumericLoop(region));
         SiteAction::Region(id)
       } else if native_regions_enabled
+        && let Some(region) = crate::vm::region::TypedViewRegion::decode(code, pc)
+        && let Some(id) = crate::vm::region::RegionId::from_index(regions.len())
+      {
+        regions.push(crate::vm::region::NativeRegion::TypedView(region));
+        SiteAction::Region(id)
+      } else if native_regions_enabled
+        && let Some(region) = crate::vm::region::ArrayReadSumRegion::decode(code, pc)
+        && let Some(id) = crate::vm::region::RegionId::from_index(regions.len())
+      {
+        regions.push(crate::vm::region::NativeRegion::ArrayReadSum(region));
+        SiteAction::Region(id)
+      } else if native_regions_enabled
+        && let Some(region) = crate::vm::region::PropertyChainRegion::decode(code, pc)
+        && let Some(id) = crate::vm::region::RegionId::from_index(regions.len())
+      {
+        regions.push(crate::vm::region::NativeRegion::PropertyChain(region));
+        SiteAction::Region(id)
+      } else if native_regions_enabled
         && let Some(region) = crate::vm::region::NumericLoopRegion::decode_property(code, pc)
         && let Some(id) = crate::vm::region::RegionId::from_index(regions.len())
       {
@@ -273,6 +291,18 @@ pub(super) fn build_quickened_sites(
         && let Some(id) = crate::vm::region::RegionId::from_index(regions.len())
       {
         regions.push(crate::vm::region::NativeRegion::DenseArrayPush(region));
+        SiteAction::Region(id)
+      } else if native_regions_enabled
+        && let Some(region) = crate::vm::region::NumericBodyRegion::decode(code, pc)
+        && let Some(id) = crate::vm::region::RegionId::from_index(regions.len())
+      {
+        regions.push(crate::vm::region::NativeRegion::NumericBody(region));
+        SiteAction::Region(id)
+      } else if native_regions_enabled
+        && let Some(region) = crate::vm::region::StringBodyRegion::decode(code, pc)
+        && let Some(id) = crate::vm::region::RegionId::from_index(regions.len())
+      {
+        regions.push(crate::vm::region::NativeRegion::StringBody(region));
         SiteAction::Region(id)
       } else if is_numeric_compare(words, pc, COMPARE) {
         SiteAction::Legacy(QuickenedKind::NumericCompareBranch)

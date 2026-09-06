@@ -12,12 +12,18 @@ use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
 use crate::vm::Vm;
 use crate::vm::state::{MAX_PROTOTYPE_DEPTH, PartialDescriptor, PropertyGetIcEntry};
 
+#[cfg(test)]
+#[path = "property/array_read_tests.rs"]
+mod array_read_tests;
 #[path = "property/descriptors.rs"]
 mod descriptors;
 #[path = "property/meta.rs"]
 mod meta;
 #[path = "property/ordinary.rs"]
 mod ordinary;
+#[cfg(test)]
+#[path = "property/own_index_tests.rs"]
+mod own_index_tests;
 
 use descriptors::{
   complete_property_descriptor, descriptor_configurable, descriptor_enumerable,
@@ -30,34 +36,108 @@ pub(super) use ordinary::{
 };
 
 impl Vm {
-  /// Read a property through the per-instruction monomorphic cache.
+  /// Append only when every write is an ordinary new dense element. The preflight
+  /// invokes no JavaScript, so fallback can perform the full observable algorithm.
+  pub(crate) fn try_append_dense_array(
+    &mut self,
+    receiver: &Value,
+    items: &[Value],
+    length: usize,
+  ) -> bool {
+    let Value::Array(elements, properties) = receiver else {
+      return false;
+    };
+    let Some(new_length) = length
+      .checked_add(items.len())
+      .filter(|value| *value <= u32::MAX as usize)
+    else {
+      return false;
+    };
+    if elements.borrow().len() != length {
+      return false;
+    }
+    let length_key = PropertyKey::builtin_length();
+    let index_keys: Vec<_> = (length..new_length)
+      .map(|index| PropertyKey::String(index.to_string().into()))
+      .collect();
+    let mut prototype = {
+      let properties = properties.borrow();
+      if !properties.extensible
+        || index_keys
+          .iter()
+          .any(|key| properties.properties.contains_key(key))
+      {
+        return false;
+      }
+      if properties.properties.get(&length_key).is_some_and(|descriptor| !matches!(descriptor,
+        PropertyDescriptor::Data { value: Value::Number(value), writable: true, .. } if *value == usize_to_f64(length))) {
+        return false;
+      }
+      properties.get_prototype()
+    };
+    for _ in 0..MAX_PROTOTYPE_DEPTH {
+      match prototype {
+        Value::Null => {
+          elements
+            .borrow_mut()
+            .extend(items.iter().cloned().map(Some));
+          let mut properties = properties.borrow_mut();
+          if let Some(PropertyDescriptor::Data { value, .. }) =
+            properties.properties.get_mut(&length_key)
+          {
+            *value = Value::Number(usize_to_f64(new_length));
+          } else {
+            properties.properties.insert(
+              length_key,
+              crate::runtime_utils::array_length_descriptor(new_length),
+            );
+          }
+          properties.mutation_generation = properties.mutation_generation.wrapping_add(1);
+          return true;
+        }
+        Value::Object(ref object) => {
+          let next = {
+            let object = object.borrow();
+            if !object.internal_slots.is_empty()
+              || index_keys
+                .iter()
+                .any(|key| object.properties.contains_key(key))
+            {
+              return false;
+            }
+            object.get_prototype()
+          };
+          prototype = next;
+        }
+        _ => return false,
+      }
+    }
+    false
+  }
+
+  /// Read an own data property through a per-instruction position hint.
   ///
-  /// Only own data properties are cached. Prototype and accessor reads stay
-  /// on the semantic path so prototype mutation and getter side effects can
-  /// never be hidden by the cache.
+  /// Validate the indexed key and descriptor on every read, allowing different
+  /// objects and mutations to reuse the same position without caching values.
   pub(super) fn get_property_value_cached(
     &mut self,
     instruction_pc: usize,
     obj: &Value,
     key: &PropertyKey,
   ) -> Result<Value, RuntimeError> {
-    if is_module_namespace_object(obj) {
+    if !self.caches.optimized_execution_enabled {
       return self.get_property_value(obj, key);
     }
-    let receiver = match obj {
-      Value::Object(data) => {
-        let data = data.borrow();
-        Some((data.identity as usize, data.mutation_generation))
-      }
-      Value::Closure { props, .. } | Value::BuiltinObject(_, props) => {
-        let data = props.borrow();
-        Some((data.identity as usize, data.mutation_generation))
-      }
-      _ => None,
-    };
-    let Some((receiver_identity, receiver_generation)) = receiver else {
+    let Value::Object(data) = obj else {
       return self.get_property_value(obj, key);
     };
+    {
+      let object = data.borrow();
+      if !object.internal_slots.is_empty() || object.module_namespace_exports.is_some() {
+        drop(object);
+        return self.get_property_value(obj, key);
+      }
+    }
     let chunk = &self.execution.active.chunk;
     if self
       .caches
@@ -94,7 +174,7 @@ impl Vm {
         });
       self.caches.active_property_get = Some(std::rc::Rc::clone(cache));
     }
-    // Keep this site's storage across reentrant getters and host callbacks.
+    // Retain this site's storage while falling back through reentrant getters.
     let cache = std::rc::Rc::clone(
       self
         .caches
@@ -103,32 +183,28 @@ impl Vm {
         .expect("active property cache"),
     );
     let site = cache.site_indices[instruction_pc] as usize;
-    if let Some(entry) = cache.entries.borrow()[site].as_ref()
-      && entry.epoch == self.caches.property_get_epoch
-      && entry.receiver_identity == receiver_identity
-      && entry.receiver_generation == receiver_generation
-      && entry.key == *key
     {
-      return Ok(entry.value.clone());
+      let object = data.borrow();
+      if let Some(entry) = cache.entries.borrow()[site]
+        && let Some((actual_key, PropertyDescriptor::Data { value, .. })) =
+          object.properties.get_index(entry.property_index)
+        && actual_key == key
+        && !matches!(value, Value::Uninitialized)
+      {
+        return Ok(value.clone());
+      }
+      if let Some((index, _, PropertyDescriptor::Data { value, .. })) =
+        object.properties.get_full(key)
+        && !matches!(value, Value::Uninitialized)
+      {
+        cache.entries.borrow_mut()[site] = Some(PropertyGetIcEntry {
+          property_index: index,
+        });
+        return Ok(value.clone());
+      }
     }
-
-    let value = self.get_property_value(obj, key)?;
-    if matches!(
-      own_property_descriptor(obj, key),
-      Some(PropertyDescriptor::Data { .. })
-    ) {
-      let updated = PropertyGetIcEntry {
-        epoch: self.caches.property_get_epoch,
-        receiver_identity,
-        receiver_generation,
-        key: key.clone(),
-        value: value.clone(),
-      };
-      cache.entries.borrow_mut()[site] = Some(updated);
-    } else {
-      cache.entries.borrow_mut()[site] = None;
-    }
-    Ok(value)
+    cache.entries.borrow_mut()[site] = None;
+    self.get_property_value(obj, key)
   }
 
   fn get_proxy_property(
@@ -990,25 +1066,14 @@ impl Vm {
       {
         return Ok(Value::String(ch));
       }
-      let string_ctor = self
+      if let Some(prototype) = self
         .realm_state
-        .globals
-        .borrow()
-        .properties
-        .get(&PropertyKey::String("String".to_string().into()))
-        .and_then(|d| match d {
-          PropertyDescriptor::Data { value, .. } => Some(value.clone()),
-          _ => None,
-        });
-      if let Some(string_ctor) = string_ctor
-        && let Ok(proto) = self.get_property_value(
-          &string_ctor,
-          &PropertyKey::String("prototype".to_string().into()),
-        )
-        && !matches!(proto, Value::Null)
-        && let Ok(v) = get_property(&proto, key, 0)
+        .realm
+        .intrinsics
+        .string_prototype
+        .clone()
       {
-        return Ok(v);
+        return self.get_property_with_receiver(&prototype, key, obj);
       }
     }
     if let Value::Array(_, _) = obj {
@@ -1148,7 +1213,7 @@ impl Vm {
         }
         if let Some(i) = array_index_from_key(key)
           && i < array_length(&props_ref)
-          && let Some(opt_v) = arr.borrow().get(i).cloned()
+          && let Some(opt_v) = arr.borrow().element_cloned(i)
           && let Some(v) = opt_v
         {
           return Ok(Some((

@@ -44,6 +44,10 @@ pub(crate) fn js_number_to_string(n: f64) -> String {
   }
 
   let abs = n.abs();
+  // Safe integers have an exact decimal representation and need no floating-point formatter.
+  if abs <= 9_007_199_254_740_991.0 && n.fract() == 0.0 {
+    return (n as i64).to_string();
+  }
   if !(1e-6..1e21).contains(&abs) {
     let s = format!("{:e}", n);
     if let Some(e_idx) = s.find('e') {
@@ -275,7 +279,26 @@ pub(crate) fn global_parse_float(
 
 #[cfg(test)]
 mod tests {
-  use super::number_exponentiate;
+  use super::{js_number_to_string, number_exponentiate};
+
+  #[test]
+  fn safe_integer_strings_preserve_sign_and_boundaries() {
+    for value in [
+      0_i64,
+      1,
+      -1,
+      100_000,
+      -100_000,
+      4_294_967_295,
+      9_007_199_254_740_991,
+      -9_007_199_254_740_991,
+    ] {
+      assert_eq!(js_number_to_string(value as f64), value.to_string());
+    }
+    assert_eq!(js_number_to_string(-0.0), "0");
+    assert_eq!(js_number_to_string(1.25), "1.25");
+    assert_eq!(js_number_to_string(1e21), "1e+21");
+  }
 
   #[test]
   fn exponentiation_of_unit_base_by_infinity_is_nan() {

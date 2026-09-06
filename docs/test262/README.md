@@ -36,3 +36,19 @@ The reviewed baseline and interpretation are recorded in `ES6_BASELINE.md`.
 Async generators, async iteration, and top-level await are tracked in
 [ASYNC_COMPATIBILITY.md](ASYNC_COMPATIBILITY.md), with separate compatibility
 and Promise/async-function regression manifests.
+
+Modern object, array, typed-array copying, and stable sorting behavior is tracked
+in [MODERN_COLLECTIONS_COMPATIBILITY.md](MODERN_COLLECTIONS_COMPATIBILITY.md),
+with separate compatibility and regression manifests.
+
+Native counted-loop decoding and fallback regressions are tracked in
+[the native coverage report](../benchmarks/NATIVE_LOOP_COVERAGE.md) and
+`native-loop-manifest.txt`.
+
+Array callback validation is tracked in `callback-manifest.txt` and
+[the callback execution report](../benchmarks/CALLBACK_EXECUTION.md).
+
+Packed numeric array storage is checked with `packed-array-manifest.txt`, which
+covers map species users and array push, fill, copyWithin, reverse, sort, slice,
+splice, and concat. Matched outcomes and engine regression tests are recorded in
+[the packed numeric map report](../benchmarks/PACKED_NUMERIC_MAP.md).

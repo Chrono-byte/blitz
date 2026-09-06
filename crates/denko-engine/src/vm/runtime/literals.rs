@@ -5,7 +5,6 @@ use crate::runtime_utils::{array_length_descriptor, usize_to_f64};
 use crate::value::{ArrayData, ObjectData, PropertyDescriptor, PropertyKey, Value};
 use crate::vm::Vm;
 use crate::vm::runtime::execution::ensure_slot;
-use crate::vm::runtime::property::get_property;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -31,25 +30,9 @@ impl Vm {
       array_length_descriptor(n),
     );
 
-    if let Some(array_val) = self
-      .realm_state
-      .globals
-      .borrow()
-      .properties
-      .get(&PropertyKey::String("Array".to_string().into()))
-      .and_then(|d| match d {
-        PropertyDescriptor::Data { value, .. } => Some(value.clone()),
-        _ => None,
-      })
-      && let Ok(proto_val) = get_property(
-        &array_val,
-        &PropertyKey::String("prototype".to_string().into()),
-        0,
-      )
-      && !matches!(proto_val, Value::Null)
-    {
-      props.borrow_mut().set_prototype_value(proto_val);
-    }
+    props
+      .borrow_mut()
+      .set_prototype_value(self.realm().array_prototype());
 
     let array = Value::Array(Rc::clone(&arr_rc), Rc::clone(&props));
     if crate::trace::enabled() {
@@ -73,38 +56,17 @@ impl Vm {
       ));
     }
     let n = values.len() / 2;
-    let mut entries: Vec<(PropertyKey, PropertyDescriptor)> = Vec::with_capacity(n);
-    for pair in values.chunks_exact(2) {
-      let key_val = pair[0].clone();
-      let value = pair[1].clone();
-      let key = self.to_property_key(&key_val)?;
-      entries.push((key, PropertyDescriptor::ordinary_data(value)));
-    }
     let mut map = indexmap::IndexMap::with_capacity(n);
-    for (key, desc) in entries {
-      map.insert(key, desc);
+    let mut values = values.into_iter();
+    while let Some(key_val) = values.next() {
+      let value = values
+        .next()
+        .expect("validated object literal operand pairs");
+      let key = self.to_property_key(&key_val)?;
+      map.insert(key, PropertyDescriptor::ordinary_data(value));
     }
-    let mut data = ObjectData::new();
+    let mut data = ObjectData::with_prototype(self.realm().object_prototype());
     data.properties = map;
-    if let Some(object_val) = self
-      .realm_state
-      .globals
-      .borrow()
-      .properties
-      .get(&PropertyKey::String("Object".to_string().into()))
-      .and_then(|d| match d {
-        PropertyDescriptor::Data { value, .. } => Some(value.clone()),
-        _ => None,
-      })
-      && let Ok(proto_val) = get_property(
-        &object_val,
-        &PropertyKey::String("prototype".to_string().into()),
-        0,
-      )
-      && !matches!(proto_val, Value::Null)
-    {
-      data.set_prototype_value(proto_val);
-    }
 
     let obj_rc = gc::track_object(Rc::new(RefCell::new(data)));
     let object = Value::Object(Rc::clone(&obj_rc));
@@ -124,40 +86,64 @@ impl Vm {
     &mut self,
     idx: usize,
   ) -> Result<Value, RuntimeError> {
-    let proto = self
-      .execution
-      .active
-      .chunk
+    let owner = &self.execution.active.chunk;
+    let proto = owner
       .functions
       .get(idx)
-      .cloned()
       .ok_or("Bad function index")?;
-    let has_prototype_property = proto.has_prototype_property;
+    let cached = self
+      .caches
+      .closure_prototypes
+      .entry((Arc::as_ptr(owner) as usize, idx))
+      .or_insert_with(|| {
+        let mut properties = indexmap::IndexMap::with_capacity(3);
+        properties.insert(
+          PropertyKey::String("length".into()),
+          PropertyDescriptor::builtin_metadata(Value::Number(usize_to_f64(proto.length))),
+        );
+        let name = if matches!(proto.name.as_str(), "<anonymous>" | "<arrow>" | "<method>") {
+          "".into()
+        } else {
+          proto.name.as_str().into()
+        };
+        properties.insert(
+          PropertyKey::String("name".into()),
+          PropertyDescriptor::builtin_metadata(Value::String(name)),
+        );
+        let mut constructor_properties = indexmap::IndexMap::new();
+        if proto.has_prototype_property {
+          properties.insert(
+            PropertyKey::String("prototype".into()),
+            PropertyDescriptor::Data {
+              value: Value::Undefined,
+              writable: true,
+              enumerable: false,
+              configurable: false,
+            },
+          );
+          if !proto.is_generator {
+            constructor_properties.insert(
+              PropertyKey::String("constructor".into()),
+              PropertyDescriptor::builtin_data(Value::Undefined),
+            );
+          }
+        }
+        crate::vm::state::CachedClosurePrototype {
+          _owner: Arc::clone(owner),
+          prototype: Rc::new(proto.clone()),
+          properties,
+          constructor_properties,
+        }
+      });
+    let closure_proto = Rc::clone(&cached.prototype);
+    let metadata_properties = cached.properties.clone();
+    let constructor_properties = cached.constructor_properties.clone();
+    let has_prototype_property = closure_proto.has_prototype_property;
 
-    let props: Rc<RefCell<ObjectData>> = gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
-    if let Some(function_val) = self
-      .realm_state
-      .globals
-      .borrow()
-      .properties
-      .get(&PropertyKey::String("Function".to_string().into()))
-      .and_then(|d| match d {
-        PropertyDescriptor::Data { value, .. } => Some(value.clone()),
-        _ => None,
-      })
-      && let Ok(function_proto) = get_property(
-        &function_val,
-        &PropertyKey::String("prototype".to_string().into()),
-        0,
-      )
-      && !matches!(function_proto, Value::Null)
-    {
-      props
-        .borrow_mut()
-        .set_prototype_value(function_proto);
-    }
+    let props: Rc<RefCell<ObjectData>> = gc::track_object(Rc::new(RefCell::new(
+      ObjectData::with_prototype(self.realm_state.realm.function_prototype()),
+    )));
 
-    let closure_proto = Rc::new(proto);
     let mut env_cells = Vec::with_capacity(closure_proto.upvalues.len());
     if crate::trace::enabled() {
       eprintln!(
@@ -277,34 +263,16 @@ impl Vm {
       );
     }
 
-    props.borrow_mut().properties.insert(
-      PropertyKey::String("length".to_string().into()),
-      PropertyDescriptor::Data {
-        value: Value::Number(usize_to_f64(closure_proto.length)),
-        writable: false,
-        enumerable: false,
-        configurable: true,
-      },
-    );
-
-    props.borrow_mut().properties.insert(
-      PropertyKey::String("name".to_string().into()),
-      PropertyDescriptor::Data {
-        value: Value::String(
-          if matches!(
-            closure_proto.name.as_str(),
-            "<anonymous>" | "<arrow>" | "<method>"
-          ) {
-            "".into()
-          } else {
-            closure_proto.name.clone().into()
-          },
-        ),
-        writable: false,
-        enumerable: false,
-        configurable: true,
-      },
-    );
+    // Clone prehashed metadata tables; only their primitive values are shared.
+    // HomeObject, when present, retains its existing insertion order.
+    if props.borrow().properties.is_empty() {
+      props.borrow_mut().properties = metadata_properties;
+    } else {
+      props
+        .borrow_mut()
+        .properties
+        .extend(metadata_properties);
+    }
 
     if has_prototype_property {
       let proto_obj = if closure_proto.is_generator {
@@ -332,26 +300,22 @@ impl Vm {
       if !closure_proto.is_generator
         && let Value::Object(proto_obj_map) = &proto_obj
       {
-        proto_obj_map.borrow_mut().properties.insert(
-          PropertyKey::String("constructor".to_string().into()),
-          PropertyDescriptor::Data {
-            value: closure.clone(),
-            writable: true,
-            enumerable: false,
-            configurable: true,
-          },
-        );
+        let mut prototype = proto_obj_map.borrow_mut();
+        prototype.properties = constructor_properties;
+        if let Some((_, PropertyDescriptor::Data { value, .. })) =
+          prototype.properties.get_index_mut(0)
+        {
+          *value = closure.clone();
+        }
       }
 
-      props.borrow_mut().properties.insert(
-        PropertyKey::String("prototype".to_string().into()),
-        PropertyDescriptor::Data {
-          value: proto_obj,
-          writable: true,
-          enumerable: false,
-          configurable: false,
-        },
-      );
+      let mut properties = props.borrow_mut();
+      let index = properties.properties.len() - 1;
+      if let Some((_, PropertyDescriptor::Data { value, .. })) =
+        properties.properties.get_index_mut(index)
+      {
+        *value = proto_obj;
+      }
     }
 
     if crate::trace::enabled() {
@@ -379,6 +343,169 @@ impl Vm {
       }
     }
     Ok(closure)
+  }
+}
+
+#[cfg(test)]
+mod closure_metadata_tests {
+  use super::*;
+
+  #[test]
+  fn plain_data_literals_preserve_order_descriptors_and_special_forms() {
+    let mut vm = Vm::new(Rc::new(RefCell::new(ObjectData::new())));
+    evaluate(
+      &mut vm,
+      crate::js!(
+        r#"
+      var events = '';
+      Object.defineProperty(Object.prototype, 'field', {
+        set: function() { throw 'inherited setter'; }, configurable: true
+      });
+      function next(value) { events += value; return value; }
+      var shorthand = 4;
+      var object = { field: next('a'), 2: next('b'), field: next('c'), shorthand, nested: { x: 7 } };
+      var descriptor = Object.getOwnPropertyDescriptor(object, 'field');
+      var result = events === 'abc' && object.field === 'c' && object[2] === 'b'
+        && object.shorthand === 4 && object.nested.x === 7
+        && Object.keys(object).join(',') === '2,field,shorthand,nested'
+        && descriptor.writable && descriptor.enumerable && descriptor.configurable;
+      delete Object.prototype.field;
+      var named = { method: function() {}, arrow: () => 1 };
+      result = result && named.method.name === 'method' && named.arrow.name === 'arrow';
+      var base = { value: 13 };
+      var special = { __proto__: base, method() { return super.value; }, get read() { return 9; } };
+      result = result && Object.getPrototypeOf(special) === base && special.method() === 13 && special.read === 9;
+      var key = { toString() { events += 'k'; return 'computed'; } };
+      var computed = { [key]: next('v') };
+      result = result && events === 'abckv' && computed.computed === 'v';
+      function fail() { throw 17; }
+      try { var aborted = { a: next('x'), b: fail(), c: next('z') }; }
+      catch (error) { result = result && error === 17 && events === 'abckvx'; }
+    "#
+      ),
+    );
+    assert_eq!(vm.get_global("result"), Some(Value::Bool(true)));
+  }
+
+  #[test]
+  fn literal_prototypes_ignore_replaced_global_constructors() {
+    let mut vm = Vm::new(Rc::new(RefCell::new(ObjectData::new())));
+    evaluate(
+      &mut vm,
+      crate::js!(
+        r#"
+      var getPrototypeOf = Object.getPrototypeOf;
+      var arrayPrototype = Array.prototype;
+      var objectPrototype = Object.prototype;
+      var reads = 0;
+      var replacement = {get prototype() { reads++; throw 1; }};
+      Array = replacement;
+      Object = replacement;
+      var array = [1, 2];
+      var object = {a: 1, a: 2};
+      var literalPrototypesOk = getPrototypeOf(array) === arrayPrototype
+        && getPrototypeOf(object) === objectPrototype && reads === 0 && object.a === 2;
+    "#
+      ),
+    );
+    assert_eq!(
+      vm.get_global("literalPrototypesOk"),
+      Some(Value::Bool(true))
+    );
+  }
+
+  #[test]
+  fn closure_prototypes_use_realm_intrinsics_after_global_replacement() {
+    let mut vm = Vm::new(Rc::new(RefCell::new(ObjectData::new())));
+    evaluate(
+      &mut vm,
+      crate::js!(
+        r#"
+      var originalFunction = Function;
+      var intrinsic = Function.prototype;
+      var prototypeReads = 0;
+      Function = { get prototype() { prototypeReads++; return {}; } };
+      var ordinary = function named(value) {};
+      var arrow = value => value;
+      var metadata = Object.getOwnPropertyDescriptor(ordinary, 'name');
+      var result = Object.getPrototypeOf(ordinary) === intrinsic
+        && Object.getPrototypeOf(arrow) === intrinsic && prototypeReads === 0
+        && ordinary.prototype.constructor === ordinary
+        && Reflect.ownKeys(ordinary).join(',') === 'length,name,prototype'
+        && metadata.value === 'named' && !metadata.writable && !metadata.enumerable
+        && metadata.configurable && ordinary.length === 1;
+      Function = originalFunction;
+    "#
+      ),
+    );
+    assert_eq!(vm.get_global("result"), Some(Value::Bool(true)));
+  }
+
+  fn evaluate(
+    vm: &mut Vm,
+    source: &str,
+  ) {
+    let session = crate::parser::Parser::parse_source(source).expect("parse");
+    let code = crate::compiler::compile_repl_session(&session).expect("compile");
+    vm.run(code).expect("evaluate");
+  }
+
+  #[test]
+  fn fresh_closures_share_metadata_and_keep_distinct_state() {
+    let mut vm = Vm::new(Rc::new(RefCell::new(ObjectData::new())));
+    evaluate(
+      &mut vm,
+      crate::js!(
+        r#"
+      function make(value) { return function read() { return value++; }; }
+      var first = make(10);
+      var second = make(20);
+      first.extra = 42;
+      first.prototype.extra = 99;
+      var independent = first !== second && first.prototype !== second.prototype
+        && first.prototype.constructor === first && second.prototype.constructor === second
+        && second.extra === undefined && second.prototype.extra === undefined
+        && first() === 10 && second() === 20 && first() === 11 && second() === 21;
+      Object.defineProperty(first, 'name', { value: 'changed' });
+      independent = independent && second.name === 'read';
+    "#
+      ),
+    );
+    assert_eq!(vm.get_global("independent"), Some(Value::Bool(true)));
+    let first = vm.get_global("first").expect("first closure");
+    let second = vm.get_global("second").expect("second closure");
+    if let (Value::Closure { proto: first, .. }, Value::Closure { proto: second, .. }) =
+      (first, second)
+    {
+      assert!(Rc::ptr_eq(&first, &second));
+    } else {
+      unreachable!("evaluated function expressions must create closures");
+    }
+  }
+
+  #[test]
+  fn metadata_cache_separates_chunks_and_clears_on_reset() {
+    let mut vm = Vm::new(Rc::new(RefCell::new(ObjectData::new())));
+    evaluate(
+      &mut vm,
+      crate::js!("var first = function () { return 11; };"),
+    );
+    evaluate(
+      &mut vm,
+      crate::js!(
+        "var second = function () { return 22; }; var separate = first() === 11 && second() === 22;"
+      ),
+    );
+    assert_eq!(vm.get_global("separate"), Some(Value::Bool(true)));
+    assert_eq!(vm.caches.closure_prototypes.len(), 2);
+    assert!(
+      vm.fork_execution()
+        .caches
+        .closure_prototypes
+        .is_empty()
+    );
+    vm.reset(&std::collections::HashSet::new());
+    assert!(vm.caches.closure_prototypes.is_empty());
   }
 }
 

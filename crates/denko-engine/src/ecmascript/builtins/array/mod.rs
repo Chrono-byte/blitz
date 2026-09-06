@@ -3,7 +3,6 @@
 
 use std::cell::RefCell;
 use std::cmp::Ordering;
-use std::collections::HashMap;
 use std::env;
 use std::rc::Rc;
 
@@ -11,7 +10,6 @@ use js_string::{JsString, JsStringBuilder};
 use num_traits::ToPrimitive;
 
 use crate::RuntimeError;
-use crate::runtime_utils::own_property_descriptor;
 use crate::runtime_utils::{
   array_from_values, array_length_descriptor, builtin_object, canonical_index_key,
   collect_iterable_values, reject_pending_promise, resolve_promise_with_value, same_value_zero,
@@ -22,6 +20,32 @@ use crate::value::{
   ArrayData, BuiltinFn, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, SymbolId, Value,
 };
 use crate::vm::Vm;
+
+/// CompareArrayElements for the non-undefined values collected by array sorting.
+fn sort_array_values(
+  vm: &mut Vm,
+  values: &mut [Value],
+  comparator: &Value,
+) -> Result<(), RuntimeError> {
+  crate::ecmascript::semantics::sorting::sort_values(values, |left, right| {
+    if matches!(comparator, Value::Undefined) {
+      return Ok(vm.to_string(left)?.cmp(&vm.to_string(right)?));
+    }
+    let result = vm.call_value_with_this(
+      comparator,
+      &Value::Undefined,
+      &[left.clone(), right.clone()],
+    )?;
+    let number = vm.to_number_value(&result)?;
+    Ok(if number.is_nan() || number == 0.0 {
+      Ordering::Equal
+    } else if number < 0.0 {
+      Ordering::Less
+    } else {
+      Ordering::Greater
+    })
+  })
+}
 
 pub(super) fn array_like_length(
   vm: &mut Vm,
@@ -60,31 +84,6 @@ fn array_like_length_from_number(length: f64) -> Result<usize, RuntimeError> {
       .unwrap_or(MAX_SAFE_LENGTH)
       .min(MAX_SAFE_LENGTH) as usize,
   )
-}
-
-pub(super) fn collect_indexed_snapshot(
-  vm: &mut Vm,
-  receiver: &Value,
-  length: usize,
-) -> Result<(Vec<usize>, HashMap<usize, Value>), RuntimeError> {
-  let mut keys = Vec::new();
-  let mut values = HashMap::new();
-  for key in vm.own_property_keys_value(receiver)? {
-    let PropertyKey::String(key) = key else {
-      continue;
-    };
-    let Ok(index) = key.parse::<usize>() else {
-      continue;
-    };
-    if index >= length || values.contains_key(&index) {
-      continue;
-    }
-    let value = vm.get_property_host(receiver, &PropertyKey::String(key))?;
-    keys.push(index);
-    values.insert(index, value);
-  }
-  keys.sort_unstable();
-  Ok((keys, values))
 }
 
 pub(super) fn array_length_is_writable(receiver: &Value) -> bool {
@@ -138,26 +137,9 @@ pub(super) fn create_data_property_or_throw(
     }
   }
 
-  let mut descriptor = ObjectData::new();
-  descriptor.properties.insert(
-    PropertyKey::String("value".to_string().into()),
-    PropertyDescriptor::ordinary_data(value.clone()),
-  );
-  descriptor.properties.insert(
-    PropertyKey::String("writable".to_string().into()),
-    PropertyDescriptor::ordinary_data(Value::Bool(true)),
-  );
-  descriptor.properties.insert(
-    PropertyKey::String("enumerable".to_string().into()),
-    PropertyDescriptor::ordinary_data(Value::Bool(true)),
-  );
-  descriptor.properties.insert(
-    PropertyKey::String("configurable".to_string().into()),
-    PropertyDescriptor::ordinary_data(Value::Bool(true)),
-  );
-  let descriptor = Value::Object(Rc::new(RefCell::new(descriptor)));
-  if !vm.define_property_value(target, key, &descriptor)? {
-    return Err(vm.throw_type_error("Array.from failed to define element"));
+  let property_key = vm.to_property_key(key)?;
+  if !vm.create_data_property_host(target, property_key, value.clone())? {
+    return Err(vm.throw_type_error("Cannot define array element"));
   }
 
   if let (Value::Array(elements, properties), Value::String(key), Some(index)) =
@@ -177,12 +159,12 @@ pub(super) fn create_data_property_or_throw(
     let length_key = PropertyKey::String("length".to_string().into());
     let length_descriptor = match properties.properties.get(&length_key).cloned() {
       Some(PropertyDescriptor::Data {
+        value: Value::Number(existing_length),
         writable,
         enumerable,
         configurable,
-        ..
       }) => PropertyDescriptor::Data {
-        value: Value::Number(usize_to_f64(length)),
+        value: Value::Number(existing_length.max(usize_to_f64(length))),
         writable,
         enumerable,
         configurable,
@@ -235,13 +217,20 @@ pub(super) fn array_species_create(
   receiver: &Value,
   length: usize,
 ) -> Result<Value, RuntimeError> {
-  let default_constructor = vm.get_global("Array").unwrap_or(Value::Undefined);
+  let default_constructor = vm
+    .realm()
+    .intrinsics
+    .array_constructor
+    .clone()
+    .unwrap_or(Value::Undefined);
   let mut constructor = if is_array_value(vm, receiver)? {
     vm.get_property_host(receiver, &PropertyKey::String("constructor".into()))?
   } else {
     Value::Undefined
   };
-  if constructor.is_constructable()
+  // The canonical constructor is already known to belong to this realm.
+  if !strict_equal(&constructor, &default_constructor)
+    && constructor.is_constructable()
     && let Some(Value::Object(constructor_globals)) = Vm::function_realm_globals(&constructor)
     && !Rc::ptr_eq(&constructor_globals, &vm.globals_rc())
     && let Some((intrinsics, _)) = crate::runtime_utils::realm_kernel(&constructor_globals)
@@ -267,8 +256,27 @@ pub(super) fn array_species_create(
       return Err(vm.throw_type_error("Array constructor property is not an object"));
     }
     value => {
-      let species =
-        vm.get_property_host(&value, &PropertyKey::Symbol(SymbolId::well_known_species()))?;
+      // The original species getter only returns its receiver. Check the
+      // current own descriptor each time so replacement/deletion stays visible.
+      let intrinsic_getter = vm
+        .realm()
+        .intrinsics
+        .array_species_getter
+        .as_ref();
+      let identity_species = if let Value::BuiltinObject(_, properties) = &value {
+        matches!(
+          properties.borrow().properties.get(&PropertyKey::Symbol(SymbolId::well_known_species())),
+          Some(PropertyDescriptor::Accessor { get: Some(getter), .. })
+            if intrinsic_getter.is_some_and(|intrinsic| strict_equal(intrinsic, getter))
+        )
+      } else {
+        false
+      };
+      let species = if identity_species {
+        value.clone()
+      } else {
+        vm.get_property_host(&value, &PropertyKey::Symbol(SymbolId::well_known_species()))?
+      };
       match species {
         Value::Undefined | Value::Null => default_constructor,
         value if value.is_constructable() => value,
@@ -276,8 +284,36 @@ pub(super) fn array_species_create(
       }
     }
   };
+  // Species lookup above can execute user code and must happen on every call.
+  // Once it selects this realm's intrinsic Array, no generic constructor frame
+  // is needed. Keep the fallback for modified prototypes and custom species.
+  if vm
+    .realm()
+    .intrinsics
+    .array_constructor
+    .as_ref()
+    .is_some_and(|intrinsic| strict_equal(intrinsic, &constructor))
+    && let Value::BuiltinObject(_, properties) = &constructor
+    && let Some(PropertyDescriptor::Data {
+      value: prototype, ..
+    }) = properties
+      .borrow()
+      .properties
+      .get(&PropertyKey::String("prototype".into()))
+    && vm
+      .realm()
+      .intrinsics
+      .array_prototype
+      .as_ref()
+      .is_some_and(|intrinsic| strict_equal(intrinsic, prototype))
+  {
+    return vm.new_array_with_length(length);
+  }
   vm.construct_value(&constructor, &[Value::Number(usize_to_f64(length))])
 }
+
+#[cfg(test)]
+mod species_tests;
 
 mod constructor;
 mod iterator;
