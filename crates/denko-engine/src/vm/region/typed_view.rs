@@ -6,6 +6,7 @@ use super::*;
 pub(in crate::vm) struct TypedViewRegion {
   pub entry_pc: usize,
   pub completed_pc: usize,
+  pub view_slot: usize,
 }
 #[derive(Clone, Copy, Debug)]
 pub(in crate::vm) enum TypedViewOperation {
@@ -67,6 +68,7 @@ impl TypedViewRegion {
     let region = Self {
       entry_pc: pc,
       completed_pc,
+      view_slot: decode_aux16(header[1]) as usize,
     };
     region.program(code)?;
     Some(region)

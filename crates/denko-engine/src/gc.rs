@@ -1040,6 +1040,7 @@ fn clear_object(obj: &Rc<RefCell<ObjectData>>) {
   let mut obj = obj.borrow_mut();
   obj.properties.clear();
   obj.internal_slots.clear();
+  obj.collection_index = None;
   obj.weak_ref_target = None;
   obj.finalization_registry_cells = None;
   obj.finalization_cleanup_callback = None;

@@ -90,9 +90,9 @@ impl Vm {
       } else {
         (1 << plan.comparison.0) | (1 << plan.comparison.1)
       };
-      for index in 0..16 {
+      for (index, register) in registers.iter_mut().enumerate().take(16) {
         if written_registers & (1 << index) != 0 {
-          registers[index] = Value::Number(frame.registers[index]);
+          *register = Value::Number(frame.registers[index]);
         }
       }
       self.execution.active.pc = if frame.completed != 0 {

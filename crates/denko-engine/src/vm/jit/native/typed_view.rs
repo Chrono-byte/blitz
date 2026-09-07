@@ -8,7 +8,7 @@ pub(crate) struct TypedViewFrame {
   pub locals: [f64; 16],
   saved_registers: [f64; 16],
   saved_locals: [f64; 16],
-  elements: *mut f64,
+  elements: *mut u8,
   pub length: f64,
   pub iterations: u32,
   pub exit: u32,
@@ -231,10 +231,10 @@ impl NativeCode {
   pub(crate) unsafe fn call_typed_view(
     &self,
     frame: &mut TypedViewFrame,
-    elements: &mut [f64],
+    elements: &mut [u8],
   ) {
     frame.elements = elements.as_mut_ptr();
-    frame.elements_len = elements.len();
+    frame.elements_len = elements.len() / 8;
     frame.iterations = 0;
     frame.exit = 0;
     frame.dirty_start = usize::MAX;

@@ -172,11 +172,7 @@ Suggested order
 5) Global function calls
 
 
-Competitive follow-up, 2026-09-05
---------------------------------
-The next measured pass adds guarded dense appends, safe-integer formatting,
-shared call-slot metadata, and cheaper array result property creation. See
-[the competitive baseline](benchmarks/COMPETITIVE_BASELINE.md) for verified
-before/after timings, direct Node/Bun comparisons, correctness checks, and the
-remaining native-execution gap. The shared comparison harness is documented in
-[tools/benchmarks](../tools/benchmarks/README.md).
+Benchmark tooling
+-----------------
+Use the [shared comparison harness](../tools/benchmarks/README.md) for checked
+Denko, Node, and Bun measurements. Store generated results under `target/benchmarks/`.

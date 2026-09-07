@@ -6,8 +6,9 @@ use std::rc::Rc;
 
 use num_traits::ToPrimitive;
 
+use crate::collection_storage::{CollectionKind, CollectionState};
 use crate::runtime_utils::{
-  array_from_values, builtin_object, same_value_zero, set_builtin_length, set_builtin_name,
+  array_from_values, builtin_object, set_builtin_length, set_builtin_name,
   static_builtin_arg_offset, usize_to_f64,
 };
 use crate::value::{
@@ -616,41 +617,41 @@ pub(crate) fn install_map_set_constructors(
         return Err(vm.throw_type_error("Map.groupBy callback is not callable"));
       }
 
-      let groups = Rc::new(RefCell::new(Vec::<(Value, Vec<Value>)>::new()));
-      let index = Rc::new(RefCell::new(0usize));
-      let groups_for_iteration = Rc::clone(&groups);
-      let index_for_iteration = Rc::clone(&index);
-      consume_collection_iterable(vm, &items, move |vm, item| {
-        let current_index = *index_for_iteration.borrow();
+      let groups = CollectionState::new(CollectionKind::Map);
+      let groups_root = vm.create_host_root(groups.value());
+      let mut index = 0usize;
+      let grouped = consume_collection_iterable(vm, &items, |vm, item| {
         let key = vm.call_value_with_this(
           &callback,
           &Value::Undefined,
-          &[item.clone(), Value::Number(usize_to_f64(current_index))],
+          &[item.clone(), Value::Number(usize_to_f64(index))],
         )?;
-        *index_for_iteration.borrow_mut() = current_index.saturating_add(1);
-        let key = canonicalize_keyed_collection_value(key);
-        let mut groups = groups_for_iteration.borrow_mut();
-        if let Some((_, values)) = groups
-          .iter_mut()
-          .find(|(existing, _)| same_value_zero(existing, &key))
-        {
-          values.push(item);
+        index = index.saturating_add(1);
+        if let Some(Value::Array(values, properties)) = groups.get(&key) {
+          // Groups are private until iteration finishes, so no observable
+          // property hooks are involved in appending their next item.
+          let length = {
+            let mut values = values.borrow_mut();
+            values.push(Some(item));
+            values.len()
+          };
+          properties.borrow_mut().properties.insert(
+            PropertyKey::builtin_length(),
+            crate::runtime_utils::array_length_descriptor(length),
+          );
         } else {
-          groups.push((key, vec![item]));
+          groups.set(key, array_from_values(vec![item]));
         }
         Ok(())
-      })?;
+      });
+      vm.release_host_root(groups_root)
+        .expect("Map.groupBy groups root");
+      grouped?;
 
       let result = Value::Object(Rc::new(RefCell::new(ObjectData::with_prototype(
         Value::Object(Rc::clone(&map_group_by_proto)),
       ))));
-      let entries = groups
-        .borrow_mut()
-        .drain(..)
-        .map(|(key, values)| array_from_values(vec![key, array_from_values(values)]))
-        .collect();
-      let did_initialize =
-        set_internal_slot(&result, map_group_by_data, array_from_values(entries));
+      let did_initialize = set_internal_slot(&result, map_group_by_data, groups.value());
       debug_assert!(did_initialize);
       Ok(result)
     }),
@@ -667,18 +668,12 @@ pub(crate) fn install_map_set_constructors(
   let map_get = method(
     Rc::new(move |vm, args| {
       let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-      let entries = require_state(vm, &receiver, map_data, "get")?;
+      let state = CollectionState::from_value(
+        require_state(vm, &receiver, map_data, "get")?,
+        CollectionKind::Map,
+      );
       let key = args.get(1).cloned().unwrap_or(Value::Undefined);
-      if let Value::Array(entries, _) = entries {
-        for entry in entries.borrow().iter().flatten() {
-          if let Some((entry_key, value)) = pair_values(entry)
-            && same_value_zero(&entry_key, &key)
-          {
-            return Ok(value);
-          }
-        }
-      }
-      Ok(Value::Undefined)
+      Ok(state.get(&key).unwrap_or(Value::Undefined))
     }),
     function_proto_map,
     "get",
@@ -694,7 +689,10 @@ pub(crate) fn install_map_set_constructors(
     let upsert = method(
       Rc::new(move |vm, args| {
         let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-        let entries = require_state(vm, &receiver, map_data, name)?;
+        let state = CollectionState::from_value(
+          require_state(vm, &receiver, map_data, name)?,
+          CollectionKind::Map,
+        );
         let value_or_callback = args.get(2).cloned().unwrap_or(Value::Undefined);
         if computed && !crate::vm::Vm::is_callable_value(&value_or_callback) {
           return Err(
@@ -703,15 +701,8 @@ pub(crate) fn install_map_set_constructors(
         }
         let key =
           canonicalize_keyed_collection_value(args.get(1).cloned().unwrap_or(Value::Undefined));
-        let Value::Array(entries, _) = entries else {
-          unreachable!("validated Map data is an array");
-        };
-        for entry in entries.borrow().iter().flatten() {
-          if let Some((entry_key, value)) = pair_values(entry)
-            && same_value_zero(&entry_key, &key)
-          {
-            return Ok(value);
-          }
+        if let Some(value) = state.get(&key) {
+          return Ok(value);
         }
         let value = if computed {
           vm.call_value_with_this(
@@ -722,22 +713,8 @@ pub(crate) fn install_map_set_constructors(
         } else {
           value_or_callback
         };
-        // The callback may have inserted this key. Update that entry without
-        // changing its position, even if it stored a different value.
-        if computed {
-          for entry in entries.borrow().iter().flatten() {
-            if let Some((entry_key, _)) = pair_values(entry)
-              && same_value_zero(&entry_key, &key)
-              && let Value::Array(pair, _) = entry
-            {
-              pair.borrow_mut()[1] = Some(value.clone());
-              return Ok(value);
-            }
-          }
-        }
-        entries
-          .borrow_mut()
-          .push(Some(array_from_values(vec![key, value.clone()])));
+        // Recheck after the callback: it may have inserted, deleted, or cleared.
+        state.set(key, value.clone());
         Ok(value)
       }),
       function_proto_map,
@@ -754,16 +731,12 @@ pub(crate) fn install_map_set_constructors(
   let map_has = method(
     Rc::new(move |vm, args| {
       let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-      let entries = require_state(vm, &receiver, map_data, "has")?;
+      let state = CollectionState::from_value(
+        require_state(vm, &receiver, map_data, "has")?,
+        CollectionKind::Map,
+      );
       let key = args.get(1).cloned().unwrap_or(Value::Undefined);
-      if let Value::Array(entries, _) = entries {
-        return Ok(Value::Bool(entries.borrow().iter().flatten().any(
-          |entry| {
-            pair_values(entry).is_some_and(|(entry_key, _)| same_value_zero(&entry_key, &key))
-          },
-        )));
-      }
-      Ok(Value::Bool(false))
+      Ok(Value::Bool(state.has(&key)))
     }),
     function_proto_map,
     "has",
@@ -778,22 +751,12 @@ pub(crate) fn install_map_set_constructors(
   let map_delete = method(
     Rc::new(move |vm, args| {
       let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-      let entries = require_state(vm, &receiver, map_data, "delete")?;
+      let state = CollectionState::from_value(
+        require_state(vm, &receiver, map_data, "delete")?,
+        CollectionKind::Map,
+      );
       let key = args.get(1).cloned().unwrap_or(Value::Undefined);
-      let Value::Array(entries, _) = entries else {
-        return Ok(Value::Bool(false));
-      };
-      let index = entries.borrow().iter().position(|entry| {
-        entry
-          .as_ref()
-          .and_then(pair_values)
-          .is_some_and(|(entry_key, _)| same_value_zero(&entry_key, &key))
-      });
-      let Some(index) = index else {
-        return Ok(Value::Bool(false));
-      };
-      entries.borrow_mut()[index] = None;
-      Ok(Value::Bool(true))
+      Ok(Value::Bool(state.delete(&key)))
     }),
     function_proto_map,
     "delete",
@@ -808,30 +771,13 @@ pub(crate) fn install_map_set_constructors(
   let map_set = method(
     Rc::new(move |vm, args| {
       let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-      let entries = require_state(vm, &receiver, map_data, "set")?;
-      let key =
-        canonicalize_keyed_collection_value(args.get(1).cloned().unwrap_or(Value::Undefined));
+      let state = CollectionState::from_value(
+        require_state(vm, &receiver, map_data, "set")?,
+        CollectionKind::Map,
+      );
+      let key = args.get(1).cloned().unwrap_or(Value::Undefined);
       let value = args.get(2).cloned().unwrap_or(Value::Undefined);
-      let Value::Array(entries, _) = entries else {
-        return Ok(receiver);
-      };
-      for entry in entries.borrow_mut().iter_mut().flatten() {
-        if let Some((entry_key, _)) = pair_values(entry)
-          && same_value_zero(&entry_key, &key)
-          && let Value::Array(pair, _) = entry
-        {
-          let mut pair = pair.borrow_mut();
-          if pair.len() < 2 {
-            pair.push(Some(value));
-          } else {
-            pair[1] = Some(value);
-          }
-          return Ok(receiver);
-        }
-      }
-      entries
-        .borrow_mut()
-        .push(Some(array_from_values(vec![key, value])));
+      state.set(key, value);
       Ok(receiver)
     }),
     function_proto_map,
@@ -847,12 +793,11 @@ pub(crate) fn install_map_set_constructors(
   let map_clear = method(
     Rc::new(move |vm, args| {
       let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-      let entries = require_state(vm, &receiver, map_data, "clear")?;
-      if let Value::Array(entries, _) = entries {
-        for entry in entries.borrow_mut().iter_mut() {
-          *entry = None;
-        }
-      }
+      let state = CollectionState::from_value(
+        require_state(vm, &receiver, map_data, "clear")?,
+        CollectionKind::Map,
+      );
+      state.clear();
       Ok(Value::Undefined)
     }),
     function_proto_map,
@@ -907,13 +852,11 @@ pub(crate) fn install_map_set_constructors(
   let map_size = method(
     Rc::new(move |vm, args| {
       let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-      let entries = require_state(vm, &receiver, map_data, "size")?;
-      let size = if let Value::Array(entries, _) = entries {
-        entries.borrow().iter().flatten().count()
-      } else {
-        0
-      };
-      Ok(Value::Number(usize_to_f64(size)))
+      let state = CollectionState::from_value(
+        require_state(vm, &receiver, map_data, "size")?,
+        CollectionKind::Map,
+      );
+      Ok(Value::Number(usize_to_f64(state.len())))
     }),
     function_proto_map,
     "get size",
@@ -1475,20 +1418,12 @@ pub(crate) fn install_map_set_constructors(
   let set_add = method(
     Rc::new(move |vm, args| {
       let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-      let values = require_state(vm, &receiver, set_data, "add")?;
-      let value =
-        canonicalize_keyed_collection_value(args.get(1).cloned().unwrap_or(Value::Undefined));
-      let Value::Array(values, _) = values else {
-        return Ok(receiver);
-      };
-      if !values
-        .borrow()
-        .iter()
-        .flatten()
-        .any(|item| same_value_zero(item, &value))
-      {
-        values.borrow_mut().push(Some(value));
-      }
+      let state = CollectionState::from_value(
+        require_state(vm, &receiver, set_data, "add")?,
+        CollectionKind::Set,
+      );
+      let key = args.get(1).cloned().unwrap_or(Value::Undefined);
+      state.add(key);
       Ok(receiver)
     }),
     function_proto_map,
@@ -1504,18 +1439,12 @@ pub(crate) fn install_map_set_constructors(
   let set_has = method(
     Rc::new(move |vm, args| {
       let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-      let values = require_state(vm, &receiver, set_data, "has")?;
-      let value = args.get(1).cloned().unwrap_or(Value::Undefined);
-      if let Value::Array(values, _) = values {
-        return Ok(Value::Bool(
-          values
-            .borrow()
-            .iter()
-            .flatten()
-            .any(|item| same_value_zero(item, &value)),
-        ));
-      }
-      Ok(Value::Bool(false))
+      let state = CollectionState::from_value(
+        require_state(vm, &receiver, set_data, "has")?,
+        CollectionKind::Set,
+      );
+      let key = args.get(1).cloned().unwrap_or(Value::Undefined);
+      Ok(Value::Bool(state.has(&key)))
     }),
     function_proto_map,
     "has",
@@ -1530,21 +1459,12 @@ pub(crate) fn install_map_set_constructors(
   let set_delete = method(
     Rc::new(move |vm, args| {
       let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-      let values = require_state(vm, &receiver, set_data, "delete")?;
-      let value = args.get(1).cloned().unwrap_or(Value::Undefined);
-      let Value::Array(values, _) = values else {
-        return Ok(Value::Bool(false));
-      };
-      let index = values.borrow().iter().position(|item| {
-        item
-          .as_ref()
-          .is_some_and(|item| same_value_zero(item, &value))
-      });
-      let Some(index) = index else {
-        return Ok(Value::Bool(false));
-      };
-      values.borrow_mut()[index] = None;
-      Ok(Value::Bool(true))
+      let state = CollectionState::from_value(
+        require_state(vm, &receiver, set_data, "delete")?,
+        CollectionKind::Set,
+      );
+      let key = args.get(1).cloned().unwrap_or(Value::Undefined);
+      Ok(Value::Bool(state.delete(&key)))
     }),
     function_proto_map,
     "delete",
@@ -1559,12 +1479,11 @@ pub(crate) fn install_map_set_constructors(
   let set_clear = method(
     Rc::new(move |vm, args| {
       let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-      let values = require_state(vm, &receiver, set_data, "clear")?;
-      if let Value::Array(values, _) = values {
-        for value in values.borrow_mut().iter_mut() {
-          *value = None;
-        }
-      }
+      let state = CollectionState::from_value(
+        require_state(vm, &receiver, set_data, "clear")?,
+        CollectionKind::Set,
+      );
+      state.clear();
       Ok(Value::Undefined)
     }),
     function_proto_map,
@@ -1620,13 +1539,11 @@ pub(crate) fn install_map_set_constructors(
   let set_size = method(
     Rc::new(move |vm, args| {
       let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-      let values = require_state(vm, &receiver, set_data, "size")?;
-      let size = if let Value::Array(values, _) = values {
-        values.borrow().iter().flatten().count()
-      } else {
-        0
-      };
-      Ok(Value::Number(usize_to_f64(size)))
+      let state = CollectionState::from_value(
+        require_state(vm, &receiver, set_data, "size")?,
+        CollectionKind::Set,
+      );
+      Ok(Value::Number(usize_to_f64(state.len())))
     }),
     function_proto_map,
     "get size",

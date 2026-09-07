@@ -22,18 +22,24 @@ impl Vm {
     {
       return Ok(false);
     }
-    let Some(plan) = region.program(&self.execution.active.chunk) else {
-      return Ok(false);
-    };
     let Some(view) = self
       .execution
       .active
       .locals
-      .get(plan.view_slot)
+      .get(region.view_slot)
       .map(BindingCell::value)
     else {
       return Ok(false);
     };
+    // Reject unsupported kinds before allocating metadata or decoding a plan.
+    let Value::Object(object) = &view else {
+      return Ok(false);
+    };
+    if !matches!(object.borrow().internal_slot(crate::ecmascript::semantics::byte_views::TYPED_ARRAY_KIND_SLOT),
+      Some(Value::String(kind)) if kind == "Float64Array")
+    {
+      return Ok(false);
+    }
     let Some(details) = byte_view_details(&view) else {
       return Ok(false);
     };
@@ -88,14 +94,30 @@ impl Vm {
     if !valid_length {
       return Ok(false);
     }
+    let owner = Arc::clone(&self.execution.active.chunk);
+    let Some(compiled) = self.profiling.jit.typed_view(&owner, region) else {
+      return Ok(false);
+    };
+    let plan = &compiled.plan;
     let mut locals = [0.0; 16];
     for (index, slot) in plan.locals.iter().copied().enumerate() {
       let Some(cell) = self.execution.active.locals.get(slot) else {
         return Ok(false);
       };
-      if plan.locals.iter().copied().chain(std::iter::once(plan.view_slot))
-        .any(|other| other != slot && self.execution.active.locals.get(other)
-          .is_some_and(|other| cell.same_storage(other)))
+      if plan
+        .locals
+        .iter()
+        .copied()
+        .chain(std::iter::once(plan.view_slot))
+        .any(|other| {
+          other != slot
+            && self
+              .execution
+              .active
+              .locals
+              .get(other)
+              .is_some_and(|other| cell.same_storage(other))
+        })
       {
         return Ok(false);
       }
@@ -120,8 +142,7 @@ impl Vm {
         locals[index] = value;
       }
     }
-    let owner = Arc::clone(&self.execution.active.chunk);
-    if let Some(compiled) = self.profiling.jit.typed_view(&owner, region) {
+    if compiled.is_native() {
       return self.execute_native_typed_view(region, &compiled, locals, &details, &view, registers);
     }
     let mut numbers = [0.0; 16];
@@ -230,8 +251,8 @@ impl Vm {
         .jit_stats
         .native_loop_iterations
         .saturating_add(1);
-      if iterations % 64 == 0 {
-        self.commit_typed_view_state(&plan, &locals, &numbers, &tags, &view, registers, true);
+      if iterations.is_multiple_of(64) {
+        self.commit_typed_view_state(plan, &locals, &numbers, &tags, &view, registers, true);
         self.poll_execution_interrupt()?;
       }
       if iterations == 4096 {
@@ -242,7 +263,7 @@ impl Vm {
       return Ok(false);
     }
     self.commit_typed_view_state(
-      &plan,
+      plan,
       &locals,
       &numbers,
       &tags,
@@ -268,24 +289,27 @@ impl Vm {
     view: &Value,
     registers: &mut [Value; 16],
   ) -> Result<bool, RuntimeError> {
-    let mut elements = Vec::with_capacity(details.length);
-    {
-      let data = details.data.borrow();
-      for index in 0..details.length {
-        let mut bytes = [0; 8];
-        if !data.read_bytes(details.byte_offset + index * 8, &mut bytes) {
-          return Ok(false);
-        }
-        elements.push(f64::from_le_bytes(bytes));
-      }
+    // Generic host mutation may have unpacked the buffer. Leave that storage
+    // to the interpreter instead of copying it on every native region entry.
+    if details.data.borrow().packed_bytes().is_none() {
+      return Ok(false);
     }
+    let end = details.byte_offset + details.length * 8;
     let mut frame = crate::vm::jit::typed_view::TypedViewFrame::new(locals, details.length);
     let mut tags = [0u8; 16];
     let mut iterations = 0u64;
     let mut mutated = false;
     loop {
       self.poll_execution_interrupt()?;
-      compiled.execute(&mut frame, &mut elements);
+      {
+        let mut data = details.data.borrow_mut();
+        // Invalidates any previously materialized compatibility values before
+        // native writes. Release the exclusive borrow before polling or VM work.
+        let bytes = data
+          .packed_bytes_mut()
+          .expect("validated packed backing");
+        compiled.execute(&mut frame, &mut bytes[details.byte_offset..end]);
+      }
       if frame.iterations > 0 {
         for operation in &compiled.plan.operations {
           match *operation {
@@ -308,21 +332,9 @@ impl Vm {
           }
         }
       }
-      if frame.dirty_end > 0 {
-        if !mutated {
-          self.bump_object_generation(view);
-          mutated = true;
-        }
-        let mut data = details.data.borrow_mut();
-        for (index, value) in elements
-          .iter()
-          .enumerate()
-          .take(frame.dirty_end)
-          .skip(frame.dirty_start)
-        {
-          let written = data.write_bytes(details.byte_offset + index * 8, &value.to_le_bytes());
-          debug_assert!(written, "validated native typed view writeback");
-        }
+      if frame.dirty_end > 0 && !mutated {
+        self.bump_object_generation(view);
+        mutated = true;
       }
       iterations += u64::from(frame.iterations);
       if iterations == 0 && frame.exit == 2 {
@@ -500,5 +512,79 @@ mod native_boundary_tests {
       actual,
       Some(Value::String("3,true,-1,0,0,3.5,0,0,true,true".into()))
     );
+  }
+}
+
+#[cfg(all(test, unix, target_arch = "x86_64"))]
+mod packed_backing_tests {
+  use super::*;
+
+  #[test]
+  fn native_batches_preserve_aliases_cached_values_and_generic_backing() {
+    for packed in [true, false] {
+      let mut vm = Vm::new(Rc::new(RefCell::new(ObjectData::new())));
+      let source = r#"
+        var buffer = new ArrayBuffer(8197 * 8);
+        var full = new Float64Array(buffer);
+        full[0] = 123;
+        full[8196] = 456;
+        var values = new Float64Array(buffer, 8, 8195);
+        function fill(values) {
+          for (var i = 0; i < values.length; i = i + 1) values[i] = i / -2;
+          return i;
+        }
+        function sum(values) {
+          var total = 0;
+          for (var i = 0; i < values.length; i = i + 1) total = total + values[i];
+          return total;
+        }
+      "#;
+      let session = crate::parser::Parser::parse_source(source).expect("parse");
+      vm.run(crate::compiler::compile_repl_session(&session).expect("compile"))
+        .expect("setup");
+      let values = vm.get_global("values").expect("view");
+      let details = byte_view_details(&values).expect("backing");
+      // Materialize the borrowed-Value cache. Native stores must invalidate it.
+      assert_eq!(
+        details.data.borrow().get(8),
+        Some(&Some(Value::Number(0.0)))
+      );
+      if !packed {
+        details.data.borrow_mut()[8] = Some(Value::Number(0.0));
+        assert!(details.data.borrow().packed_bytes().is_none());
+      }
+      let fill = vm.get_global("fill").expect("fill");
+      assert_eq!(
+        vm.call_value_with_this(&fill, &Value::Undefined, std::slice::from_ref(&values))
+          .expect("fill"),
+        Value::Number(8195.0)
+      );
+      let sum = vm.get_global("sum").expect("sum");
+      assert_eq!(
+        vm.call_value_with_this(&sum, &Value::Undefined, &[values])
+          .expect("sum"),
+        Value::Number(-16_787_457.5)
+      );
+      let data = details.data.borrow();
+      assert_eq!(data.packed_bytes().is_some(), packed);
+      for (index, expected) in [(0, 123.0f64), (1, -0.0), (8195, -4097.0), (8196, 456.0)] {
+        let mut bytes = [0; 8];
+        assert!(data.read_bytes(index * 8, &mut bytes));
+        assert_eq!(bytes, expected.to_le_bytes());
+        for (offset, byte) in bytes.into_iter().enumerate() {
+          assert_eq!(
+            data.get(index * 8 + offset),
+            Some(&Some(Value::Number(f64::from(byte))))
+          );
+        }
+      }
+      if packed {
+        assert!(
+          vm.native_execution_statistics()
+            .native_loop_iterations
+            >= 16390
+        );
+      }
+    }
   }
 }

@@ -57,22 +57,7 @@ include warmups and nested calls. They do not form a percentage of all execution
 counts declined recognized regions. The adapter accepts `--disassemble` to print
 the input benchmark function's bytecode to stderr before execution.
 
-[The native-loop follow-up](../../docs/benchmarks/NATIVE_LOOP_COVERAGE.md) records
-an expanded counted-loop decoder and its matched before/after results.
-
-[The builtin-call follow-up](../../docs/benchmarks/BUILTIN_CALL_OVERHEAD.md)
-records profiling, reduced argument copying, and matched measurements.
-
-[The property-chain follow-up](../../docs/benchmarks/PROPERTY_CHAIN_NATIVE.md)
-records guarded native property reads and their conformance checks.
-
-[The callback follow-up](../../docs/benchmarks/CALLBACK_EXECUTION.md) records
-callbacks that avoid interpreter frame setup, dense numeric map execution,
-and species-order fixes.
 The suite includes both repeated small-array maps and a 100,000-element map.
-
-[The map allocation follow-up](../../docs/benchmarks/MAP_CASE_FOLLOWUP.md)
-records direct intrinsic array allocation and batched result writes.
 
 Use the map-path diagnostics to separate fresh callback allocation, reused
 callbacks, precreated numeric input, and chained maps:
@@ -86,5 +71,3 @@ This runs each engine twice in opposite orders with ten warmups and 51 samples.
 The large diagnostics construct their input before timing. Their results must
 not replace the full-input timings in `compare.py`. JSON includes the exact
 source, expected checksums, executable hashes, samples, and callback counters.
-See [the packed numeric map report](../../docs/benchmarks/PACKED_NUMERIC_MAP.md)
-for the storage and callback changes and their remaining tradeoffs.

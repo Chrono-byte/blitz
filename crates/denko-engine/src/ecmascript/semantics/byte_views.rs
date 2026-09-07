@@ -30,7 +30,7 @@ pub(crate) struct ByteViewDetails {
   pub(crate) object: Rc<RefCell<ObjectData>>,
   pub(crate) buffer: Value,
   pub(crate) data: Rc<RefCell<ArrayData>>,
-  pub(crate) kind: String,
+  pub(crate) kind: js_string::JsString,
   pub(crate) length: usize,
   pub(crate) byte_offset: usize,
   pub(crate) bytes_per_element: usize,
@@ -40,7 +40,7 @@ pub(crate) struct ByteViewDetails {
 pub(crate) struct ByteViewIndexInfo {
   pub(crate) buffer: Value,
   pub(crate) data: Rc<RefCell<ArrayData>>,
-  pub(crate) kind: String,
+  pub(crate) kind: js_string::JsString,
   pub(crate) byte_offset: usize,
   pub(crate) length: usize,
   pub(crate) bytes_per_element: usize,
@@ -202,7 +202,7 @@ pub(crate) fn byte_view_details(value: &Value) -> Option<ByteViewDetails> {
     object: Rc::clone(object),
     buffer,
     data,
-    kind: kind.to_string(),
+    kind,
     length,
     byte_offset,
     bytes_per_element,
@@ -259,7 +259,7 @@ pub(crate) fn byte_view_index_value(
   let data = info.data.borrow();
   if let Some(bytes) = data.packed_bytes() {
     return decode_typed_element(
-      &info.kind,
+      info.kind.as_str_lossy(),
       bytes.get(start..start + info.bytes_per_element)?,
     );
   }
@@ -273,7 +273,7 @@ pub(crate) fn byte_view_index_value(
       .and_then(|number| number.to_u8())
       .unwrap_or(0);
   }
-  decode_typed_element(&info.kind, &bytes[..info.bytes_per_element])
+  decode_typed_element(info.kind.as_str_lossy(), &bytes[..info.bytes_per_element])
 }
 
 pub(crate) fn write_byte_view_index(
@@ -285,7 +285,7 @@ pub(crate) fn write_byte_view_index(
   if index >= info.length {
     return Ok(());
   }
-  let bytes = encode_typed_element(vm, &info.kind, value)?;
+  let bytes = encode_typed_element(vm, info.kind.as_str_lossy(), value)?;
   let Some(current) = array_buffer_backing(&info.buffer) else {
     return Ok(());
   };

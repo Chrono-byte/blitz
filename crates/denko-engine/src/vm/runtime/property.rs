@@ -24,6 +24,9 @@ mod ordinary;
 #[cfg(test)]
 #[path = "property/own_index_tests.rs"]
 mod own_index_tests;
+#[cfg(test)]
+#[path = "property/performance_tests.rs"]
+mod performance_tests;
 
 use descriptors::{
   complete_property_descriptor, descriptor_configurable, descriptor_enumerable,
@@ -36,6 +39,54 @@ pub(super) use ordinary::{
 };
 
 impl Vm {
+  pub(crate) fn set_typed_view_element(
+    &mut self,
+    receiver: &Value,
+    index: usize,
+    value: Value,
+  ) -> Result<(), RuntimeError> {
+    if let Some(info) = byte_view_index_info(receiver)
+      && index < info.length
+    {
+      write_byte_view_index(self, &info, index, &value)?;
+      self.bump_object_generation(receiver);
+      return Ok(());
+    }
+    self.set_property_host(receiver, &Value::String(index.to_string().into()), value)?;
+    Ok(())
+  }
+
+  /// Reverse a validated view without numeric property keys or boxed elements.
+  /// No operation in a batch can call JS; release backing borrows before polling.
+  pub(crate) fn try_reverse_typed_view(
+    &mut self,
+    receiver: &Value,
+  ) -> Result<bool, RuntimeError> {
+    let details = crate::ecmascript::semantics::byte_views::byte_view_details(receiver)
+      .ok_or_else(|| self.throw_type_error("TypedArray method called on incompatible receiver"))?;
+    if details.data.borrow().packed_bytes().is_none() {
+      return Ok(false);
+    }
+    let width = details.bytes_per_element;
+    for start in (0..details.length / 2).step_by(64) {
+      self.poll_execution_interrupt()?;
+      let mut data = details.data.borrow_mut();
+      for index in start..(start + 64).min(details.length / 2) {
+        let left = details.byte_offset + index * width;
+        let right = details.byte_offset + (details.length - 1 - index) * width;
+        let mut a = [0; 8];
+        let mut b = [0; 8];
+        assert!(data.read_bytes(left, &mut a[..width]));
+        assert!(data.read_bytes(right, &mut b[..width]));
+        assert!(data.write_bytes(left, &b[..width]));
+        assert!(data.write_bytes(right, &a[..width]));
+      }
+      drop(data);
+      self.bump_object_generation(receiver);
+    }
+    Ok(true)
+  }
+
   /// Append only when every write is an ordinary new dense element. The preflight
   /// invokes no JavaScript, so fallback can perform the full observable algorithm.
   pub(crate) fn try_append_dense_array(
@@ -78,9 +129,14 @@ impl Vm {
     for _ in 0..MAX_PROTOTYPE_DEPTH {
       match prototype {
         Value::Null => {
-          elements
-            .borrow_mut()
-            .extend(items.iter().cloned().map(Some));
+          if !items.is_empty() {
+            let mut elements = elements.borrow_mut();
+            elements.reserve(items.len());
+            for item in items {
+              // ArrayData::push retains packed numeric storage for numbers.
+              elements.push(Some(item.clone()));
+            }
+          }
           let mut properties = properties.borrow_mut();
           if let Some(PropertyDescriptor::Data { value, .. }) =
             properties.properties.get_mut(&length_key)

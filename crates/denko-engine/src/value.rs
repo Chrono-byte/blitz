@@ -1022,6 +1022,8 @@ pub struct ObjectData {
   pub weak_prototype: Option<WeakObject>,
   /// VM-internal slots that are never exposed through ECMAScript property operations.
   pub(crate) internal_slots: IndexMap<&'static str, Value>,
+  /// Non-owning lookup metadata for private Map/Set storage arrays.
+  pub(crate) collection_index: Option<Box<crate::collection_storage::CollectionIndex>>,
   /// Live export bindings for a module namespace exotic object. The map is
   /// populated in code-unit sorted export-name order and is deliberately kept
   /// outside `properties`: namespace exports have specialized internal
@@ -1073,6 +1075,7 @@ impl ObjectData {
       strong_prototype: None,
       weak_prototype: None,
       internal_slots: IndexMap::new(),
+      collection_index: None,
       module_namespace_exports: None,
       weak_map_entries: None,
       weak_set_entries: None,
@@ -1109,6 +1112,7 @@ impl ObjectData {
       strong_prototype: None,
       weak_prototype: Some(WeakObject::new(prototype)),
       internal_slots: IndexMap::new(),
+      collection_index: None,
       module_namespace_exports: None,
       weak_map_entries: None,
       weak_set_entries: None,

@@ -53,6 +53,7 @@ pub mod binding;
 pub mod bytecode;
 pub mod bytecode_bundle;
 pub mod closure_environment;
+mod collection_storage;
 pub mod compiler;
 pub mod ecmascript;
 pub mod environment;

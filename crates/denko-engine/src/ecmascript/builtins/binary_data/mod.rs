@@ -112,7 +112,7 @@ fn typed_view_details(
     details.object,
     details.buffer,
     details.data,
-    details.kind,
+    details.kind.to_string(),
     details.length,
     details.byte_offset,
     details.prototype,

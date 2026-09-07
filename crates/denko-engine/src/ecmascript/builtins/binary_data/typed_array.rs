@@ -169,11 +169,14 @@ fn typed_array_relative_start(
 }
 
 fn typed_element(
-  vm: &mut Vm,
+  _vm: &mut Vm,
   receiver: &Value,
   index: usize,
 ) -> Result<Value, RuntimeError> {
-  vm.get_property_host(receiver, &PropertyKey::String(index.to_string().into()))
+  Ok(
+    crate::ecmascript::semantics::byte_views::byte_view_index_value(receiver, index)
+      .unwrap_or(Value::Undefined),
+  )
 }
 
 fn set_typed_element(
@@ -182,8 +185,7 @@ fn set_typed_element(
   index: usize,
   value: Value,
 ) -> Result<(), RuntimeError> {
-  vm.set_property_host(receiver, &Value::String(index.to_string().into()), value)?;
-  Ok(())
+  vm.set_typed_view_element(receiver, index, value)
 }
 
 fn install_typed_method(
@@ -1010,12 +1012,7 @@ pub(crate) fn install_typed_arrays(
           return Err(vm.throw_type_error("TypedArray callback is not callable"));
         }
         let length = typed_array_length(vm, &receiver)?;
-        let indices = if right {
-          (0..length).rev().collect::<Vec<_>>()
-        } else {
-          (0..length).collect::<Vec<_>>()
-        };
-        let mut iter = indices.into_iter();
+        let mut iter = (0..length).map(|index| if right { length - 1 - index } else { index });
         let mut accumulator = match args.get(2) {
           Some(value) => value.clone(),
           None => {
@@ -1049,13 +1046,15 @@ pub(crate) fn install_typed_arrays(
     0.0,
     Rc::new(|vm, args| {
       let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-      let length = typed_array_length(vm, &receiver)?;
-      for index in 0..length / 2 {
-        let other = length - 1 - index;
-        let a = typed_element(vm, &receiver, index)?;
-        let b = typed_element(vm, &receiver, other)?;
-        set_typed_element(vm, &receiver, index, b)?;
-        set_typed_element(vm, &receiver, other, a)?;
+      if !vm.try_reverse_typed_view(&receiver)? {
+        let length = typed_array_length(vm, &receiver)?;
+        for index in 0..length / 2 {
+          let other = length - 1 - index;
+          let a = typed_element(vm, &receiver, index)?;
+          let b = typed_element(vm, &receiver, other)?;
+          set_typed_element(vm, &receiver, index, b)?;
+          set_typed_element(vm, &receiver, other, a)?;
+        }
       }
       Ok(receiver)
     }),

@@ -101,7 +101,7 @@ fn own_index_reads_do_not_retain_stale_host_values_or_hide_uninitialized_state()
     })
     .expect("property read");
   let mut vm = Vm::new(Rc::new(RefCell::new(ObjectData::new())));
-  vm.execution.active.chunk = chunk.clone();
+  vm.execution.active.chunk = chunk;
   let object = Rc::new(RefCell::new(ObjectData::new()));
   let key = PropertyKey::String("value".into());
   object.borrow_mut().properties.insert(

@@ -530,10 +530,7 @@ fn clone_value_across_realms(
           let cloned_buffer = helper(vm, &details.buffer, visited, transfer_set)?;
           let mut target = target_obj.borrow_mut();
           target.set_internal_slot(TYPED_ARRAY_DATA_SLOT, cloned_data);
-          target.set_internal_slot(
-            TYPED_ARRAY_KIND_SLOT,
-            Value::String(details.kind.clone().into()),
-          );
+          target.set_internal_slot(TYPED_ARRAY_KIND_SLOT, Value::String(details.kind.clone()));
           target.set_internal_slot(
             TYPED_ARRAY_LENGTH_SLOT,
             Value::Number(details.length as f64),
@@ -820,3 +817,7 @@ mod structured_clone_tests {
     assert_eq!(cloned_backing.borrow().len(), 2);
   }
 }
+
+#[cfg(test)]
+#[path = "../collection_storage/clone_tests.rs"]
+mod collection_clone_tests;

@@ -92,13 +92,13 @@ pub(crate) fn atomics_view_info(
       return Err(vm.throw_type_error("Atomics requires a TypedArray"));
     };
     let is_shared = array_buffer_is_shared(&details.buffer).unwrap_or(false);
-    let value_kind = atomics_value_kind(&details.kind)
+    let value_kind = atomics_value_kind(details.kind.as_str_lossy())
       .ok_or_else(|| vm.throw_type_error("Atomics requires a numeric or BigInt typed array"))?;
     return Ok(AtomicsViewInfo {
       view: details.object,
       data: details.data,
       buffer: Rc::clone(buffer),
-      kind_name: details.kind,
+      kind_name: details.kind.to_string(),
       value_kind,
       length: details.length,
       is_shared,
