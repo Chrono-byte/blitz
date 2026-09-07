@@ -735,9 +735,20 @@ impl Vm {
           )
         }
         Value::Builtin(f) | Value::BuiltinObject(f, _) => {
-          let mut call_args: Vec<Value> = Vec::with_capacity(args.len() + 1);
-          call_args.push(this_arg_owned.clone());
-          call_args.extend_from_slice(args);
+          // Short method calls need no heap buffer just to prepend `this`.
+          // The VM temporary roots above retain every value across reentrant calls.
+          let mut inline = std::array::from_fn::<_, 5, _>(|_| Value::Undefined);
+          let mut overflow = Vec::new();
+          let call_args = if args.len() < inline.len() {
+            inline[0] = this_arg_owned.clone();
+            inline[1..=args.len()].clone_from_slice(args);
+            &inline[..args.len() + 1]
+          } else {
+            overflow.reserve(args.len() + 1);
+            overflow.push(this_arg_owned.clone());
+            overflow.extend_from_slice(args);
+            overflow.as_slice()
+          };
           let control_flow_epoch = self.execution.control_flow_epoch;
           let prev_this = std::mem::replace(&mut self.execution.active.this_value, this_arg_owned);
           let prev_builtin_this =
@@ -745,7 +756,7 @@ impl Vm {
           let prev_closure_env = self.execution.active.closure_env.clone();
           let prev_slots = self.execution.active.slots.clone();
           let prev_lexical_env = Rc::clone(&self.execution.active.lexical_env);
-          let result = self.invoke_builtin(f, &call_args);
+          let result = self.invoke_builtin(f, call_args);
           self.execution.builtin_this_arg_prepended = prev_builtin_this;
           if self.execution.control_flow_epoch == control_flow_epoch {
             self.execution.active.this_value = prev_this;

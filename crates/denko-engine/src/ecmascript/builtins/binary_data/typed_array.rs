@@ -398,6 +398,9 @@ pub(crate) fn install_typed_arrays(
       if typed_view_details(&receiver).is_none() {
         return Err(vm.throw_type_error("TypedArray buffer is detached"));
       }
+      if vm.try_fill_typed_view(&receiver, start, end.max(start), &encoded)? {
+        return Ok(receiver);
+      }
       for index in start..end.max(start) {
         set_typed_element(vm, &receiver, index, converted.clone())?;
       }
@@ -661,6 +664,9 @@ pub(crate) fn install_typed_arrays(
       let (_, _, _, kind, _, _, _) = typed_view_details(&receiver)
         .ok_or_else(|| vm.throw_type_error("TypedArray buffer is detached"))?;
       let result = typed_array_create_same_type(vm, &kind, length)?;
+      if matches!(comparator, Value::Undefined) && vm.try_sort_typed_view(&receiver, &result)? {
+        return Ok(result);
+      }
       let mut values = (0..length)
         .map(|index| typed_element(vm, &receiver, index))
         .collect::<Result<Vec<_>, _>>()?;
@@ -694,6 +700,9 @@ pub(crate) fn install_typed_arrays(
       let count = length
         .saturating_sub(to)
         .min(end.saturating_sub(from));
+      if vm.try_copy_within_typed_view(&receiver, to, from, count)? {
+        return Ok(receiver);
+      }
       let values = (0..count)
         .map(|index| typed_element(vm, &receiver, from + index))
         .collect::<Result<Vec<_>, _>>()?;
@@ -1071,6 +1080,9 @@ pub(crate) fn install_typed_arrays(
         return Err(vm.throw_type_error("TypedArray sort comparefn is not callable"));
       }
       let length = typed_array_length(vm, &receiver)?;
+      if matches!(compare, Value::Undefined) && vm.try_sort_typed_view(&receiver, &receiver)? {
+        return Ok(receiver);
+      }
       let mut values = (0..length)
         .map(|index| typed_element(vm, &receiver, index))
         .collect::<Result<Vec<_>, _>>()?;

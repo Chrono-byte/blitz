@@ -2,17 +2,17 @@
 
 use std::cmp::Ordering;
 
-use crate::{RuntimeError, value::Value};
+use crate::RuntimeError;
 
 /// Stable merge sort. Comparator errors stop all further comparisons immediately.
-pub(crate) fn sort_values(
-  values: &mut [Value],
-  mut compare: impl FnMut(&Value, &Value) -> Result<Ordering, RuntimeError>,
+pub(crate) fn sort_values<T: Clone>(
+  values: &mut [T],
+  mut compare: impl FnMut(&T, &T) -> Result<Ordering, RuntimeError>,
 ) -> Result<(), RuntimeError> {
-  fn merge_sort(
-    values: &mut [Value],
-    scratch: &mut [Value],
-    compare: &mut impl FnMut(&Value, &Value) -> Result<Ordering, RuntimeError>,
+  fn merge_sort<T: Clone>(
+    values: &mut [T],
+    scratch: &mut [T],
+    compare: &mut impl FnMut(&T, &T) -> Result<Ordering, RuntimeError>,
   ) -> Result<(), RuntimeError> {
     if values.len() < 2 {
       return Ok(());

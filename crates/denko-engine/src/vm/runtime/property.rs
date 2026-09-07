@@ -27,6 +27,8 @@ mod own_index_tests;
 #[cfg(test)]
 #[path = "property/performance_tests.rs"]
 mod performance_tests;
+#[path = "property/typed_bulk.rs"]
+mod typed_bulk;
 
 use descriptors::{
   complete_property_descriptor, descriptor_configurable, descriptor_enumerable,
