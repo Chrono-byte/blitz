@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Text and symbol builtin functions and prototype methods
 
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -18,7 +17,6 @@ use crate::runtime_utils::{
 use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value};
 use crate::vm::Vm;
 
-// Borrow primitive strings while retaining observable coercion for other values.
 fn string_argument<'a>(
   vm: &mut Vm,
   value: &'a Value,
@@ -30,11 +28,9 @@ fn string_argument<'a>(
 }
 
 thread_local! {
-  /// Agent-wide symbol registry used by `Symbol.for` and `Symbol.keyFor`.
   static SYMBOL_REGISTRY: RefCell<HashMap<JsString, SymbolId>> = RefCell::new(HashMap::new());
 }
 
-/// Return whether `id` belongs to the agent-wide `Symbol.for` registry.
 pub(crate) fn is_registered_symbol(id: &SymbolId) -> bool {
   SYMBOL_REGISTRY.with(|registry| {
     registry
@@ -158,7 +154,6 @@ fn string_constructor_to_string(
   }
 }
 
-/// Installs the String, Boolean, and Symbol builtins into the globals object.
 pub(crate) fn install_string_boolean_symbol_builtins(
   globals: &mut ObjectData,
   object_proto_map: &Rc<RefCell<ObjectData>>,

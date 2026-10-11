@@ -6,7 +6,6 @@ use crate::value::ArrayData;
 use crate::vm::jit::NumericBinaryOp;
 
 pub(in crate::vm) struct CachedCallback {
-  // Share plans across fresh closures and retain code to prevent pointer reuse.
   _chunk: Arc<crate::bytecode::Chunk>,
   plan: Option<CallbackPlan>,
 }
@@ -195,8 +194,6 @@ impl CallbackPlan {
 }
 
 impl Vm {
-  /// Map a dense numeric array with a proven, non-observable numeric callback.
-  /// All guards precede writes; incompatible inputs retain the generic algorithm.
   pub(crate) fn try_map_numeric_callback(
     &mut self,
     receiver: &Value,
@@ -262,8 +259,6 @@ impl Vm {
     let mut destination = destination.borrow_mut();
     let remaining = length - destination.len();
     destination.reserve_numeric_result(remaining);
-    // Select both the arithmetic operation and argument sources once per map.
-    // The generic batch kernel receives a statically specialized closure.
     match operation {
       NumericBinaryOp::Add => {
         self.map_numeric_arguments(&source, &mut destination, length, left, right, |a, b| a + b)
@@ -367,8 +362,6 @@ impl Vm {
     arguments: &[Value],
     direct: bool,
   ) -> Result<Option<Value>, RuntimeError> {
-    // External embedding calls retain their normal entry/tiering behavior.
-    // This path serves reentrant callbacks while the interpreter is active.
     if !self.caches.optimized_execution_enabled
       || self.execution.interpreter_depth == 0
       || !CallbackPlan::eligible(proto)
@@ -386,7 +379,6 @@ impl Vm {
     let Some(plan) = &cached.plan else {
       return Ok(None);
     };
-    // Numeric and parameter-only direct calls retain their existing tiering path.
     if direct
       && !matches!(
         plan,

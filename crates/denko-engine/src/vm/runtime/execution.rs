@@ -503,8 +503,6 @@ impl Vm {
         .ok_or_else(|| RuntimeError::from("instruction pointer out of bounds"))?;
       let instruction_pc = self.execution.active.pc;
       self.execution.active.pc += 1;
-      // SAFETY: every public execution entry verifies the chunk recursively
-      // before this loop runs, including nested function chunks.
       let op = unsafe { Opcode::from_byte_unchecked((word & 0xFF) as u8) };
       let rd = decode_rd(word) as usize;
       let rs = decode_rs(word) as usize;
@@ -1211,9 +1209,6 @@ impl Vm {
               registers[abi::RETURN.index()] = result;
               return Ok(None);
             }
-            // Builtins consume a borrowed argument slice. Keep register-only
-            // calls in that window instead of allocating and cloning a Vec
-            // that the call boundary immediately copies into its rooted state.
             if op != Opcode::TailCall
               && count <= abi::REGISTER_ARGUMENT_COUNT
               && matches!(
@@ -1634,10 +1629,6 @@ impl Vm {
     }
   }
 
-  /// Execute a chunk without resetting the caller's live lexical bindings.
-  ///
-  /// This is used for direct `eval`, where the evaluated chunk must observe
-  /// and update the current execution context.
   #[allow(clippy::too_many_lines)]
   pub(crate) fn run_nested(
     &mut self,
@@ -1849,11 +1840,6 @@ impl Vm {
     })
   }
 
-  /// Execute a script in the supplied realm without creating a second VM.
-  ///
-  /// Test262's realm host hook can be invoked while another realm is active.
-  /// Keeping the nested execution in this VM preserves the complete root set
-  /// for the shared prototype collector.
   pub(crate) fn run_nested_in_realm(
     &mut self,
     chunk: Chunk,
@@ -1910,7 +1896,6 @@ impl Vm {
     Value::Object(obj)
   }
 
-  /// Restore the caller's frame and return the callee's result.
   pub(super) fn execute_return(
     &mut self,
     result: Value,
@@ -1985,7 +1970,6 @@ impl Vm {
 
 use patterns::build_quickened_sites;
 
-/// Grow a locals vector so that `slot` is a valid index.
 #[inline(always)]
 pub(super) fn ensure_slot(
   locals: &mut Vec<BindingCell>,

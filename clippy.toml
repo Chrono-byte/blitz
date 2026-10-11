@@ -1,34 +1,24 @@
-# Duplicate code detection
 allowed-duplicate-crates = ["bitflags", "heck", "hashbrown"]
 
-# Maximum complexity before warning
 cognitive-complexity-threshold = 25
 too-many-arguments-threshold = 7
 
-# Enforce short functions
 too-many-lines-threshold = 250
 
-# Disallow expect/unwrap/dbg in tests
 allow-expect-in-tests = false
 allow-unwrap-in-tests = false
 allow-dbg-in-tests = false
 
-# Discourage complex expressions
 allow-mixed-uninlined-format-args = false
 allow-private-module-inception = false
 
-# Enforce proper error handling
 allow-panic-in-tests = false
 
-# Type size limits
 trivial-copy-size-limit = 256
 
-# Documentation requirements
 missing-docs-in-crate-items = true
 
-# Avoid performance issues
 vec-box-size-threshold = 2048
 verbose-bit-mask-threshold = 1
 
-# Memory allocation patterns
 enum-variant-size-threshold = 200

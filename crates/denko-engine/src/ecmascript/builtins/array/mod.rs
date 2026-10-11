@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Array builtin functions and prototype methods
 
 use std::cell::RefCell;
 use std::cmp::Ordering;
@@ -21,7 +20,6 @@ use crate::value::{
 };
 use crate::vm::Vm;
 
-/// CompareArrayElements for the non-undefined values collected by array sorting.
 fn sort_array_values(
   vm: &mut Vm,
   values: &mut [Value],
@@ -210,8 +208,6 @@ pub(crate) fn is_array_value(
   }
 }
 
-/// Implements the `ArraySpeciesCreate` constructor selection shared by
-/// array-producing prototype methods.
 pub(super) fn array_species_create(
   vm: &mut Vm,
   receiver: &Value,
@@ -228,7 +224,6 @@ pub(super) fn array_species_create(
   } else {
     Value::Undefined
   };
-  // The canonical constructor is already known to belong to this realm.
   if !strict_equal(&constructor, &default_constructor)
     && constructor.is_constructable()
     && let Some(Value::Object(constructor_globals)) = Vm::function_realm_globals(&constructor)
@@ -319,7 +314,6 @@ mod constructor;
 mod iterator;
 mod prototype;
 
-/// The Array constructor, prototype, and iterator intrinsics.
 pub(crate) struct ArrayIntrinsics {
   pub(crate) constructor: Value,
   pub(crate) prototype: Rc<RefCell<ObjectData>>,
@@ -329,7 +323,6 @@ pub(crate) struct ArrayIntrinsics {
   pub(crate) entries: Value,
 }
 
-/// Installs the complete Array intrinsic family in observable property order.
 pub(crate) fn install_array_intrinsics(
   object_prototype: &Rc<RefCell<ObjectData>>,
   function_prototype: &Rc<RefCell<ObjectData>>,

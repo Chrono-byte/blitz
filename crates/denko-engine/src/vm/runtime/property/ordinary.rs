@@ -7,7 +7,6 @@ use crate::vm::Vm;
 use crate::vm::state::{MAX_DENSE_ARRAY_GROWTH, MAX_PROTOTYPE_DEPTH};
 use std::rc::Rc;
 
-/// Return own keys for a value when applicable.
 pub(in crate::vm::runtime) fn list_own_keys_of_value(
   v: &Value
 ) -> Option<Vec<js_string::JsString>> {
@@ -69,8 +68,6 @@ pub(in crate::vm::runtime) fn object_identity(obj: &Value) -> Option<usize> {
   }
 }
 
-/// Reference-equality semantics for objects/arrays/closures, structural
-/// equality for primitives. Matches JavaScript `===` behaviour.
 pub(in crate::vm::runtime) fn values_equal(
   a: &Value,
   b: &Value,
@@ -159,7 +156,6 @@ pub(in crate::vm::runtime) fn array_length(props: &ObjectData) -> usize {
     .unwrap_or(0)
 }
 
-/// Walk the prototype chain with cycle detection.
 pub(in crate::vm::runtime) fn get_property(
   obj: &Value,
   key: &PropertyKey,
@@ -251,7 +247,6 @@ pub(in crate::vm::runtime) fn get_property(
   }
 }
 
-/// Sets the property with the given key on the given object to the given value.
 pub(in crate::vm::runtime) fn set_property(
   obj: &Value,
   key: &PropertyKey,

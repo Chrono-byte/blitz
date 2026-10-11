@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! ArrayBuffer, typed array, and DataView intrinsic installation.
 
 mod array_buffer;
 mod data_view;
@@ -23,7 +22,6 @@ pub(crate) use data_view::{install_data_view, is_data_view};
 pub(crate) use shared_array_buffer::install_shared_array_buffer;
 pub(crate) use typed_array::install_typed_arrays;
 
-/// The binary-data intrinsics installed into a realm.
 pub(crate) struct BinaryDataIntrinsics {
   pub(crate) arraybuffer_ctor_val: Value,
   pub(crate) arraybuffer_proto_map: Rc<RefCell<ObjectData>>,
@@ -46,8 +44,6 @@ pub(crate) struct BinaryDataIntrinsics {
   pub(crate) typedarray_proto_map: Rc<RefCell<ObjectData>>,
 }
 
-/// Installs ArrayBuffer, SharedArrayBuffer, `%TypedArray%`, concrete typed
-/// arrays, and DataView in their bootstrap order.
 pub(crate) fn install_binary_data_intrinsics(
   object_proto_map: &Rc<RefCell<ObjectData>>,
   function_proto_map: &Rc<RefCell<ObjectData>>,

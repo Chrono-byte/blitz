@@ -3,7 +3,6 @@ use crate::value::Value;
 use crate::{RuntimeError, Vm};
 use num_traits::ToPrimitive;
 
-/// Converts a `usize` to a `f64`, returning `f64::NAN` if the value is too large.
 pub(crate) fn usize_to_f64(value: usize) -> f64 {
   value.to_f64().unwrap_or(f64::NAN)
 }
@@ -24,11 +23,6 @@ pub(crate) fn number_exponentiate(
   }
 }
 
-/// Format a JavaScript `Number` for string conversion.
-///
-/// This intentionally follows ECMAScript `ToString` expectations for the
-/// cases we exercise in the VM: integral values should not keep Rust's
-/// trailing `.0` formatting.
 pub(crate) fn js_number_to_string(n: f64) -> String {
   if n.is_nan() {
     return "NaN".to_string();
@@ -44,7 +38,6 @@ pub(crate) fn js_number_to_string(n: f64) -> String {
   }
 
   let abs = n.abs();
-  // Safe integers have an exact decimal representation and need no floating-point formatter.
   if abs <= 9_007_199_254_740_991.0 && n.fract() == 0.0 {
     return (n as i64).to_string();
   }
@@ -186,7 +179,6 @@ fn parse_float_prefix_len(s: &str) -> Option<usize> {
   Some(end_index)
 }
 
-/// Checks if a byte offset is properly aligned for a given element count.
 pub(crate) fn is_byte_offset_aligned(
   byte_offset: usize,
   element_count: usize,
@@ -234,7 +226,6 @@ fn parse_float_string(text: &str) -> f64 {
   }
 }
 
-/// Implements the global parseInt function.
 pub(crate) fn global_parse_int(
   vm: &mut Vm,
   args: &[Value],
@@ -259,7 +250,6 @@ pub(crate) fn global_parse_int(
   Ok(Value::Number(parsed))
 }
 
-/// Implements the global parseFloat function.
 pub(crate) fn global_parse_float(
   vm: &mut Vm,
   args: &[Value],

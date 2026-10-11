@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Runtime-owned Effect root supervision.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -10,20 +9,13 @@ use denko::{HostRoot, Vm};
 
 use super::event_loop::{ResourceHandle, ResourceRegistry};
 
-/// Lifecycle of the one Effect root owned by a runtime.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RootState {
-  /// No root has been reserved.
   NotStarted,
-  /// The facade reserved the root and attached its upstream fiber.
   Running,
-  /// The host requested interruption and is waiting for finalizers.
   InterruptRequested,
-  /// The upstream fiber reported its complete Exit.
   RootCompleted,
-  /// Root finalization and reporting are being completed.
   DrainingFinalizers,
-  /// The root is fully settled and no longer keeps the runtime alive.
   Exited,
 }
 
@@ -50,7 +42,6 @@ struct RootInner {
   exit_status: Option<i32>,
 }
 
-/// VM-thread supervisor for the runtime's one Effect root.
 #[derive(Clone)]
 pub struct RootSupervisor {
   inner: Rc<RefCell<RootInner>>,

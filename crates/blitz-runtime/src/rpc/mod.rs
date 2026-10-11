@@ -1,9 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Rust-side RPC descriptions for Blitz applications.
-//!
-//! This module intentionally stops at validated JSON envelopes and direct
-//! execution. HTTP and WebSocket adapters can consume these types later
-//! without changing procedure or router semantics.
 
 mod decoder;
 mod error;

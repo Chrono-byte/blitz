@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! RegExp constructor, prototype methods, and symbol hooks.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -14,7 +13,6 @@ use crate::runtime_utils::{
 use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value};
 use crate::{RuntimeError, Vm};
 
-/// The RegExp constructor and its prototype object.
 pub(crate) struct RegExpIntrinsics {
   pub(crate) constructor: Value,
   pub(crate) prototype: Value,
@@ -915,10 +913,6 @@ fn accessor(
   );
 }
 
-/// 22.2 RegExp Objects.
-///
-/// The returned bundle keeps the constructor and prototype identities explicit
-/// for bootstrap and realm assembly.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn create_regexp_intrinsics(
   object_prototype: &Rc<RefCell<ObjectData>>,

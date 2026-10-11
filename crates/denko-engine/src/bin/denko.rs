@@ -1,10 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Host-neutral command-line harness for the Denko ECMAScript engine.
-//!
-//! This binary intentionally does not install runtime APIs such as `console`,
-//! `process`, filesystem access, or networking. It is useful for engine
-//! development, conformance work, and embedding diagnostics. Applications
-//! should use the `blitz` runtime binary.
 
 use std::cell::RefCell;
 use std::env;
@@ -17,22 +11,18 @@ use denko::parser::Parser as JsParser;
 use denko::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
 use denko::vm::Vm;
 
-/// Raw engine command-line arguments.
 #[derive(Parser, Debug)]
 #[command(
   name = "denko",
   about = "Host-neutral command-line harness for the Denko ECMAScript engine"
 )]
 struct Cli {
-  /// JavaScript file to execute. If omitted, the engine REPL is started.
   #[arg(value_name = "FILE")]
   file: Option<PathBuf>,
 
-  /// Start the engine REPL even when a file is not provided.
   #[arg(short, long, action)]
   repl: bool,
 
-  /// Treat the input file as an ECMAScript module.
   #[arg(long, action)]
   module: bool,
 }

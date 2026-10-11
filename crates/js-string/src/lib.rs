@@ -84,7 +84,6 @@ impl InlineString {
       *slot = unit;
       unit_length += 1;
     }
-    // Both lengths fit in a nibble; keep the string representation unchanged.
     inline.len = unit_length | ((value.len() as u8) << 4);
     Some(inline)
   }

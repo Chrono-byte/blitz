@@ -1,7 +1,3 @@
-// Ordinary Blitz programs are not Node single-executable applications. Keep
-// this root honest: there is no embedded asset table and no SEA startup blob.
-// `startupSnapshot` is intentionally not exported by Node 24's node:sea root;
-// it belongs to node:v8, so this facade does not invent it here.
 const invalidArgument = (name, expected, value) => {
   const received = value === null
     ? "null"

@@ -42,8 +42,6 @@ const maybeDeactivate = channel => {
   channel._stores = undefined;
 };
 
-// AsyncLocalStorage is not part of the Blitz facade surface. Support compatible
-// store.run objects when supplied, and otherwise run the callback normally.
 const runStore = (store, data, next, transform) => () => {
   if (store === null || store === undefined || typeof store.run !== "function") return next();
 

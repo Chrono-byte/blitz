@@ -14,5 +14,4 @@ export interface RpcResponse {
   readonly error?: JsonValue;
 }
 
-/** Phase 1 describes the wire boundary without binding a transport. */
 export const maxBatchSize = 32 as const;

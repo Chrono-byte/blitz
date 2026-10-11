@@ -91,7 +91,7 @@ impl TypedViewRegion {
         decode_rd(code.words[self.entry_pc + 1]) as usize,
       ),
     };
-    let mut tags = [0u8; 16]; // uninitialized, number, view, length key
+    let mut tags = [0u8; 16];
     let mut pc = self.entry_pc;
     let mut guarded = false;
     let mut writes_view = false;

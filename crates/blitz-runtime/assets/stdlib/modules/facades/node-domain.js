@@ -1,9 +1,5 @@
 import EventEmitter from "node:events";
 
-// Domains are a deprecated, synchronous compatibility boundary. Blitz does
-// not have Node's async-resource or process exception machinery, so only
-// explicit enter/run/bind/intercept scopes and explicitly added emitters are
-// tracked. A callback resumed later is not implicitly in its old domain.
 const stack = [];
 const activeExport = { value: null };
 

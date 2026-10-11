@@ -1,6 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-// Declarations for globals installed by denko-engine. Keep this file aligned
-// with intrinsics/bootstrap.rs; deliberately absent: Intl and Temporal.
 
 type PropertyKey = string | number | symbol;
 interface Iterator<T> { next(...args: any[]): IteratorResult<T>; }

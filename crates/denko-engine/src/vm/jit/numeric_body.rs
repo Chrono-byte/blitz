@@ -20,8 +20,6 @@ impl CompiledNumericBody {
     frame.completed = 0;
     #[cfg(all(unix, target_arch = "x86_64"))]
     if let Some(native) = &self.native {
-      // SAFETY: this code was emitted for NumericBodyFrame; the exclusive frame
-      // borrow and validated 0..16 operands cover every generated memory access.
       unsafe {
         native.call_numeric_body(frame);
       }
@@ -95,8 +93,6 @@ impl PreparedNumericBody {
     }
     #[cfg(all(unix, target_arch = "x86_64"))]
     if let Some(native) = &self.native {
-      // SAFETY: the emitter validates all frame offsets and this wrapper owns
-      // code emitted specifically for NumericBodyFrame.
       unsafe {
         native.call_numeric_body(frame);
       }

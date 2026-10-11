@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Wire envelopes and validation for the first RPC protocol slice.
 
 use std::fmt;
 

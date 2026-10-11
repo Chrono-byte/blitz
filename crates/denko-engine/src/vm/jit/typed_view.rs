@@ -86,8 +86,6 @@ mod tests {
     let mut backing = AlignedBytes([0xa5u8; 26]);
     let storage = &mut backing.0;
     let mut frame = TypedViewFrame::new([0.0; 16], 4);
-    // Three complete elements and one trailing byte, starting at an unaligned
-    // address. The native bound must use the byte slice, not the view length.
     compiled.execute(&mut frame, &mut storage[1..]);
     assert_eq!(frame.iterations, 3);
     assert_eq!(frame.exit, 2);

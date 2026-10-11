@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Project discovery, package metadata, and hosted environment loading.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

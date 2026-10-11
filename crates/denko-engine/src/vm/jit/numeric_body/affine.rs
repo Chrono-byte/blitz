@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Exact integer batching for straight-line additive prepared loops.
 use super::NumericBodyFrame;
 use crate::bytecode::Opcode;
 use crate::vm::region::numeric_body::NumericOperation as Op;

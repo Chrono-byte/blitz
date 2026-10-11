@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Immutable procedure builders and unary execution.
 
 use std::collections::BTreeMap;
 use std::fmt;

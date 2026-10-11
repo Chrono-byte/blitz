@@ -31,7 +31,6 @@ impl Vm {
     else {
       return Ok(false);
     };
-    // Reject unsupported kinds before allocating metadata or decoding a plan.
     let Value::Object(object) = &view else {
       return Ok(false);
     };
@@ -289,8 +288,6 @@ impl Vm {
     view: &Value,
     registers: &mut [Value; 16],
   ) -> Result<bool, RuntimeError> {
-    // Generic host mutation may have unpacked the buffer. Leave that storage
-    // to the interpreter instead of copying it on every native region entry.
     if details.data.borrow().packed_bytes().is_none() {
       return Ok(false);
     }
@@ -303,8 +300,6 @@ impl Vm {
       self.poll_execution_interrupt()?;
       {
         let mut data = details.data.borrow_mut();
-        // Invalidates any previously materialized compatibility values before
-        // native writes. Release the exclusive borrow before polling or VM work.
         let bytes = data
           .packed_bytes_mut()
           .expect("validated packed backing");
@@ -544,7 +539,6 @@ mod packed_backing_tests {
         .expect("setup");
       let values = vm.get_global("values").expect("view");
       let details = byte_view_details(&values).expect("backing");
-      // Materialize the borrowed-Value cache. Native stores must invalidate it.
       assert_eq!(
         details.data.borrow().get(8),
         Some(&Some(Value::Number(0.0)))

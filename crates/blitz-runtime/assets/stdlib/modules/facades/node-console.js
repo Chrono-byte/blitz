@@ -25,8 +25,6 @@ export const profile = primitive("profile");
 export const profileEnd = primitive("profileEnd");
 export const timeStamp = primitive("timeStamp");
 
-// Blitz has one host-backed console, so Console instances forward to its
-// primitives rather than trying to replace stream output or value formatting.
 class Console {
   constructor(..._args) {}
 

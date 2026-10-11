@@ -1,6 +1,3 @@
-// A pure-JavaScript Node 24 string_decoder slice. Blitz does not provide a
-// faithful Buffer or TextDecoder, so this facade deliberately works with
-// Uint8Array and number arrays instead of pretending to implement Buffer.
 const states = new WeakMap();
 const replacement = "\ufffd";
 

@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Array constructor and static methods.
 
 use super::*;
 

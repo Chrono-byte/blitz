@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Errors that may cross the direct or JSON RPC boundary.
 
 use std::fmt;
 
@@ -76,7 +75,6 @@ pub struct RpcFrameworkError {
 }
 
 impl RpcFrameworkError {
-  /// Construct a framework error descriptor.
   pub(crate) fn new(
     tag: impl Into<String>,
     message: impl Into<String>,
@@ -88,7 +86,6 @@ impl RpcFrameworkError {
     }
   }
 
-  /// Add a correlation identifier to this framework error.
   pub(crate) fn with_request_id(
     mut self,
     request_id: &str,

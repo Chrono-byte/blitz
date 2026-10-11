@@ -1,11 +1,5 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! Target-neutral SSA for the optimizing JIT.
-//!
-//! Bytecode first becomes semantic SSA. Specialization then lowers semantic
-//! operations into typed SSA whose verifier is the only constructor for
-//! [`VerifiedTypedFunction`]. Native emitters never accept unchecked IR.
-
 use super::NumericBinaryOp;
 use crate::bytecode::{Chunk, Instruction, Opcode, decode_aux16, decode_rd, decode_rs};
 use std::hash::{Hash, Hasher};

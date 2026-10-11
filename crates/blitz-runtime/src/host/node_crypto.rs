@@ -1,11 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Secure random operations for the initial Node `node:crypto` slice.
-//!
-//! The private adapter is deliberately small: this module owns the OS entropy
-//! boundary and never falls back to a pseudo-random generator. JavaScript
-//! validation and Node-shaped exceptions live in the public facade; this
-//! boundary repeats the important checks so the private primitive cannot be
-//! used to bypass them.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -24,11 +17,6 @@ const MAX_RANDOM_BYTES: usize = 16 * 1024 * 1024;
 const MAX_RANDOM_INT_RANGE: u64 = 1 << 48;
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 
-/// Install the version-one private Node crypto random primitive.
-///
-/// `allowed` is the host-operation permission. The primitive remains present
-/// when a generated graph requires it so graph/ABI validation stays atomic,
-/// but denied calls fail before entropy is requested or VM state is changed.
 pub(super) fn install(
   vm: &Vm,
   allowed: bool,

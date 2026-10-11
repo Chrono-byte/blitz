@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Bounded HTTP/1.1 server transport for the Blitz runtime.
 
 use std::convert::Infallible;
 use std::io;

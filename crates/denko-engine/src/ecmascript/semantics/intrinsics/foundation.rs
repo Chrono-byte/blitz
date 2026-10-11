@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Allocation of the cyclic Object, Function, and generator intrinsic graph.
 
 use super::*;
 

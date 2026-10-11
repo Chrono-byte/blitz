@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Independent verifier for compiled regular-expression programs.
 
 use std::collections::VecDeque;
 

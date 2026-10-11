@@ -63,27 +63,16 @@ pub(crate) use partial_descriptor::PartialDescriptor;
 pub(crate) use stack::{CallStack, HandlerStack};
 pub(crate) use yield_star::{YieldStarPhase, YieldStarResume, YieldStarState};
 
-/// Initial locals vector capacity per call frame.
 pub(super) const LOCALS_INITIAL_CAPACITY: usize = 64;
 
-/// Initial call-frame stack capacity.
 pub(super) const FRAMES_INITIAL_CAPACITY: usize = 64;
 
-/// Maximum prototype chain traversal depth before we assume a cycle.
 pub(super) const MAX_PROTOTYPE_DEPTH: usize = 128;
 
-/// Maximum gap we materialize into the dense backing store before treating an
-/// array write as sparse and storing it on the property bag instead.
 pub(super) const MAX_DENSE_ARRAY_GROWTH: usize = 1024;
 
-/// Number of tracked heap allocations between opportunistic GC attempts.
-///
-/// The prototype collector is intentionally pressure-driven instead of
-/// step-driven so tight numeric loops do not pay GC overhead unless they are
-/// actually creating heap garbage.
 pub(super) const GC_ALLOCATION_PRESSURE_THRESHOLD: usize = 128;
 
-/// Runtime GC pressure threshold, overrideable via `TSBLITZ_GC_PRESSURE_THRESHOLD`.
 pub(super) fn gc_allocation_pressure_threshold() -> usize {
   static THRESHOLD: OnceLock<usize> = OnceLock::new();
   *THRESHOLD.get_or_init(|| {
@@ -101,7 +90,6 @@ pub(super) type DynamicImportJob =
 
 #[derive(Clone, Copy)]
 pub(super) struct PropertyGetIcEntry {
-  /// A validated position, never a cached property value or receiver identity.
   pub(super) property_index: usize,
 }
 
@@ -143,10 +131,6 @@ pub struct Vm {
   pub(super) profiling: ProfilingState,
   pub(super) memory: VmMemory,
   pub(super) interrupts: crate::vm::interrupt::VmInterruptState,
-  /// Keeps this VM represented in the thread-local prototype heap lifetime.
-  ///
-  /// This is deliberately last so it is dropped after every Value-holding
-  /// field above it.
   pub(super) _gc_registration: gc::VmGcRegistration,
 }
 
@@ -194,12 +178,8 @@ pub(super) struct DirectEvalState {
 
 pub(super) struct ExecutionState {
   pub(super) active: ExecutionContext,
-  /// Number of active interpreter loops. Native calls only drain jobs when
-  /// this is zero, preserving JavaScript job run-to-completion.
   pub(super) interpreter_depth: usize,
-  /// Module bodies return their jobs to the host before a checkpoint.
   pub(super) defer_job_checkpoint: bool,
-  /// Changes whenever exception handling transfers execution to a handler.
   pub(super) control_flow_epoch: u64,
   pub(super) builtin_this_arg_prepended: bool,
   pub(super) pending_closure_env: Option<crate::closure_environment::ClosureEnvironment>,
@@ -230,7 +210,6 @@ pub(super) struct ModuleState {
 }
 
 pub(super) struct JobState {
-  /// Running host jobs may retain Values in opaque native closure captures.
   pub(super) active_depth: usize,
   pub(super) microtasks: VecDeque<Microtask>,
   pub(super) dynamic_imports: VecDeque<DynamicImportJob>,
@@ -269,7 +248,6 @@ pub(super) struct DirectCallSite {
   pub(super) target: crate::vm::jit::DirectCallTarget,
 }
 
-/// VM-owned per-chunk storage. Retaining the chunk prevents pointer-key reuse.
 pub(super) struct PropertyGetCache {
   pub(super) chunk: Arc<Chunk>,
   pub(super) site_indices: Vec<u32>,
@@ -281,8 +259,6 @@ pub(super) struct ModuleReadCache {
   pub(super) cells: RefCell<Vec<Option<BindingCell>>>,
 }
 
-/// Retaining the owner prevents its address from being reused as a cache key.
-/// Only compiled metadata is shared; each closure owns its properties and cells.
 pub(super) struct CachedClosurePrototype {
   pub(super) _owner: Arc<Chunk>,
   pub(super) prototype: Rc<Function>,
@@ -300,17 +276,13 @@ pub(super) struct CacheState {
   pub(super) active_module_reads: Option<Rc<ModuleReadCache>>,
   pub(super) property_get: HashMap<usize, Rc<PropertyGetCache>>,
   pub(super) active_property_get: Option<Rc<PropertyGetCache>>,
-  /// O(1) invalidation boundary for mutation-opaque native callbacks.
   pub(super) property_get_epoch: u64,
-  /// VM-local quickened plans keyed by portable code identity.
   pub(super) quickened: HashMap<usize, QuickenedPlan>,
   pub(super) active_quickened_chunk: usize,
   pub(super) active_quickened_sites: Arc<[SiteAction]>,
   pub(super) active_regions: Arc<[crate::vm::region::NativeRegion]>,
   pub(super) active_direct_calls: Rc<RefCell<Vec<Option<DirectCallSite>>>>,
-  /// Test and conformance switch for authoritative portable execution.
   pub(super) optimized_execution_enabled: bool,
-  /// Diagnostic switch that leaves legacy quickening active.
   pub(super) native_regions_enabled: bool,
 }
 
@@ -318,17 +290,13 @@ pub(super) struct ProfilingState {
   pub(super) enabled: bool,
   pub(super) opcode_counts: [u64; OP_COUNT],
   pub(super) run_started_at: Option<Instant>,
-  /// Feedback keyed by stable portable code identity, never native code.
   pub(super) functions: Vec<crate::vm::jit::FunctionProfile>,
   pub(super) pending_baseline: VecDeque<crate::vm::jit::FunctionId>,
-  /// Temporary identity bridge until executable code owns a stable ID. The
-  /// retained Arc intentionally prevents pointer reuse during this phase.
   pub(super) chunk_ids: HashMap<usize, crate::vm::jit::FunctionId>,
   pub(super) chunk_refs: Vec<Arc<Chunk>>,
   pub(super) next_function_id: u64,
   pub(super) active_function_identity: usize,
   pub(super) active_function_id: Option<crate::vm::jit::FunctionId>,
-  /// Avoid feedback-map traffic after a code has requested compilation.
   pub(super) last_hot_function: usize,
   pub(super) hot_functions: std::collections::HashSet<usize>,
   pub(super) jit: crate::vm::jit::JitRuntime,

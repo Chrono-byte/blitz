@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! `Blitz.serve` HTTP routing and VM callback bridge.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -135,7 +134,6 @@ struct ServerInner {
   websocket_prototype: Option<Value>,
 }
 
-/// VM-thread state for registered routes and the server resource.
 #[derive(Clone)]
 pub(super) struct ServerState(Rc<RefCell<ServerInner>>);
 

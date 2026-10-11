@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Array prototype methods installed after iterator methods.
 
 use super::*;
 
-/// FlattenIntoArray writes each result before observing the next source element.
 fn flatten_into_array(
   vm: &mut Vm,
   target: &Value,

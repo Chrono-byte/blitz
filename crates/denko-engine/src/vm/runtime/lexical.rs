@@ -22,14 +22,6 @@ impl Vm {
     }
   }
 
-  /// Check if any root-level slot names in a code conflict with the current lexical environment.
-  ///
-  /// Sloppy eval var declarations may not cross lexical bindings on the way
-  /// to the caller's variable environment. Outer function scopes may be shadowed.
-  ///
-  /// # Errors
-  ///
-  /// Returns `None` if no conflicts are found, or `Some(name)` if a conflicting binding name is detected.
   pub(crate) fn direct_eval_lexical_conflict_name(
     &self,
     code: &crate::bytecode::Chunk,
@@ -122,7 +114,6 @@ impl Vm {
     )
   }
 
-  /// Replace the current lexical environment.
   pub(crate) fn set_lexical_env(
     &mut self,
     env: Rc<RefCell<EnvironmentRecord>>,
@@ -130,7 +121,6 @@ impl Vm {
     self.execution.active.lexical_env = env;
   }
 
-  /// Adopt the caller's live bindings and slot metadata for a nested eval run.
   pub(crate) fn adopt_eval_context(
     &mut self,
     parent: &Vm,

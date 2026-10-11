@@ -27,8 +27,6 @@ impl Vm {
     self.ordinary_has_instance(constructor, value)
   }
 
-  /// ECMAScript `OrdinaryHasInstance`, also exposed by
-  /// `Function.prototype[Symbol.hasInstance]`.
   pub(crate) fn ordinary_has_instance(
     &mut self,
     constructor: &Value,

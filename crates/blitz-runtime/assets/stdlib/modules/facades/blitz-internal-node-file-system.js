@@ -1,8 +1,5 @@
 import { host } from "blitz-internal:host";
 
-// Direct Node compatibility host adapter. Unlike blitz-internal:file-system,
-// this bridge does not construct an Effect value: node:fs owns Node's sync,
-// callback, and promise completion contracts.
 const bridge = () => {
   if (host === undefined || host.abiVersion !== 1) {
     throw new Error("Blitz host ABI v1 is not installed");

@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Error constructors and prototype objects.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -11,7 +10,6 @@ use crate::runtime_utils::{
 };
 use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
 
-/// Constructors and prototype objects for the native Error family.
 pub(crate) struct ErrorIntrinsics {
   pub(crate) error_constructor: Value,
   pub(crate) aggregate_error_constructor: Value,
@@ -115,7 +113,6 @@ fn create_named_error_constructor(
   constructor
 }
 
-/// Creates Error, AggregateError, and the native Error subclasses.
 pub(crate) fn create_error_intrinsics(
   object_prototype: &Rc<RefCell<ObjectData>>,
   function_prototype: &Rc<RefCell<ObjectData>>,

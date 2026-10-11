@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 use super::*;
 
-/// Installs hidden internal builtins required for ECMAScript semantics.
 pub(crate) fn install_hidden_builtins(
   intrinsics: &mut Intrinsics,
   intrinsic_eval: Value,

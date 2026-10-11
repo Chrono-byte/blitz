@@ -1,6 +1,3 @@
-// Predicates are deliberately limited to brands observable through Blitz's
-// ECMAScript builtins. Node/V8-only values return false rather than being
-// inferred from a user-controlled prototype or tag.
 const tag = value => {
   if (value === null || (typeof value !== "object" && typeof value !== "function")) return "";
   try {
@@ -126,8 +123,6 @@ const isNativeError = value => {
   }
 };
 
-// Blitz does not expose V8's External/CryptoKey/KeyObject brands, module
-// namespace identity, Weak collections, async-function brand, or Proxy brand.
 const unsupported = () => false;
 const isArgumentsObject = unsupported;
 const isAsyncFunction = unsupported;

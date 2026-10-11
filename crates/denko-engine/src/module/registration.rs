@@ -364,11 +364,6 @@ impl ModuleLoader {
     self.declaration_source(specifier)
   }
 
-  /// Return the canonical URL and metadata object for a module record.
-  ///
-  /// The object is cached on the record, so repeated `import.meta` accesses
-  /// in one realm preserve identity. The loader owns the record and therefore
-  /// also owns the metadata lifetime; no host state is involved.
   pub(crate) fn import_meta_for(
     &mut self,
     specifier: &str,

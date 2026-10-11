@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Console output and diagnostic helpers supplied by the Blitz CLI host.
 
 use std::cell::RefCell;
 use std::collections::HashMap;

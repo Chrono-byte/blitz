@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 use super::*;
 
-/// Ordered additions of invariant numeric array elements in a counted loop.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(in crate::vm) struct ArrayReadSumRegion {
   pub entry_pc: usize,

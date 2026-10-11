@@ -1,22 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Expression compilation
-//!
-//! Handles compilation of expressions from the AST into bytecode,
-//! including:
-//! - Literals (numeric, string, boolean, null, this)
-//! - Template literals and tagged templates
-//! - Object and array literals
-//! - Function and arrow function expressions
-//! - Member access (static and computed)
-//! - Binary and unary operators
-//! - Assignment expressions
-//! - Conditional (ternary) expressions
-//! - Sequence expressions
-//! - Logical operators (&&, ||, ??)
-//!
-//! This module is part of the compiler's multi-phase compilation process.
-//! Expression compilation is recursive and produces compiler-owned virtual
-//! instructions that are finalized as bytecode v2.
 
 use super::emit::LoweringOpcode;
 use crate::{CompilerError, value::Value};
@@ -110,11 +92,6 @@ fn string_literal_value(source: &str) -> Option<js_string::JsString> {
 }
 
 impl super::Compiler {
-  /// Compile an expression from the AST into bytecode.
-  ///
-  /// This is the main entry point for expression compilation. It recursively
-  /// processes expressions and emits appropriate bytecode operations to the
-  /// current code.
   pub(super) fn compile_expr_oast(
     &mut self,
     expr: &oast::Expression,
@@ -291,9 +268,6 @@ impl super::Compiler {
         self.emit_function_index(idx, LINE);
       }
       OExpr::ObjectExpression(obj) => {
-        // Plain static data fields need no descriptor objects or helper calls.
-        // Keys and values are still evaluated in source order, and BuildObject
-        // defines fresh own data properties rather than invoking inherited setters.
         let plain_data = obj.properties.len() <= u8::MAX as usize
           && obj.properties.iter().all(|property| {
             let oast::ObjectPropertyKind::ObjectProperty(property) = property else {

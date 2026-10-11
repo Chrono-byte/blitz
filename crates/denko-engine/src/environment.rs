@@ -1,9 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Execution-context lexical environment records.
-//!
-//! This module provides a lightweight runtime model of lexical and object
-//! environment records with parent links. The VM uses these records for
-//! lexical bindings, direct `eval`, and `with`-environment lookup.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -325,7 +320,6 @@ impl EnvironmentRecord {
     Ok(false)
   }
 
-  /// Read this record's binding values without traversing its outer environment.
   pub(crate) fn own_binding_values(&self) -> impl Iterator<Item = Value> + '_ {
     self
       .bindings

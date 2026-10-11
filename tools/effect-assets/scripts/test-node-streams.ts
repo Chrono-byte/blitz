@@ -183,7 +183,6 @@ try {
   writeFileSync(entry, fixture, "utf8");
 
   const { command, args } = blitzCommand(["--module", entry]);
-  // A clean Cargo target also needs time to compile the executable.
   const result = spawnSync(command, args, { cwd: REPOSITORY, encoding: "utf8", timeout: command === "cargo" ? 300_000 : 30_000 });
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`${command} failed:\n${result.stdout}\n${result.stderr}`);

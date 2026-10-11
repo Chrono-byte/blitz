@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! WeakRef and FinalizationRegistry builtins backed by the prototype collector.
 
 use std::cell::RefCell;
 use std::rc::Rc;

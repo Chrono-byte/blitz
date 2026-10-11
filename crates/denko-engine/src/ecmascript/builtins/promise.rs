@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Promise builtin functions and prototype methods
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -386,7 +385,6 @@ fn aggregate_error(
   vm.construct_value(&constructor, &[errors])
 }
 
-/// 27.2 Promise Objects
 #[allow(clippy::too_many_lines)]
 pub(crate) fn create_promise_intrinsics(
   object_proto_map: &Rc<RefCell<ObjectData>>,

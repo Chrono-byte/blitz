@@ -1,11 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Scoped transport ownership for the JavaScript `blitz:app` facade.
-//!
-//! This module deliberately contains no VM or Effect implementation. An
-//! integration adapter supplies the request/event channels and turns this
-//! resource into an upstream Effect. The resource owns the existing
-//! [`HttpServer`] and a small path-filtering forwarder, so application serving
-//! does not create a second HTTP transport.
 
 use std::fmt;
 use std::io;
@@ -18,14 +11,10 @@ use tokio::task::JoinHandle;
 use crate::net::http::{HttpRequestEvent, HttpResponse, HttpServer};
 use crate::net::websocket::{WebSocketEvent, WebSocketServerOptions};
 
-/// Options validated before an application listener is acquired.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct AppTransportOptions {
-  /// IP address accepted by the current HTTP host.
   pub(crate) hostname: String,
-  /// TCP port; zero delegates port selection to the operating system.
   pub(crate) port: u16,
-  /// Exact HTTP path routed to the application adapter.
   pub(crate) rpc_path: String,
 }
 
@@ -61,12 +50,9 @@ impl AppTransportOptions {
   }
 }
 
-/// Failure to acquire an application transport.
 #[derive(Debug)]
 pub(crate) enum AppTransportError {
-  /// Hostname, port, or RPC path failed validation.
   InvalidOptions(String),
-  /// The operating system rejected the bind.
   Bind(io::Error),
 }
 
@@ -93,11 +79,6 @@ struct TransportState {
   closed: bool,
 }
 
-/// An acquired application listener and its path-routing task.
-///
-/// `close` is safe to call more than once. Every caller returns only after the
-/// first close has completed, which gives an Effect release finalizer a stable
-/// idempotent boundary.
 pub(crate) struct AppServerResource {
   state: Arc<Mutex<TransportState>>,
   closed: Notify,
@@ -105,12 +86,10 @@ pub(crate) struct AppServerResource {
 }
 
 impl AppServerResource {
-  /// Return the actual OS-selected listener address.
   pub(crate) const fn local_addr(&self) -> SocketAddr {
     self.local_addr
   }
 
-  /// Wait until release has fully stopped the listener and forwarder.
   pub(crate) async fn await_shutdown(&self) {
     let notified = self.closed.notified();
     if self.state.lock().await.closed {
@@ -119,7 +98,6 @@ impl AppServerResource {
     notified.await;
   }
 
-  /// Stop ingress and complete release exactly once.
   pub(crate) async fn close(&self) {
     let (server, forwarder) = {
       let mut state = self.state.lock().await;
@@ -152,17 +130,11 @@ impl AppServerResource {
     }
   }
 
-  /// Owned close operation suitable for a background runtime future.
   pub(crate) async fn close_owned(self: Arc<Self>) {
     self.close().await;
   }
 }
 
-/// Acquire an application transport around the existing `HttpServer`.
-///
-/// Validation occurs before any bind attempt. Only requests matching
-/// `rpc_path` are handed to the application channel; other paths receive the
-/// same ordinary 404 response used by the low-level host.
 pub(crate) async fn open_app_server(
   options: AppTransportOptions,
   requests: mpsc::Sender<HttpRequestEvent>,

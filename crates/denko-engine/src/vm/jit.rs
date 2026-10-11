@@ -1,8 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! JIT-owned metadata. This module deliberately contains no native code yet.
-//!
-//! The interpreter and JIT share stable instruction-index keyed identities and
-//! feedback records. Generated machine code must never be the owner of feedback.
 use crate::value::Value;
 mod abi;
 pub(crate) mod artifact;

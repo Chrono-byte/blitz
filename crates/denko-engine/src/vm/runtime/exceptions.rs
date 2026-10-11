@@ -42,8 +42,6 @@ impl Vm {
     result.map_err(|error| (error, thrown))
   }
 
-  /// Unwind call frames to the nearest exception handler, or propagate the
-  /// error if none exists.
   pub(super) fn unwind_to_handler(
     &mut self,
     thrown: Value,
@@ -87,7 +85,6 @@ impl Vm {
     Ok(())
   }
 
-  /// Helper to throw a JS exception value from bytecode or builtins.
   pub(crate) fn throw_value(
     &mut self,
     thrown: Value,
@@ -105,7 +102,6 @@ impl Vm {
     }
   }
 
-  /// Helper used by host code to interrupt execution via a JS exception.
   pub(crate) fn throw_exception(
     &mut self,
     thrown: Value,
@@ -145,7 +141,6 @@ impl Vm {
     }
   }
 
-  /// Throws a `TypeError` with the given message.
   pub(crate) fn throw_type_error(
     &mut self,
     message: &str,
@@ -156,7 +151,6 @@ impl Vm {
     self.throw_exception(err_val)
   }
 
-  /// Throws a `RangeError` with the given message.
   pub(crate) fn throw_range_error(
     &mut self,
     message: &str,
@@ -167,7 +161,6 @@ impl Vm {
     self.throw_exception(err_val)
   }
 
-  /// Throws a `ReferenceError` with the given message.
   pub(crate) fn throw_reference_error(
     &mut self,
     message: &str,
@@ -178,12 +171,10 @@ impl Vm {
     self.throw_exception(err_val)
   }
 
-  /// Returns `true` if the given value is a callable value.
   pub(crate) fn is_callable_value(value: &Value) -> bool {
     value.is_callable()
   }
 
-  /// Creates an intrinsic error value with the given name and message.
   pub(crate) fn create_intrinsic_error(
     &mut self,
     name: &str,

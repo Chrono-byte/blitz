@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-// Same checked function body as Denko; timing excludes loading and parsing.
 const fs = require("node:fs");
 const [file, warmupText, sampleText] = process.argv.slice(2);
 const warmups = Number(warmupText);

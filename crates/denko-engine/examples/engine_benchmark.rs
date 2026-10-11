@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Result-checked execution adapter for tools/benchmarks/compare.py.
 
 use denko::{
   Vm, compiler,
@@ -13,7 +12,6 @@ struct Arguments {
   file: std::path::PathBuf,
   warmups: usize,
   samples: std::num::NonZeroUsize,
-  /// Print the benchmark function bytecode before execution.
   #[arg(long)]
   disassemble: bool,
 }

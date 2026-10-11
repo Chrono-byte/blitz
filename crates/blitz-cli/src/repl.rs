@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Command-line presentation for an interactive hosted session.
 
 use std::env;
 use std::path::PathBuf;

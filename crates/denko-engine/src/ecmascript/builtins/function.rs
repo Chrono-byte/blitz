@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Function constructor and `Function.prototype` builtins.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -53,7 +52,6 @@ fn function_to_string(
   Ok(Value::String(source.into()))
 }
 
-/// The Function constructor installed into the global object.
 pub(crate) struct FunctionIntrinsics {
   pub(crate) constructor: Value,
 }
@@ -309,12 +307,6 @@ pub(crate) fn create_async_generator_function_constructor(
   constructor
 }
 
-/// Creates the Function constructor and installs the properties of
-/// `Function.prototype` on the preallocated foundation objects.
-///
-/// The foundation allocator owns the cyclic Function constructor/prototype
-/// graph. Keeping those allocations there ensures that all builtin functions
-/// created here retain the original prototype identities.
 pub(crate) fn create_function_intrinsics(
   globals: &Rc<RefCell<ObjectData>>,
   function_constructor_properties: &Rc<RefCell<ObjectData>>,

@@ -12,7 +12,6 @@ use crate::runtime_utils::{
 use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
 use num_traits::ToPrimitive;
 
-/// Returns the `AtomicsValueKind` for a typed array kind name, or `None` if not supported.
 pub(crate) fn atomics_value_kind(
   kind_name: &str
 ) -> Option<crate::runtime_utils::AtomicsValueKind> {
@@ -48,12 +47,10 @@ pub(crate) fn atomics_value_kind(
   }
 }
 
-/// Checks if Atomics.wait is supported for the given typed array kind.
 pub(crate) fn atomics_wait_kind(kind_name: &str) -> bool {
   matches!(kind_name, "Int32Array" | "BigInt64Array")
 }
 
-/// Normalizes an integer value to the range for a given bit width and signedness.
 pub(crate) fn atomics_normalize_integer(
   value: i128,
   bits: u32,
@@ -73,7 +70,6 @@ pub(crate) fn atomics_normalize_integer(
   v
 }
 
-/// Normalizes a BigInt value to the range for a 64-bit signed or unsigned integer.
 pub(crate) fn atomics_normalize_bigint(
   value: num_bigint::BigInt,
   signed: bool,
@@ -91,7 +87,6 @@ pub(crate) fn atomics_normalize_bigint(
   v
 }
 
-/// Builds the Atomics object with all its methods (load, store, compareExchange, wait, notify, etc.).
 pub(crate) fn build_atomics_object(
   object_proto_map: &Rc<RefCell<ObjectData>>,
   function_proto_map: &Rc<RefCell<ObjectData>>,

@@ -1,9 +1,5 @@
 import path from "node:path";
 
-// Keep the WHATWG constructors as aliases. Blitz's runtime currently provides
-// URL, while URLSearchParams is intentionally absent until the engine has the
-// corresponding global. Do not manufacture a second constructor here: callers
-// rely on node:url.URL === globalThis.URL.
 const URLConstructor = globalThis.URL;
 const URLSearchParamsConstructor = globalThis.URLSearchParams;
 
@@ -25,9 +21,6 @@ const requireURL = () => {
 
 const asURL = (value) => {
   const Constructor = requireURL();
-  // Blitz's URL host object is property-backed and does not currently provide
-  // the full String/URL conversion protocol. Reading href also accepts the
-  // URL objects produced by this facade without changing their identity.
   if (value !== null && typeof value === "object" && typeof value.href === "string") {
     return new Constructor(value.href);
   }

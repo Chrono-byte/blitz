@@ -223,11 +223,6 @@ impl Vm {
     self.call_with_this(callee, this_arg, args)
   }
 
-  /// Host hook: construct a callable with `new` semantics.
-  ///
-  /// # Errors
-  ///
-  /// Returns a [`crate::errors::RuntimeError`] if the construction fails.
   pub(crate) fn construct_value_with_new_target(
     &mut self,
     callee: &Value,
@@ -624,11 +619,6 @@ impl Vm {
     Ok(result)
   }
 
-  /// Calls a function without an explicit receiver.
-  ///
-  /// Native builtins use the same argument convention as bytecode v2
-  /// `Call` opcode: user arguments begin at index zero. Closures still pass
-  /// through ordinary ECMAScript `this` preparation.
   pub(super) fn call_value(
     &mut self,
     callee: &Value,
@@ -687,7 +677,6 @@ impl Vm {
     }
   }
 
-  /// Calls a function with an explicit `this` value and arguments.
   #[allow(clippy::too_many_lines)]
   pub(super) fn call_with_this(
     &mut self,
@@ -735,8 +724,6 @@ impl Vm {
           )
         }
         Value::Builtin(f) | Value::BuiltinObject(f, _) => {
-          // Short method calls need no heap buffer just to prepend `this`.
-          // The VM temporary roots above retain every value across reentrant calls.
           let mut inline = std::array::from_fn::<_, 5, _>(|_| Value::Undefined);
           let mut overflow = Vec::new();
           let call_args = if args.len() < inline.len() {
@@ -856,8 +843,6 @@ impl Vm {
     result
   }
 
-  /// Prepares the arguments for a function call, handling rest parameters.
-  /// Configures the call frame and local variables for a function call.
   #[allow(clippy::too_many_lines)]
   pub(super) fn configure_call_frame(
     &mut self,
@@ -1069,7 +1054,6 @@ impl Vm {
     Ok(())
   }
 
-  /// Save the caller's state and set up the callee.
   pub(super) fn push_call_frame(
     &mut self,
     proto: &Rc<Function>,

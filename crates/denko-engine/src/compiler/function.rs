@@ -7,10 +7,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 impl Compiler {
-  /// Compile a function declaration into a Function with its own scope.
-  ///
-  /// Creates an inner compiler scope, compiles the function body, and returns
-  /// the compiled prototype with all metadata about parameters, locals, and closures.
   pub(super) fn compile_function(
     &mut self,
     name: &str,
@@ -317,13 +313,6 @@ impl Compiler {
     ))
   }
 
-  /// Compile an arrow function expression into a Function with its own scope.
-  ///
-  /// Similar to `compile_function` but with key differences:
-  /// - No `arguments` binding
-  /// - Captures `this` from enclosing scope
-  /// - Not usable as a constructor
-  /// - Supports implicit return for expression bodies
   pub(super) fn compile_arrow_function(
     &mut self,
     name: &str,

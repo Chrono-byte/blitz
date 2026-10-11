@@ -152,7 +152,6 @@ fn is_decode_uri_reserved_byte(byte: u8) -> bool {
   )
 }
 
-/// Implements the global decodeURI function.
 pub(crate) fn global_decode_uri(
   vm: &mut Vm,
   args: &[Value],
@@ -163,7 +162,6 @@ pub(crate) fn global_decode_uri(
   Ok(Value::String(percent_decode(vm, &s, false)?))
 }
 
-/// Implements the global decodeURIComponent function.
 pub(crate) fn global_decode_uri_component(
   vm: &mut Vm,
   args: &[Value],
@@ -174,7 +172,6 @@ pub(crate) fn global_decode_uri_component(
   Ok(Value::String(percent_decode(vm, &s, true)?))
 }
 
-/// Implements the global encodeURI function.
 pub(crate) fn global_encode_uri(
   vm: &mut Vm,
   args: &[Value],
@@ -185,7 +182,6 @@ pub(crate) fn global_encode_uri(
   Ok(Value::String(percent_encode(vm, &s, false)?.into()))
 }
 
-/// Implements the global encodeURIComponent function.
 pub(crate) fn global_encode_uri_component(
   vm: &mut Vm,
   args: &[Value],

@@ -188,9 +188,6 @@ EventEmitter.prototype.emit = function(eventName, ...args) {
         error.code = "ERR_UNHANDLED_ERROR";
         error.context = args[0];
       }
-      // node:domain is deliberately not imported here: domains build on this
-      // root, and importing them back would create a circular root dependency.
-      // An explicitly added emitter advertises its domain through this hook.
       const domain = this.domain;
       if (domain !== null && domain !== undefined && typeof domain._errorHandler === "function") {
         domain._errorHandler(error, this);

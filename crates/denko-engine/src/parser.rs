@@ -112,7 +112,6 @@ fn rewrite_eval_new_target(source: &str) -> String {
 /// Use `new_from_source` with `parse`, or use the convenience `parse_source`
 /// and `parse_source_with_type` functions.
 pub struct Parser {
-  /// Source text retained until `parse` consumes it.
   source: Option<String>,
 }
 

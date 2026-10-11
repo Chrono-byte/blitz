@@ -1,6 +1,5 @@
 #![allow(missing_docs)]
 // SPDX-License-Identifier: MPL-2.0
-//! Criterion benchmark suite for the Blitz VM pipeline.
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -16,7 +15,6 @@ use denko::runtime_utils;
 use denko::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
 use denko::vm::Vm;
 
-/// Fixtures for cold-start benchmarking (executed once per benchmark).
 const COLD_START_FIXTURES: [&str; 4] = [
   "arithmetic_loop",
   "function_calls",
@@ -24,7 +22,6 @@ const COLD_START_FIXTURES: [&str; 4] = [
   "closure_calls",
 ];
 
-/// Fixtures for fast execution benchmarking (executed once per benchmark).
 const FAST_EXEC_FIXTURES: [&str; 21] = [
   "parse_numbers",
   "parse_numbers_bases",
@@ -49,7 +46,6 @@ const FAST_EXEC_FIXTURES: [&str; 21] = [
   "typed_array_sort",
 ];
 
-/// Fixtures for slow execution benchmarking (executed once per benchmark).
 const SLOW_EXEC_FIXTURES: [&str; 6] = [
   "try_catch_no_errors",
   "try_catch_errors",
@@ -59,13 +55,10 @@ const SLOW_EXEC_FIXTURES: [&str; 6] = [
   "array_filter",
 ];
 
-/// Fixtures for stress execution benchmarking (executed once per benchmark).
 const STRESS_EXEC_FIXTURES: [&str; 2] = ["recursive_fib", "large_array_creation"];
 
-/// Extra fixtures for benchmarking (executed once per benchmark).
 const EXTRA_FIXTURES: [&str; 3] = ["dom_like_access", "array_iteration", "config_lookup"];
 
-/// Returns a new `ObjectData` instance with `globalThis` property installed.
 fn benchmark_globals() -> Rc<RefCell<ObjectData>> {
   let globals = Rc::new(RefCell::new(ObjectData::new()));
   globals.borrow_mut().properties.insert(
@@ -76,7 +69,6 @@ fn benchmark_globals() -> Rc<RefCell<ObjectData>> {
   globals
 }
 
-/// Returns a source string for the unicode comment hotpath benchmark.
 fn unicode_comment_hotpath_source() -> String {
   denko::js!(
     r#"
@@ -93,7 +85,6 @@ fn unicode_comment_hotpath_source() -> String {
   .to_string()
 }
 
-/// Returns a source string for the comment-only eval benchmark.
 fn comment_only_eval_source() -> String {
   denko::js!(
     r#"
@@ -105,24 +96,20 @@ fn comment_only_eval_source() -> String {
   .to_string()
 }
 
-/// Returns a `Value` for the hotpath number value.
 fn hotpath_number_value() -> Value {
   Value::String("0x1234".to_string().into())
 }
 
-/// Compiles a benchmark fixture from the given path.
 fn compile_fixture(path: &Path) -> denko::bytecode::Chunk {
   let source = std::fs::read_to_string(path).expect("benchmark fixture should be readable");
   let session = Parser::parse_source(&source).expect("benchmark fixture should parse as JS");
   compiler::compile_session(&session).expect("benchmark fixture should compile")
 }
 
-/// Returns the source text for the given benchmark fixture path.
 fn fixture_source(path: &Path) -> String {
   std::fs::read_to_string(path).expect("benchmark fixture should be readable")
 }
 
-/// Returns a benchmark fixture path relative to this crate.
 fn fixture_path(fixture: &str) -> PathBuf {
   Path::new(env!("CARGO_MANIFEST_DIR"))
     .join("benches")
@@ -130,7 +117,6 @@ fn fixture_path(fixture: &str) -> PathBuf {
     .join(format!("{fixture}.js"))
 }
 
-/// Returns the baseline set of global names from the given globals object.
 fn baseline_global_names(globals: &Rc<RefCell<ObjectData>>) -> HashSet<String> {
   globals
     .borrow()
@@ -143,7 +129,6 @@ fn baseline_global_names(globals: &Rc<RefCell<ObjectData>>) -> HashSet<String> {
     .collect()
 }
 
-/// Benchmarks the compilation of benchmark fixtures.
 fn bench_compile(c: &mut Criterion) {
   let mut group = c.benchmark_group("compile");
   group.sample_size(30);
@@ -173,7 +158,6 @@ fn bench_compile(c: &mut Criterion) {
   group.finish();
 }
 
-/// Benchmarks the execution of benchmark fixtures in cold start scenarios.
 fn bench_execute_cold(c: &mut Criterion) {
   let mut group = c.benchmark_group("execute_cold");
   group.sample_size(10);
@@ -198,7 +182,6 @@ fn bench_execute_cold(c: &mut Criterion) {
   group.finish();
 }
 
-/// Benchmarks the execution of benchmark fixtures in fast execution scenarios.
 fn bench_execute_fast(c: &mut Criterion) {
   let mut group = c.benchmark_group("execute_fast");
   group.sample_size(10);
@@ -232,7 +215,6 @@ fn bench_execute_fast(c: &mut Criterion) {
   group.finish();
 }
 
-/// Benchmarks the execution of benchmark fixtures in slow execution scenarios.
 fn bench_execute_slow(c: &mut Criterion) {
   let mut group = c.benchmark_group("execute_slow");
   group.sample_size(10);
@@ -266,7 +248,6 @@ fn bench_execute_slow(c: &mut Criterion) {
   group.finish();
 }
 
-/// Benchmarks the execution of benchmark fixtures in stress scenarios.
 fn bench_execute_stress(c: &mut Criterion) {
   let mut group = c.benchmark_group("execute_stress");
   group.sample_size(10);
@@ -300,7 +281,6 @@ fn bench_execute_stress(c: &mut Criterion) {
   group.finish();
 }
 
-/// Benchmarks the execution of unicode hotpath fixtures.
 fn bench_execute_unicode_hotpaths(c: &mut Criterion) {
   let mut group = c.benchmark_group("execute_unicode_hotpaths");
   group.sample_size(10);
@@ -340,7 +320,6 @@ fn bench_execute_unicode_hotpaths(c: &mut Criterion) {
   group.finish();
 }
 
-/// Benchmarks micro hotpaths, such as string concatenation and number-to-string conversions.
 fn bench_micro_hotpaths(c: &mut Criterion) {
   let mut group = c.benchmark_group("micro_hotpaths");
   group.sample_size(20);

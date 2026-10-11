@@ -2,8 +2,6 @@
 
 use super::*;
 
-/// A counted, assignment-update loop summing an invariant own-property chain.
-/// Every register written by the body is also described by this plan.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(in crate::vm) struct PropertyChainRegion {
   pub(in crate::vm) entry_pc: usize,
@@ -196,7 +194,6 @@ mod tests {
       .expect("recognized chain");
     for offset in [0, 1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14] {
       let mut changed = (**code).clone();
-      // Change the destination register without changing the opcode or other operands.
       changed.words[region.entry_pc + offset] ^= 1 << 8;
       assert!(
         PropertyChainRegion::decode(&changed, region.entry_pc).is_none(),

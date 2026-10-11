@@ -13,7 +13,6 @@ use std::rc::{Rc, Weak};
 /// keeping identity, weak references, and mutation behind one migration seam.
 #[derive(Clone)]
 pub struct ClosureEnvironment {
-  // Keep the closure variant small: its size determines every register Value's size.
   shared: Rc<ClosureEnvironmentData>,
 }
 
@@ -93,8 +92,6 @@ impl WeakClosureEnvironment {
   pub(crate) fn upgrade(&self) -> Option<ClosureEnvironment> {
     let arena = self.arena.upgrade()?;
     let handle = arena.borrow().upgrade(self.handle)?;
-    // The arena generation owns liveness. The shared pointer is only a cache;
-    // GC must still recover cells after the last ordinary handle is dropped.
     let shared = self
       .shared
       .upgrade()

@@ -1,16 +1,9 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Metadata for the pinned Effect and Blitz stdlib module graphs.
-//!
-//! Upstream Effect and Blitz stdlib files remain generated assets owned by the
-//! asset-generation workspace. Runtime registration is provided by the
-//! prelinked artifact.
 
-/// The pinned manifests are policy inputs, not source-module registrations.
 pub(crate) const EFFECT_MANIFEST_BYTES: &[u8] = include_bytes!(concat!(
   env!("CARGO_MANIFEST_DIR"),
   "/assets/effect/3.22.1/manifest.json"
 ));
-/// Generated Blitz stdlib manifest pinned by the runtime graph wrapper.
 pub(crate) const STDLIB_MANIFEST_BYTES: &[u8] = include_bytes!(concat!(
   env!("CARGO_MANIFEST_DIR"),
   "/assets/stdlib/manifest.json"

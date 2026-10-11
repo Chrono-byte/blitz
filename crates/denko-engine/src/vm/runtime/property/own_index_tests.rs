@@ -114,7 +114,6 @@ fn own_index_reads_do_not_retain_stale_host_values_or_hide_uninitialized_state()
       .expect("first"),
     Value::Number(1.0)
   );
-  // Direct host writes need no generation bump: the index cache reads the live descriptor.
   object.borrow_mut().properties.insert(
     key.clone(),
     PropertyDescriptor::ordinary_data(Value::Number(2.0)),

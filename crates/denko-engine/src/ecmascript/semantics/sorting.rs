@@ -4,7 +4,6 @@ use std::cmp::Ordering;
 
 use crate::RuntimeError;
 
-/// Stable merge sort. Comparator errors stop all further comparisons immediately.
 pub(crate) fn sort_values<T: Clone>(
   values: &mut [T],
   mut compare: impl FnMut(&T, &T) -> Result<Ordering, RuntimeError>,

@@ -1,30 +1,19 @@
-# Rustfmt configuration for consistent code formatting
-# See: https://rust-lang.github.io/rustfmt/
-# This configuration uses only stable features
 
-# Edition
 edition = "2024"
 
-# Use spaces for indentation (2 spaces per tab)
 hard_tabs = false
 tab_spaces = 2
 
-# Put a newline after the opening brace of a block
 newline_style = "Unix"
 
-# Controls the formatting of function signatures
 fn_params_layout = "Vertical"
 
-# Maximum width of each line
 chain_width = 50
 use_small_heuristics = "Default"
 
-# Controls the formatting of match expressions
 match_arm_leading_pipes = "Never"
 match_block_trailing_comma = false
 
-# Controls the formatting of expressions
 remove_nested_parens = true
 
-# Controls the formatting of imports
 reorder_imports = true

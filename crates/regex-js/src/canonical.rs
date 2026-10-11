@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 use crate::Flags;
 
-/// ECMAScript Canonicalize for a single input character.
 pub(crate) fn canonicalize(
   symbol: u32,
   flags: Flags,
@@ -39,7 +38,6 @@ pub(crate) fn symbols_equal(
   canonicalize(left, flags) == canonicalize(right, flags)
 }
 
-/// Test a character against a source range after case canonicalization.
 pub(crate) fn range_contains(
   start: u32,
   end: u32,

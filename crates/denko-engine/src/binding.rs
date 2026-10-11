@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! Mutable storage identity for ECMAScript bindings.
-
 use crate::value::Value;
 use std::cell::RefCell;
 use std::rc::Rc;

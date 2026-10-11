@@ -100,7 +100,6 @@ fn typed_array_create_same(
   typed_array_create_with_kind(vm, receiver, &source_kind, length)
 }
 
-/// TypedArrayCreateSameType uses the executing realm's intrinsic, not @@species.
 fn typed_array_create_same_type(
   vm: &mut Vm,
   source_kind: &str,

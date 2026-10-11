@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! Inert native artifacts produced away from the VM thread.
-
 use super::ir::{ExitOutcome, ResumePoint, TypedValue, VerifiedTypedFunction};
 use super::native::RuntimeHelperId;
 
@@ -192,10 +190,6 @@ impl ShortBranchCode {
     self.bytes.extend_from_slice(bytes);
   }
 
-  /// Emit a conditional branch to the guard failure block using a 32-bit
-  /// displacement. The previous 8-bit form (`jb`/`jae` rel8) only allowed
-  /// ±127 bytes and would fail with `TooLarge` for larger artifacts. Using
-  /// the `0F 82/83` rel32 form supports the full 64 KiB artifact limit.
   fn guard_branch(
     &mut self,
     opcode: u8,

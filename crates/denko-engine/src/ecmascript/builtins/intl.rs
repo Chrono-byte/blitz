@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Minimal ECMA-402 intrinsic graph and locale-list semantics.
 
 use std::cell::RefCell;
 use std::collections::HashSet;

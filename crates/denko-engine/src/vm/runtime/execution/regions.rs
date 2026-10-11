@@ -47,7 +47,6 @@ impl Vm {
     let Some(index) = number(region.index_slot) else {
       return Ok(false);
     };
-    // A skipped body must not inspect the object or disturb its key register.
     if index.partial_cmp(&region.limit) != Some(std::cmp::Ordering::Less) {
       registers[region.index_register] = Value::Number(index);
       registers[region.limit_register] = Value::Number(region.limit);
@@ -130,7 +129,6 @@ impl Vm {
       registers[region.key_register] =
         Value::String(last_key.expect("validated nonempty property chain"));
     }
-    // Both the backedge and completed exits have executed the next comparison.
     registers[region.index_register] = Value::Number(prepared.index);
     registers[region.limit_register] = Value::Number(region.limit);
     self.execution.active.pc = if prepared.index < prepared.limit {

@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! JSON-safe values used at the RPC boundary.
 
 use std::fmt;
 

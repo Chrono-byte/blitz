@@ -1,5 +1,3 @@
-// Prefer the runtime's performance singleton. In Blitz this may be absent, so
-// the fallback below provides a deliberately small, bounded User Timing slice.
 const hostPerformance = globalThis.performance;
 const hasHostPerformance = hostPerformance !== undefined && hostPerformance !== null
   && (typeof hostPerformance === "object" || typeof hostPerformance === "function")
@@ -13,9 +11,6 @@ const hostConstructor = name => {
   return typeof value === "function" ? value : undefined;
 };
 
-// These are globals in Node 24 and in web-compatible hosts. Do not manufacture
-// constructors when the host does not provide them: instanceof and prototype
-// identity would otherwise be misleading.
 const PerformanceObserver = hostConstructor("PerformanceObserver");
 const PerformanceObserverEntryList = hostConstructor("PerformanceObserverEntryList");
 const PerformanceEntry = hostConstructor("PerformanceEntry");
@@ -155,8 +150,6 @@ const createLocalPerformance = () => {
 
 export const performance = hasHostPerformance ? hostPerformance : createLocalPerformance();
 
-// Node's constants are stable values, but there is no host capability behind
-// them in Blitz. They describe entry metadata; they do not claim GC support.
 export const constants = Object.freeze({
   NODE_PERFORMANCE_GC_MAJOR: 4,
   NODE_PERFORMANCE_GC_MINOR: 1,

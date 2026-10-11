@@ -2,13 +2,6 @@
 
 use super::*;
 
-/// Install the ABI object consumed by the prelinked private adapter.
-///
-/// Acquisition is lazy, expected validation/bind failures stay in the Effect
-/// error channel, and scoped release closes the listener and active
-/// connections idempotently. The transitional limitation remains that requests
-/// are forwarded to the ordinary runtime event channel rather than invoking
-/// the `blitz:app` router/layers; host capability validation does not hide it.
 pub(super) struct HostBridgeInputs {
   pub(super) requests: mpsc::Sender<HttpRequestEvent>,
   pub(super) websocket_events: mpsc::Sender<WebSocketEvent>,
@@ -132,10 +125,6 @@ pub(super) fn object(prototype: Value) -> Value {
   ))))
 }
 
-/// Build a public host callable with ordinary function metadata.
-///
-/// Bare `Value::Builtin` values are reserved for VM-internal callbacks whose
-/// properties are not observable by application code.
 pub(crate) fn host_function(
   vm: &Vm,
   name: &str,

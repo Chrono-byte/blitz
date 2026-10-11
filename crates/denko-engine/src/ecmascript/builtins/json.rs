@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! JSON namespace object.
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -246,8 +245,6 @@ fn append_quoted_json_string(
   output.push('"');
 }
 
-/// Serialize shallow ordinary records without temporary holders, descriptors,
-/// or per-property output strings. Decline everything that can execute JS.
 pub(crate) fn stringify_plain_record(value: &Value) -> Option<String> {
   let Value::Object(object) = value else {
     return None;
@@ -593,7 +590,6 @@ fn stringify_gap(
   }
 }
 
-/// Creates the JSON namespace object.
 pub(crate) fn create_json_object(
   object_prototype: &Rc<RefCell<ObjectData>>,
   function_prototype: &Rc<RefCell<ObjectData>>,

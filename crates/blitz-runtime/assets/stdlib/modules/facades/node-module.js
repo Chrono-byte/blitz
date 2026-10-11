@@ -1,7 +1,3 @@
-// Node 24.18.0's builtin inventory is static in Node. Keep the pinned
-// inventory here instead of consulting the host Node process: Blitz may be
-// running without Node, and the list describes the targeted compatibility
-// release rather than the host that generated these assets.
 export const builtinModules = Object.freeze([
   "_http_agent",
   "_http_client",
@@ -88,13 +84,8 @@ export const isBuiltin = moduleName => {
     || (moduleName.startsWith("node:") && builtinSet.has(moduleName.slice(5)));
 };
 
-// Blitz exposes ESM facades rather than mutable CommonJS builtin namespaces.
-// There is therefore no CJS namespace to synchronize with these bindings.
 export const syncBuiltinESMExports = () => undefined;
 
-// Node 24 exposes only compile-cache status constants from module.constants.
-// Blitz has no compile cache, but these documented enum values are still
-// meaningful and do not claim that the cache itself is available.
 const compileCacheStatus = Object.freeze(Object.assign(Object.create(null), {
   FAILED: 0,
   ENABLED: 1,
@@ -106,8 +97,6 @@ export const constants = Object.freeze(Object.assign(Object.create(null), {
   compileCacheStatus,
 }));
 
-// `sourceMapsEnabled` is a `process` property in Node 24, not a
-// node:module export; it is intentionally not invented in this facade.
 const sourceMapsSupport = {
   enabled: false,
   nodeModules: false,
@@ -135,9 +124,6 @@ const unsupported = operation => {
   throw error;
 };
 
-// Source-map rewriting is not implemented by the current Blitz stack-trace
-// machinery. Disabling support is already the runtime state and is safe; an
-// attempt to enable it fails instead of reporting support that has no effect.
 export const setSourceMapsSupport = (enabled, options = {}) => {
   if (typeof enabled !== "boolean") invalidArgument("enabled", "of type boolean", enabled);
   if (options === null || typeof options !== "object") invalidArgument("options", "of type object", options);
@@ -153,9 +139,6 @@ export const setSourceMapsSupport = (enabled, options = {}) => {
   sourceMapsSupport.generatedCode = options.generatedCode ?? false;
 };
 
-// These APIs require a CommonJS loader or loader hooks, neither of which is
-// present in Blitz. Keep the names explicit so callers get a stable failure,
-// never a fabricated require function or partially active hook.
 export const createRequire = (..._args) => unsupported("createRequire");
 export const findPackageJSON = (..._args) => unsupported("findPackageJSON");
 export const register = (..._args) => unsupported("register");

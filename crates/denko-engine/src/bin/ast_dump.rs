@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Binary used to dump AST for debugging.
 #![allow(missing_docs)]
 
 use clap::Parser as ClapParser;
@@ -13,24 +12,12 @@ struct Args {
   path: String,
 }
 
-/// Represents a file path, with the file name and directory path separated.
 struct Path {
-  /// The file name.
   file: String,
-  /// The directory path.
   dir: String,
 }
 
 impl Path {
-  /// Create a new `Path` from the given path string.
-  ///
-  /// # Examples
-  ///
-  /// ```
-  /// let path = Path::new("/path/to/file.txt");
-  /// assert_eq!(path.file, "file.txt");
-  /// assert_eq!(path.dir, "/path/to");
-  /// ```
   fn new(path: &str) -> Self {
     let file = std::path::Path::new(path)
       .file_name()

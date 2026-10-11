@@ -1,9 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Internal storage and branding for the byte-oriented ArrayBuffer views.
-//!
-//! The names in this module are VM slots, not ECMAScript properties. Keeping
-//! them here prevents a script from manufacturing a typed array by assigning
-//! properties with internal-looking names.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -211,10 +206,6 @@ pub(crate) fn byte_view_details(value: &Value) -> Option<ByteViewDetails> {
 }
 
 impl Vm {
-  /// Return opaque host access to a genuine attached `Uint8Array` view.
-  ///
-  /// `Int8Array`, `Uint8ClampedArray`, detached views, proxies, and objects
-  /// that merely spoof internal-looking properties are rejected.
   #[must_use]
   pub fn uint8_array_byte_view(
     &self,
@@ -542,7 +533,6 @@ mod tests {
       byte_view_index_value(&view, 0),
       Some(Value::Number(67_305_985.0))
     );
-    // Host mutation through the compatibility API invalidates packed storage.
     data.borrow_mut().truncate(2);
     assert_eq!(host.len(), 0);
     assert!(!host.write_from(0, &[9]));

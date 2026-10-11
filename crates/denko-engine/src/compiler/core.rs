@@ -1,9 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Core Compiler struct and foundational implementation.
-//!
-//! This module contains the basic structure and initialization logic for the compiler,
-//! along with fundamental helper methods for scope management, local variable tracking,
-//! and basic bytecode emission.
 
 use super::bytecode::Lowering;
 use super::emit::LoweringOpcode;
@@ -22,7 +17,6 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-/// Compiles a given function with an overridden compile context.
 pub(crate) fn with_compile_context_override<R>(
   context: Option<(bool, bool)>,
   f: impl FnOnce() -> R,
@@ -43,88 +37,42 @@ pub struct ModuleContext {
   pub namespace_exports: HashMap<String, usize>,
 }
 
-/// Compiles AST to bytecode
 pub(crate) struct Compiler {
-  /// Current chunk being compiled
   pub chunk: Chunk,
-  /// Compiler-owned virtual instruction stream. Frontend operations never
-  /// enter `Chunk::words`; only finalized bytecode v2 words are stored there.
   pub(crate) lowering: Lowering,
-  /// Original source text for this compilation unit
   pub source_text: Arc<String>,
-  /// Local variable names
   pub locals: Vec<String>,
-  /// Type annotations for local variables
   pub local_types: Vec<Option<Type>>,
-  /// Per-local TDZ marker for lexical bindings.
   pub local_tdz: Vec<bool>,
-  /// Per-local immutability marker (`const` and named function-expression bindings).
   pub local_immutable: Vec<bool>,
-  /// Per-local flag for immutable bindings that ignore sloppy writes.
   pub local_sloppy_immutable_silent: Vec<bool>,
-  /// Whether writes to this local should mirror to the global object.
   pub local_mirror_globals: Vec<bool>,
-  /// Lexical scope stack for name visibility.
   pub scopes: Vec<Scope>,
-  /// Global variable name to constant index mapping
   pub globals: HashMap<String, usize>,
-  /// True only for the top-level compiler (so we can record global_types).
   pub is_root: bool,
-  /// Whether the current compilation context is strict.
   pub strict_context: bool,
-  /// Current nested loop depth.
   pub loop_depth: usize,
-  /// Current nested `with` depth.
   pub with_depth: usize,
-  /// Whether this compilation unit can close over an outer `with` environment.
   pub may_capture_with: bool,
-  /// Scopes whose sloppy eval may introduce bindings at runtime.
   pub eval_scopes: Arc<HashSet<oxc_syntax::scope::ScopeId>>,
   pub dynamic_outer_bindings: bool,
-  /// Active bytecode exception handlers that must survive a call.
   pub handler_depth: usize,
-  /// Stack of continue patch sites for nested loops. Each entry holds a list
-  /// of instruction positions whose branch payloads must be patched to jump
-  /// to the loop's continue target when the loop is closed.
   pub continue_patches: Vec<Vec<usize>>,
-  /// Stack of break patch sites for nested loops. Each entry holds a list of
-  /// jump operands that must be patched to the loop exit target.
   pub break_patches: Vec<Vec<usize>>,
-  /// Stack of active `try {}` blocks with `finally` clauses so `return`
-  /// statements in the protected region can run the finalizer before
-  /// unwinding.
   pub finally_patches: Vec<FinallyPatchState>,
-  /// Active `for...of` iterators that abrupt control flow must close.
   pub iterator_close_stack: Vec<IteratorCloseState>,
-  /// Stack of active labels for `break`/`continue` resolution.
   pub label_patches: Vec<LabelPatchState>,
-  /// Optional module context when compiling a module
   pub current_module: Option<ModuleContext>,
-  /// Number of operand bytes already emitted into the last instruction's payload.
-  /// This lets the emit()/emit_byte() caller pattern pack subsequent operand
-  /// bytes into the single 24-bit payload of the instruction word.
   pub pending_operand_bytes: usize,
-  /// Whether `new.target` is valid in the current compilation context.
   pub allow_new_target: bool,
-  /// Whether `super` property access/calls are valid in the current context.
   pub allow_super: bool,
-  /// Whether this compiler is for an async function.
   pub is_async: bool,
-  /// Whether this compiler is for a generator function.
   pub is_generator: bool,
-  /// Bindings visible from the immediately enclosing function.
   pub outer_bindings: HashMap<String, CaptureSource>,
-  /// Upvalue indices allocated in this compiler.
   pub upvalue_indices: HashMap<String, u16>,
-  /// Upvalue capture specs for the current function.
   pub captured_upvalues: Vec<UpvalueSpec>,
-  /// Private identifiers visible in the current class lexical environment.
-  /// Values are unforgeable engine-private symbols copied into nested method compilers.
   pub private_names: HashMap<String, Value>,
-  /// Instance fields awaiting initialization after `super()` in a derived constructor.
   pub pending_instance_fields: Vec<PreparedClassField>,
-  /// First deferred emission failure. Emission helpers cannot return errors
-  /// through every AST visitor, so compilation reports it before lowering.
   pub(crate) emission_error: Option<CompilerError>,
 }
 
@@ -284,14 +232,10 @@ pub struct LabelPatchState {
 }
 
 impl Compiler {
-  /// Current frontend instruction position. Labels and metadata are expressed
-  /// in this compiler-owned coordinate space until bytecode finalization.
   pub(crate) fn current_pc(&mut self) -> usize {
     self.lowering.len()
   }
 
-  /// Resolves the patch index for a jump offset, accounting for fixed-width
-  /// mode where jumps are patched in place rather than emitted separately.
   fn resolve_jump_patch_index(
     &self,
     offset: usize,
@@ -308,7 +252,6 @@ impl Compiler {
     }
   }
 
-  /// Creates a new compiler instance
   pub(crate) fn new(source_text: Arc<String>) -> Self {
     let (allow_new_target, allow_super) = COMPILE_CONTEXT_OVERRIDE
       .with(|override_state| *override_state.borrow())
@@ -362,7 +305,6 @@ impl Compiler {
     }
   }
 
-  /// Returns true if a tail call can be emitted in the current context.
   pub(crate) fn can_emit_tail_call(&self) -> bool {
     self.strict_context
       && self.finally_patches.is_empty()
@@ -373,7 +315,6 @@ impl Compiler {
       && !self.is_generator
   }
 
-  /// Compute a 1-based source line for a span. Falls back to 1 when out of bounds.
   #[allow(dead_code)]
   pub(crate) fn line_for_span(
     &self,
@@ -391,7 +332,6 @@ impl Compiler {
       + 1
   }
 
-  /// Emits a single instruction word with an 8-bit opcode and zero payload.
   pub(crate) fn emit(
     &mut self,
     op: LoweringOpcode,
@@ -411,9 +351,6 @@ impl Compiler {
     }
   }
 
-  /// Emit a single instruction word with a 24-bit payload packed into bits 8..31.
-  /// This is the preferred path for fixed-width fixed-width instructions where
-  /// the opcode and all operands must be written as one u32.
   pub(crate) fn emit_with_payload(
     &mut self,
     op: LoweringOpcode,
@@ -424,11 +361,6 @@ impl Compiler {
     self.pending_operand_bytes = 0;
   }
 
-  /// Emit a single operand byte packed into the pending instruction's 24-bit payload.
-  ///
-  /// This appends an operand to a fixed-width instruction's pending 24-bit
-  /// payload. The opcode is emitted first and subsequent operands occupy the
-  /// payload bytes of that same instruction word.
   pub(crate) fn emit_byte(
     &mut self,
     byte: u8,
@@ -452,7 +384,6 @@ impl Compiler {
     self.pending_operand_bytes += 1;
   }
 
-  /// Encode a local-frame slot in the 16-bit auxiliary field used by bytecode v2.
   pub(crate) fn emit_slot(
     &mut self,
     slot: usize,
@@ -470,8 +401,6 @@ impl Compiler {
     self.pending_operand_bytes = 2;
   }
 
-  /// Emits a u16 value as a 24-bit payload in a single instruction word,
-  /// avoiding multi-write emissions which break the fixed-width instruction model.
   pub(crate) fn emit_u16(
     &mut self,
     value: u16,
@@ -482,9 +411,6 @@ impl Compiler {
     self.pending_operand_bytes = 0;
   }
 
-  /// Emits a constant value as a `Const` instruction with the constant index
-  /// encoded into the 24-bit payload in a single instruction word to avoid
-  /// multi-write emissions which break the fixed-width instruction model.
   pub(crate) fn emit_constant(
     &mut self,
     value: Value,
@@ -510,7 +436,6 @@ impl Compiler {
     self.emit_with_payload(LoweringOpcode::Const, idx, line);
   }
 
-  /// Encode a nested-function index in the 16-bit auxiliary field used by bytecode v2.
   pub(crate) fn emit_function_index(
     &mut self,
     idx: usize,
@@ -528,11 +453,6 @@ impl Compiler {
     self.pending_operand_bytes = 2;
   }
 
-  /// Add a compact module-index/export-name descriptor to the constant pool.
-  ///
-  /// Module instructions dedicate their sixteen auxiliary bits to this
-  /// descriptor, avoiding separate eight-bit limits for module and export
-  /// indices while retaining the fixed-width encoding.
   pub(crate) fn module_export_descriptor_index(
     &mut self,
     module_index: usize,
@@ -549,7 +469,6 @@ impl Compiler {
       .map_err(|_| CompilerError::from(format!("Too many constants (max 65535, got {index})")))
   }
 
-  /// Safely converts a global index (usize) to u16, checking that it doesn't exceed 65535.
   pub(crate) fn global_index_to_u16(
     &self,
     idx: usize,
@@ -562,7 +481,6 @@ impl Compiler {
     })
   }
 
-  /// Returns a compiler error for a strict binding name (eval/arguments).
   pub(crate) fn strict_binding_name_error(
     strict_context: bool,
     name: &str,
@@ -592,7 +510,6 @@ impl Compiler {
     }
   }
 
-  /// Returns a compiler error for a strict-mode reserved identifier reference.
   pub(crate) fn strict_identifier_reference_error(
     strict_context: bool,
     name: &str,
@@ -619,12 +536,10 @@ impl Compiler {
     }
   }
 
-  /// Returns a compiler error for assigning to an imported binding.
   pub(crate) fn imported_binding_assignment_error() -> CompilerError {
     CompilerError::from("SyntaxError: Cannot assign to imported binding")
   }
 
-  /// Returns a compiler error if the given binding pattern has a strict name.
   pub(crate) fn strict_binding_pattern_name_error(
     strict_context: bool,
     pattern: &oast::BindingPattern<'_>,
@@ -653,7 +568,6 @@ impl Compiler {
     }
   }
 
-  /// Resolves a local variable by name, returning its slot index if found.
   pub(crate) fn resolve_local(
     &self,
     name: &str,
@@ -665,7 +579,6 @@ impl Compiler {
       .find_map(|scope| scope.bindings.get(name).copied())
   }
 
-  /// Returns the index of the current function scope.
   pub(crate) fn current_function_scope_index(&self) -> usize {
     self
       .scopes
@@ -674,7 +587,6 @@ impl Compiler {
       .unwrap_or(0)
   }
 
-  /// Adds a local variable to the given scope, returning its slot index.
   pub(crate) fn add_local_in_scope(
     &mut self,
     scope_index: usize,
@@ -702,7 +614,6 @@ impl Compiler {
     slot
   }
 
-  /// Marks a local variable as being in the TDZ (Temporal Dead Zone).
   pub(crate) fn mark_local_tdz(
     &mut self,
     slot: usize,
@@ -712,7 +623,6 @@ impl Compiler {
     }
   }
 
-  /// Marks a local variable as immutable after its first initialization.
   pub(crate) fn mark_local_immutable(
     &mut self,
     slot: usize,
@@ -722,7 +632,6 @@ impl Compiler {
     }
   }
 
-  /// Adds a lexical binding (used for `let`/`const` bindings).
   pub(crate) fn add_lexical_binding(
     &mut self,
     name: &str,
@@ -733,7 +642,6 @@ impl Compiler {
       .insert(name.to_string());
   }
 
-  /// Adds a local variable with a mirror flag (used for `let`/`const` bindings).
   pub(crate) fn add_local_with_mirror(
     &mut self,
     name: String,
@@ -744,7 +652,6 @@ impl Compiler {
     self.add_local_in_scope(scope_index, name, type_ann, mirror_global)
   }
 
-  /// Adds a local variable without a mirror flag (used for `var` bindings).
   pub(crate) fn add_var_local(
     &mut self,
     name: String,
@@ -755,7 +662,6 @@ impl Compiler {
     self.add_local_in_scope(scope_index, name, type_ann, mirror_global)
   }
 
-  /// Checks for a lexical binding conflict with a `var` binding in the current scope.
   pub(crate) fn check_var_lexical_conflict(
     &self,
     name: &str,
@@ -774,7 +680,6 @@ impl Compiler {
     None
   }
 
-  /// Collects variable names from a statement, excluding lexical bindings.
   pub(crate) fn collect_var_names_from_statement(
     &self,
     stmt: &oast::Statement<'_>,
@@ -784,7 +689,6 @@ impl Compiler {
     names
   }
 
-  /// Adds variable names from a statement to the given set, excluding lexical bindings.
   pub(crate) fn add_var_names_from_statement(
     &self,
     stmt: &oast::Statement<'_>,
@@ -882,7 +786,6 @@ impl Compiler {
     }
   }
 
-  /// Adds variable names from a binding pattern to the given set.
   pub(crate) fn add_var_names_from_binding(
     &self,
     pattern: &oast::BindingPattern<'_>,
@@ -908,7 +811,6 @@ impl Compiler {
     }
   }
 
-  /// Enters a block scope with the given block var names.
   pub(crate) fn enter_block_scope(&mut self) {
     self.scopes.push(Scope {
       kind: ScopeKind::Block,
@@ -923,7 +825,6 @@ impl Compiler {
     self.is_root && self.current_module.is_none()
   }
 
-  /// Enters a block scope with the given block var names.
   pub(crate) fn enter_block_scope_with_vars(
     &mut self,
     stmts: &[oast::Statement<'_>],
@@ -1011,9 +912,6 @@ impl Compiler {
     }
   }
 
-  /// Names that belong to the function/root environment. Block bindings and
-  /// compiler-generated temporaries still use frame slots, but must not become
-  /// observable bindings in the surrounding environment.
   pub(crate) fn environment_slot_names(&self) -> Vec<Option<String>> {
     let mut names = vec![None; self.locals.len()];
     if let Some(function_scope) = self.scopes.first() {
@@ -1026,7 +924,6 @@ impl Compiler {
     names
   }
 
-  /// Exits the current scope, popping it from the scope stack.
   pub(crate) fn exit_scope(&mut self) {
     let Some(scope) = self.scopes.pop() else {
       self
@@ -1044,7 +941,6 @@ impl Compiler {
     }
   }
 
-  /// Returns a snapshot of the current visible bindings from all scopes.
   pub(crate) fn visible_bindings_snapshot(&mut self) -> HashMap<String, CaptureSource> {
     let mut bindings = HashMap::new();
     let mut overflowing_slot = None;
@@ -1141,7 +1037,6 @@ impl Compiler {
     bindings
   }
 
-  /// Returns true if the local variable at the given slot mirrors the global object.
   pub(crate) fn local_mirrors_global(
     &self,
     slot: usize,
@@ -1153,9 +1048,6 @@ impl Compiler {
       .unwrap_or(false)
   }
 
-  /// Returns whether this root-scope slot is the binding that owns `name`'s
-  /// module export. Export membership alone is not sufficient: a nested scope
-  /// may legally contain a different binding with the same spelling.
   pub(crate) fn owns_local_module_export(
     &self,
     name: &str,
@@ -1173,11 +1065,6 @@ impl Compiler {
         .is_some_and(|module| module.exports.contains(name))
   }
 
-  /// Returns whether this compiler may publish an update for `name`.
-  ///
-  /// The root compiler owns declarations and aliases. Nested compilers may
-  /// publish only when their captured source was identified as that root
-  /// module binding.
   fn owns_module_export(
     &self,
     name: &str,
@@ -1235,7 +1122,6 @@ impl Compiler {
       })
   }
 
-  /// Emits a `LoadLocal` or `GetUpvalue` operation for the given binding name.
   pub(crate) fn emit_get_binding(
     &mut self,
     name: &str,
@@ -1276,7 +1162,6 @@ impl Compiler {
     }
   }
 
-  /// Emits a `SetModuleExport` operation for the given export name.
   pub(crate) fn emit_set_own_module_export(
     &mut self,
     export_name: &str,
@@ -1297,7 +1182,6 @@ impl Compiler {
     Ok(())
   }
 
-  /// Converts a `ModuleExportName` to a string.
   pub(crate) fn module_export_name_to_string(name: &oast::ModuleExportName<'_>) -> Option<String> {
     match name {
       oast::ModuleExportName::IdentifierName(id) => Some(id.name.to_string()),
@@ -1306,7 +1190,6 @@ impl Compiler {
     }
   }
 
-  /// Resolves the upvalue index for the given binding name.
   pub(crate) fn resolve_upvalue(
     &mut self,
     name: &str,
@@ -1351,8 +1234,6 @@ impl Compiler {
     Some(idx)
   }
 
-  /// Returns the index of the global constant for the given name,
-  /// adding a fresh constant if necessary.
   pub(crate) fn global_name_index(
     &mut self,
     name: &str,
@@ -1369,7 +1250,6 @@ impl Compiler {
     idx
   }
 
-  /// Ensure an unforgeable private key exists for `name` in the active class scope.
   pub(crate) fn ensure_private_name_constant(
     &mut self,
     name: &str,
@@ -1384,7 +1264,6 @@ impl Compiler {
     value
   }
 
-  /// Emits a `GetGlobal` operation for the given global name.
   pub(crate) fn emit_get_global_name(
     &mut self,
     name: &str,
@@ -1403,7 +1282,6 @@ impl Compiler {
     self.emit_u16(idx_u16, LINE);
   }
 
-  /// Emits a `GetBuiltin` operation for the given builtin name.
   pub(crate) fn emit_get_builtin_name(
     &mut self,
     name: &str,
@@ -1422,7 +1300,6 @@ impl Compiler {
     self.emit_u16(idx_u16, LINE);
   }
 
-  /// Executes the given closure with the given compile context override.
   pub(crate) fn with_compile_context_override<R>(
     context: Option<(bool, bool)>,
     f: impl FnOnce() -> R,
@@ -1445,12 +1322,6 @@ impl Compiler {
     f()
   }
 
-  /// Attach a home object to the method closure currently on top of the
-  /// compiler's virtual value stack.
-  ///
-  /// The virtual value stack shape must be `[... home_object, key, closure]` when this is
-  /// called. The helper preserves that shape so the caller can immediately
-  /// emit the property installation that follows.
   pub(crate) fn emit_set_method_home_object(
     &mut self,
     home_slot: usize,
@@ -1464,7 +1335,6 @@ impl Compiler {
     Ok(())
   }
 
-  /// Emits a `Typeof` operation for the given identifier name.
   pub(crate) fn emit_typeof_identifier(
     &mut self,
     name: &str,
@@ -1489,7 +1359,6 @@ impl Compiler {
     }
   }
 
-  /// Emits a `SetGlobal` operation for the given global name.
   pub(crate) fn emit_set_global_name(
     &mut self,
     name: &str,
@@ -1508,7 +1377,6 @@ impl Compiler {
     self.emit_u16(idx_u16, LINE);
   }
 
-  /// Patches a jump instruction at the given offset with the current code size.
   pub(crate) fn patch_jump(
     &mut self,
     offset: usize,
@@ -1525,7 +1393,6 @@ impl Compiler {
     self.apply_jump_patch(patch_idx, val);
   }
 
-  /// Applies a jump patch to the code at the given patch index with the given value.
   fn apply_jump_patch(
     &mut self,
     patch_idx: usize,
@@ -1534,7 +1401,6 @@ impl Compiler {
     self.lowering.patch_branch(patch_idx, val);
   }
 
-  /// Patches a jump instruction at the given offset to jump to the target instruction.
   pub(crate) fn patch_jump_to_target(
     &mut self,
     offset: usize,
@@ -1551,7 +1417,6 @@ impl Compiler {
     self.apply_jump_patch(patch_idx, rel_i32);
   }
 
-  /// Emits a signed jump offset as a sign-extended i24 payload.
   pub(crate) fn emit_short_signed(
     &mut self,
     val: isize,
@@ -1568,7 +1433,6 @@ impl Compiler {
     self.pending_operand_bytes = 0;
   }
 
-  /// Patches a list of jump instructions to point to the given target.
   pub(crate) fn patch_jump_list(
     &mut self,
     patches: Vec<usize>,

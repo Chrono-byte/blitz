@@ -274,9 +274,6 @@ const parseJson = source => {
 
 export const json = stream => text(stream).then(parseJson);
 
-// ArrayBuffer is constructible in Blitz, but its current typed-array surface
-// does not provide usable byte-view aliasing. Do not return an ArrayBuffer
-// whose contents cannot be observed faithfully; Buffer/bytes/blob are omitted.
 const consumers = { json, text };
 
 export { consumers as default };

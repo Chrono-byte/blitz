@@ -1,8 +1,5 @@
 import * as HostCrypto from "blitz-internal:node-crypto-random";
 
-// This explicit slice returns Uint8Array from randomBytes. Fill and comparison
-// operations also accept Buffer and ArrayBuffer-backed Uint8Array subviews;
-// the engine owns branding, offsets, aliasing, and byte mutation.
 const codedError = (code, message, ErrorConstructor = Error) => {
   const error = new ErrorConstructor(message);
   error.code = code;

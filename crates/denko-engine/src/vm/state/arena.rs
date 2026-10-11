@@ -17,9 +17,6 @@ struct ArenaSlot<T> {
   value: Option<T>,
 }
 
-/// Stable slot storage. Removing a value advances its generation before the
-/// slot can be reused, so neither strong nor weak stale handles can alias a
-/// later allocation.
 pub(crate) struct GenerationArena<T> {
   id: u64,
   slots: Vec<ArenaSlot<T>>,

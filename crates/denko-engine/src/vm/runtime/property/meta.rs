@@ -3,7 +3,6 @@
 use super::*;
 
 impl Vm {
-  /// Run the `[[IsExtensible]]` internal method for an object value.
   pub(crate) fn is_extensible_value(
     &mut self,
     obj: &Value,
@@ -34,7 +33,6 @@ impl Vm {
     Ok(extensible)
   }
 
-  /// Run the `[[PreventExtensions]]` internal method for an object value.
   pub(crate) fn prevent_extensions_value(
     &mut self,
     obj: &Value,
@@ -67,7 +65,6 @@ impl Vm {
     Ok(set_object_extensible(obj, false))
   }
 
-  /// Run the `[[GetPrototypeOf]]` internal method for an object value.
   pub(crate) fn get_prototype_of_value(
     &mut self,
     obj: &Value,
@@ -103,7 +100,6 @@ impl Vm {
     Ok(trap_result)
   }
 
-  /// Run the `[[SetPrototypeOf]]` internal method for an object value.
   pub(crate) fn set_prototype_of_value(
     &mut self,
     obj: &Value,
@@ -215,7 +211,6 @@ impl Vm {
     Ok(true)
   }
 
-  /// Run the `[[GetOwnProperty]]` internal method for an object value.
   pub(crate) fn get_own_property_value(
     &mut self,
     obj: &Value,
@@ -314,7 +309,6 @@ impl Vm {
     Ok(Some(result_desc))
   }
 
-  /// Run the `[[OwnPropertyKeys]]` internal method for an object value.
   pub(crate) fn own_property_keys_value(
     &mut self,
     obj: &Value,
@@ -404,7 +398,6 @@ impl Vm {
     Ok(trap_keys)
   }
 
-  /// Return enumerable own property keys through `[[OwnPropertyKeys]]`.
   pub(crate) fn own_enumerable_keys_value(
     &mut self,
     obj: &Value,
@@ -421,7 +414,6 @@ impl Vm {
     Ok(enumerable)
   }
 
-  /// Return enumerable own string keys through `[[OwnPropertyKeys]]`.
   pub(crate) fn own_enumerable_string_keys_value(
     &mut self,
     obj: &Value,

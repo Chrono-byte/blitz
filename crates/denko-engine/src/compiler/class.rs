@@ -7,10 +7,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 impl Compiler {
-  /// Compile a class declaration statement into bytecode.
-  ///
-  /// Creates a constructor function closure and compiles all class methods,
-  /// attaching them to either the constructor or its prototype.
   pub(super) fn compile_class_declaration_oast(
     &mut self,
     c: &oast::Class<'_>,
@@ -36,7 +32,6 @@ impl Compiler {
     Ok(())
   }
 
-  /// Check if a function has a simple parameter list (no rest, no defaults, all identifiers).
   pub(super) fn has_simple_parameter_list(func: &oast::Function<'_>) -> bool {
     func.params.rest.is_none()
       && func.params.items.iter().all(|param| {
@@ -53,12 +48,6 @@ impl Compiler {
       .count()
   }
 
-  /// Emit bytecode to initialize non-simple function parameters from hidden
-  /// raw argument slots.
-  ///
-  /// Raw slots are expected to be laid out before any visible parameter
-  /// bindings. This keeps later parameters in TDZ while earlier defaults are
-  /// evaluated.
   pub(super) fn emit_parameter_initializers_from_raw_slots(
     &mut self,
     params: &oast::FormalParameters<'_>,
@@ -115,8 +104,6 @@ impl Compiler {
     Ok(())
   }
 
-  /// Emit bytecode to initialize default parameter values using the current
-  /// parameter slots directly.
   pub(super) fn emit_parameter_initializers_from_current_slots(
     &mut self,
     params: &oast::FormalParameters<'_>,
@@ -240,8 +227,6 @@ impl Compiler {
     Ok(())
   }
 
-  /// Lower a class method/getter/setter installation to a property
-  /// definition with a real descriptor object.
   pub(super) fn emit_class_member_installation(
     &mut self,
     target_slot: usize,
@@ -566,7 +551,6 @@ impl Compiler {
     })
   }
 
-  /// Emits a class declaration from an OAST class node.
   #[allow(clippy::too_many_lines)]
   pub(super) fn emit_class_from_oast(
     &mut self,

@@ -136,7 +136,6 @@ impl NativeCode {
     if operations.len() < 2 || operations.len() > 256 || comparison.0 >= 16 || comparison.1 >= 16 {
       return Err("invalid numeric body bounds".into());
     }
-    // Validate every address before emitting code that accesses the compact frame.
     for operation in operations {
       let (left, right) = match *operation {
         NumericOperation::Constant(rd, _) => (rd, 0),
@@ -191,8 +190,6 @@ impl NativeCode {
     Err("native numeric bodies unavailable on this target".into())
   }
 
-  /// Caller must use code created by `numeric_body` and initialize iterations and
-  /// completed to zero. The frame remains exclusively borrowed for the call.
   #[cfg(all(unix, target_arch = "x86_64"))]
   pub(crate) unsafe fn call_numeric_body(
     &self,
@@ -274,7 +271,6 @@ mod tests {
           }
           expected.iterations += 1;
         }
-        // SAFETY: matching emitted frame ABI and reset iteration fields.
         unsafe {
           code.call_numeric_body(&mut actual);
         }

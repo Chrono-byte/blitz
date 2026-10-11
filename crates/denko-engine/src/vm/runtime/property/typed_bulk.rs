@@ -4,8 +4,6 @@ use crate::ecmascript::semantics::byte_views::{byte_view_details, decode_typed_e
 use std::cmp::Ordering;
 
 impl Vm {
-  /// Sort a snapshot without JS callbacks, retaining the original element bytes.
-  /// Backing borrows never cross interrupt checks. Callback sorts use the ordinary path.
   pub(crate) fn try_sort_typed_view(
     &mut self,
     receiver: &Value,
@@ -85,7 +83,6 @@ impl Vm {
     Ok(true)
   }
 
-  /// Called after fill's value and range coercions, with an encoded element.
   pub(crate) fn try_fill_typed_view(
     &mut self,
     receiver: &Value,
@@ -114,7 +111,6 @@ impl Vm {
     Ok(true)
   }
 
-  /// Copy in overlap-safe order without boxing elements or allocating a snapshot.
   pub(crate) fn try_copy_within_typed_view(
     &mut self,
     receiver: &Value,

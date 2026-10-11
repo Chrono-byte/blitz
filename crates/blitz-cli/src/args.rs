@@ -253,7 +253,6 @@ pub(crate) struct PrecompileProjectArgs {
   pub(crate) no_runtime: bool,
 }
 
-/// Normalized execution options shared by legacy and explicit invocations.
 #[derive(Debug)]
 pub(crate) struct ExecutionArgs {
   pub(crate) file: Option<PathBuf>,

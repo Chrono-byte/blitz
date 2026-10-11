@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Collection builtin functions and prototype methods
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -255,8 +254,6 @@ fn close_collection_iterator(
   Ok(())
 }
 
-/// Consumes a synchronous ECMAScript iterable, closing its iterator if value
-/// processing completes abruptly.
 pub(crate) fn consume_collection_iterable(
   vm: &mut crate::vm::Vm,
   iterable: &Value,
@@ -317,7 +314,6 @@ pub(crate) fn consume_collection_iterable(
   }
 }
 
-/// Installs the Map and Set constructors on the given object and function prototypes.
 pub(crate) struct CollectionIntrinsics {
   pub(crate) map_constructor: Value,
   pub(crate) weak_map_constructor: Value,
@@ -628,8 +624,6 @@ pub(crate) fn install_map_set_constructors(
         )?;
         index = index.saturating_add(1);
         if let Some(Value::Array(values, properties)) = groups.get(&key) {
-          // Groups are private until iteration finishes, so no observable
-          // property hooks are involved in appending their next item.
           let length = {
             let mut values = values.borrow_mut();
             values.push(Some(item));

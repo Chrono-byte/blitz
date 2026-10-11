@@ -1,10 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Hosted filesystem-module execution.
-//!
-//! Package and tsconfig resolution remain VM-owned state in the engine's
-//! module loader. This module is the runtime boundary that constructs and
-//! evaluates an application entry, including reachable `node_modules` ESM and
-//! TypeScript sources.
 
 use denko::Vm;
 use std::path::{Path, PathBuf};

@@ -1,7 +1,3 @@
-// A deliberately small node:constants surface. Values are included only when
-// they are stable across the hosts Blitz supports or already have an explicit
-// process/os contract. Native errno, signal, TLS, zlib, and open(2) tables
-// are host-specific and therefore remain absent.
 const values = {
   COPYFILE_EXCL: 1,
   COPYFILE_FICLONE: 2,

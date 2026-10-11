@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Array iterator prototype and iterator factory methods.
 
 use super::*;
 

@@ -283,11 +283,6 @@ impl TypeContext {
     }
   }
 
-  /// Checks a single OAST statement and updates the type context accordingly.
-  ///
-  /// # Errors
-  ///
-  /// Returns a `TypeCheckerError` if the statement cannot be typechecked.
   #[allow(clippy::too_many_lines)]
   pub(super) fn check_statement_oast(
     &mut self,
@@ -696,11 +691,6 @@ impl TypeContext {
     )))
   }
 
-  /// Returns the type of the given OAST expression.
-  ///
-  /// # Errors
-  ///
-  /// Returns a `TypeCheckerError` if the expression cannot be typechecked.
   #[allow(clippy::too_many_lines)]
   pub(super) fn type_of_expr_oast(
     &mut self,

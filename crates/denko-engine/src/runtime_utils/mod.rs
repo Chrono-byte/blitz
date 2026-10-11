@@ -1,41 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Utility functions for runtime operations.
-//!
-//! Notes on ECMAScript conformance
-//!
-//! This module contains a number of pragmatic, simplified, or host-specific
-//! implementations of ECMAScript semantics used by the VM. The implementations
-//! in this file are intentionally pragmatic (smaller and easier to test) and
-//! therefore diverge from ECMA-262 in several observable ways. Call sites
-//! should treat the behaviour here as engine-specific unless the code is
-//! adjusted to follow the spec precisely.
-//!
-//! Known divergences (summary):
-//! - Dynamic `import()` performs graph loading and evaluation synchronously,
-//!   then queues Promise settlement on the dynamic-import job queue. Import
-//!   options are evaluated but otherwise ignored.
-//! - Promise/thenable resolution reads a thenable's `then` property
-//!   synchronously, then queues the `then` call and settled reactions on the
-//!   VM's microtask queue. This preserves more observable job ordering than
-//!   direct invocation, but remains engine-specific.
-//! - Microtask/job queue draining is host-specific: thrown errors are recorded
-//!   and reported through the host hook while the current implementation
-//!   continues draining the remaining jobs.
-//! - Some mutation-heavy Array prototype methods still have incomplete
-//!   failure ordering for exotic receivers and non-writable array lengths.
-//! - Ordinary objects and arrays use ECMAScript own-key ordering, but several
-//!   exotic object kinds still share ordinary storage instead of defining
-//!   their own complete internal-method behavior.
-//! - TypeScript slot-type runtime checks are a non-standard extension: the
-//!   VM can optionally enforce compile-time slot types at runtime; this is
-//!   not part of ECMA-262.
-//!
-//! Where behaviour is observable by user code (promise/microtask ordering,
-//! array semantics, property key order), the
-//! implementation is considered non-compliant with ECMA-262 and should be
-//! updated if strict conformance is required. See the project notes and
-//! module-level comments in `crate::module`, `crate::vm::runtime::async_tasks`,
-//! and `crate::vm::state` for targeted recommendations.
 
 use std::cell::{RefCell, RefMut};
 use std::collections::{HashMap, HashSet};
@@ -76,7 +39,6 @@ pub use promises::install_minimal_kernel_constructors;
 pub(crate) use promises::*;
 pub(crate) use shadowrealm::*;
 
-/// Sets the "length" property of a builtin function or object.
 pub(crate) fn set_builtin_length(
   target: &Value,
   length: f64,
@@ -84,7 +46,6 @@ pub(crate) fn set_builtin_length(
   crate::ecmascript::semantics::set_builtin_length(target, length)
 }
 
-/// Sets the "name" property of a builtin function or object.
 pub(crate) fn set_builtin_name(
   target: &Value,
   name: &str,
@@ -92,7 +53,6 @@ pub(crate) fn set_builtin_name(
   crate::ecmascript::semantics::set_builtin_name(target, name)
 }
 
-/// The maximum array length as a floating-point value.
 const MAX_ARRAY_LENGTH_F: f64 = 4294967295.0_f64;
 const MAX_SAFE_INTEGER_F: f64 = 9007199254740991.0_f64;
 
@@ -136,7 +96,6 @@ pub fn clear_slot_types_in_chunk(code: bytecode::Chunk) -> bytecode::Chunk {
   Arc::try_unwrap(rc_cleared).unwrap_or_else(|rc| (*rc).clone())
 }
 
-/// Determines if two values are strictly equal according to ES6 semantics.
 pub(crate) fn strict_equal(
   a: &Value,
   b: &Value,
@@ -160,7 +119,6 @@ pub(crate) fn strict_equal(
   }
 }
 
-/// Determines if two values are equal using SameValueZero semantics (for use in collection operations).
 pub(crate) fn same_value_zero(
   a: &Value,
   b: &Value,
@@ -171,7 +129,6 @@ pub(crate) fn same_value_zero(
   }
 }
 
-/// Computes the argument offset for static builtin functions based on current call context.
 pub(crate) fn static_builtin_arg_offset(
   vm: &Vm,
   args: &[Value],
@@ -192,7 +149,6 @@ pub(crate) fn static_builtin_arg_offset(
   offset
 }
 
-/// Converts a value to a length property value, returning a non-negative integer index.
 pub(crate) fn to_length(
   vm: &mut Vm,
   value: &Value,
@@ -214,7 +170,6 @@ pub(crate) fn to_length(
     .ok_or_else(|| vm.throw_range_error("Invalid array length"))
 }
 
-/// Converts a value to an array index, returning a non-negative integer index.
 pub(crate) fn to_index(
   vm: &mut Vm,
   value: &Value,
@@ -238,8 +193,6 @@ pub(crate) fn to_index(
     .ok_or_else(|| vm.throw_range_error("Invalid array index"))
 }
 
-/// Converts a value to an integer index using ECMAScript `ToIntegerOrInfinity`
-/// semantics, returning an `isize` so callers can apply their own bounds checks.
 pub(crate) fn to_integer_or_infinity(
   vm: &mut Vm,
   value: &Value,
@@ -260,43 +213,23 @@ pub(crate) fn to_integer_or_infinity(
     .ok_or_else(|| vm.throw_range_error("Invalid array index"))
 }
 
-/// Indicates the type of value handled by Atomics operations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AtomicsValueKind {
-  /// A numeric value with specified bit width and signedness.
-  Number {
-    /// The bit width of the numeric value (8, 16, or 32).
-    bits: u32,
-    /// Whether the numeric value is signed.
-    signed: bool,
-  },
-  /// A BigInt value with specified signedness.
-  BigInt {
-    /// Whether the BigInt value is signed.
-    signed: bool,
-  },
+  Number { bits: u32, signed: bool },
+  BigInt { signed: bool },
 }
 
-/// Information about a TypedArray view for Atomics operations.
 #[derive(Clone)]
 pub(crate) struct AtomicsViewInfo {
-  /// The TypedArray view object.
   pub(crate) view: Rc<RefCell<ObjectData>>,
-  /// The underlying array data.
   pub(crate) data: Rc<RefCell<ArrayData>>,
-  /// The underlying ArrayBuffer or SharedArrayBuffer.
   pub(crate) buffer: Rc<RefCell<ObjectData>>,
-  /// The name of the kind of view (e.g., "Uint8Array").
   pub(crate) kind_name: String,
-  /// The value kind for this view.
   pub(crate) value_kind: AtomicsValueKind,
-  /// The number of elements in the view.
   pub(crate) length: usize,
-  /// Whether the buffer is shared (SharedArrayBuffer).
   pub(crate) is_shared: bool,
 }
 
-/// Creates a syntax error exception with the given message.
 pub(crate) fn syntax_error(
   vm: &mut Vm,
   message: String,
@@ -305,7 +238,6 @@ pub(crate) fn syntax_error(
   vm.throw_exception(err_val)
 }
 
-/// Creates an error object for a given error type and message.
 pub(crate) fn host_error_object(
   vm: &mut Vm,
   name: &str,
@@ -334,7 +266,6 @@ pub(crate) fn host_error_object(
   Value::Object(gc::track_object(Rc::new(RefCell::new(obj))))
 }
 
-/// Parses a string as a canonical array index, returning the numeric index if valid.
 pub(crate) fn canonical_index_key(s: &js_string::JsString) -> Option<u64> {
   if s.is_empty() {
     return None;
@@ -349,13 +280,6 @@ pub(crate) fn canonical_index_key(s: &js_string::JsString) -> Option<u64> {
   Some(idx)
 }
 
-/// Structured-clone helper for cross-realm value transfers used by ShadowRealm
-/// operations. Implements copying semantics for primitives, Array, Object,
-/// Date, RegExp, Map, Set, ArrayBuffer, and TypedArray-shaped objects used by
-/// this runtime. Preserves cycles/shared references by using a visited map and
-/// uses runtime prototypes where the clone path provides them. Returns
-/// `Err(String)` for uncloneable values (functions, promises, symbols,
-/// accessors, etc.).
 fn clone_value_across_realms(
   vm: &mut Vm,
   value: &Value,

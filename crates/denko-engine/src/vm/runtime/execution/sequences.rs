@@ -58,7 +58,6 @@ impl Vm {
     Ok(true)
   }
 
-  /// Execute the compiler's one-argument method-call setup in one dispatch.
   pub(super) fn try_single_argument_method_call_sequence(
     &mut self,
     registers: &mut [Value; 16],
@@ -130,30 +129,11 @@ impl Vm {
         if matches!(properties.borrow().internal_slot("[[DenkoArrayPush]]"), Some(Value::Bool(true)))
     );
     let direct_push = if canonical_push {
-      if let Value::Array(elements, properties) = &receiver {
+      if let Value::Array(elements, _) = &receiver {
         let length = elements.borrow().len();
-        let index_key = PropertyKey::String(length.to_string().into());
-        let properties_allow_push = {
-          let properties = properties.borrow();
-          properties.extensible
-            && properties
-              .properties
-              .get(&PropertyKey::String("length".into()))
-              .is_none_or(|descriptor| {
-                matches!(descriptor, PropertyDescriptor::Data { writable: true, .. })
-              })
-        };
-        if properties_allow_push
-          && self
-            .lookup_property_descriptor(&receiver, &index_key, 0)?
-            .is_none()
-        {
-          elements.borrow_mut().push(Some(argument.clone()));
-          self.bump_object_generation(&receiver);
-          Some(Value::Number(usize_to_f64(length + 1)))
-        } else {
-          None
-        }
+        self
+          .try_append_dense_array(&receiver, std::slice::from_ref(&argument), length)
+          .then(|| Value::Number(usize_to_f64(length + 1)))
       } else {
         None
       }
@@ -180,7 +160,6 @@ impl Vm {
     Ok(true)
   }
 
-  /// Execute a guarded own-data-property numeric accumulation in one dispatch.
   pub(super) fn try_numeric_property_add_sequence(
     &mut self,
     registers: &mut [Value; 16],
@@ -278,7 +257,6 @@ impl Vm {
     Ok(true)
   }
 
-  /// Execute the compiler's guarded numeric increment sequence in one dispatch.
   pub(super) fn try_numeric_increment_sequence(
     &mut self,
     registers: &mut [Value; 16],
@@ -347,8 +325,6 @@ impl Vm {
     Ok(true)
   }
 
-  /// Execute the common `LoadLocal, LoadLocal, Add, StoreLocal` sequence in
-  /// one interpreter dispatch when every value is already numeric.
   pub(super) fn try_numeric_add_local_sequence(
     &mut self,
     registers: &mut [Value; 16],

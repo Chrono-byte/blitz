@@ -176,11 +176,6 @@ impl ModuleLoader {
     Ok(order)
   }
 
-  /// Resolve an export from a module.
-  ///
-  /// # Errors
-  ///
-  /// Returns a [`crate::errors::RuntimeError`] if evaluation fails.
   pub(super) fn resolve_export(
     &mut self,
     module_path: &Path,

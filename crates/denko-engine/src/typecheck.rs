@@ -1,17 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Static type checker for TypeScript/JavaScript programs.
-//!
-//! This module performs compile-time type checking before bytecode generation.
-//! It validates:
-//! - Variable declarations and assignments
-//! - Function parameter and return types
-//! - Binary and unary operations
-//! - Control flow constructs
-//! - Object and array literals
-//!
-//! The checker consumes Oxc's `oast::Program` directly (no ESTree/owned-ast
-//! round-trip). It provides a lightweight conservative `Type` model used for
-//! soft-layer and prelude validation.
 
 mod annotations;
 mod checker;
@@ -214,15 +201,6 @@ thread_local! {
     static STRICT_OVERRIDE: std::cell::RefCell<Option<bool>> = const { std::cell::RefCell::new(None) };
 }
 
-/// Return whether strict mode is currently enabled.
-///
-/// The checker consults this flag when deciding whether unannotated parameters
-/// should produce implicit-`any` diagnostics. The effective strictness is
-/// determined by, in order:
-/// 1. The test-only override set via `set_strict_override(Some(bool))`.
-/// 2. The environment variable `TSBLITZ_STRICT` (any value other than `0`
-///    enables strict mode).
-/// 3. Defaults to disabled when the environment variable is not set.
 fn strict_mode() -> bool {
   if let Some(v) = STRICT_OVERRIDE.with(|m| *m.borrow()) {
     return v;
@@ -243,7 +221,6 @@ pub fn set_strict_override(v: Option<bool>) {
   });
 }
 
-/// Return the current thread-local strict override, if any.
 pub(crate) fn strict_override() -> Option<bool> {
   STRICT_OVERRIDE.with(|m| *m.borrow())
 }
@@ -478,13 +455,6 @@ struct TypeContext {
   expected_returns: Vec<Type>,
   return_types: Vec<Vec<Type>>,
   inlay_hints: Vec<TypeInlayHint>,
-  /// Parameter names are kept beside `Type::Function` rather than inside it.
-  ///
-  /// `Type::Function` is also encoded by the bytecode bundle, so adding names
-  /// to that enum would require a format migration. This sidecar intentionally
-  /// has conservative limits: names survive ordinary declaration, method, and
-  /// function-type construction, but two overloads with identical type text
-  /// cannot be distinguished by metadata alone.
   function_parameter_metadata: HashMap<String, FunctionParameterMetadata>,
 }
 

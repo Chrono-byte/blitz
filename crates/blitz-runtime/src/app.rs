@@ -1,9 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Immutable application descriptions built around an RPC router.
-//!
-//! The JavaScript `blitz:app` facade is the Effect-facing API. This Rust module
-//! remains the host-neutral description used by adapters and tests; it does
-//! not implement an Effect or pretend that a Rust configuration value is one.
 
 use std::fmt;
 use std::sync::Arc;

@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! ECMAScript JSON text parsing over exact UTF-16 code units.
 
 use chumsky::prelude::*;
 use js_string::JsString;

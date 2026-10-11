@@ -1,5 +1,3 @@
-// TTY is a view over process stdio, not an independent terminal resource.
-// Blitz only exposes metadata that the host process actually supplied.
 const processValue = globalThis.process;
 const processObject = processValue !== null && typeof processValue === "object"
   ? processValue

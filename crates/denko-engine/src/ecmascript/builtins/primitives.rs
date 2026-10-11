@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Primitive wrapper builtins for Number and BigInt.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -277,7 +276,6 @@ pub(crate) struct NumericIntrinsics {
   pub(crate) number_prototype: Value,
 }
 
-/// Installs the Number and BigInt constructors and their prototype methods.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn install_bigint_and_number_builtins(
   globals: &mut ObjectData,

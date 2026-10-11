@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Lazy Effect-native filesystem host primitives.
 
 use std::cell::RefCell;
 use std::fs::File;

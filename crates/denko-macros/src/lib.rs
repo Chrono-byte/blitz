@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Compile-time validation for JavaScript and TypeScript source embedded in Rust.
 
 use oxc_allocator::Allocator;
 use oxc_parser::{ParseOptions, Parser};
@@ -115,12 +114,6 @@ fn parse_mode(mode: &Ident) -> Result<LanguageMode> {
   }
 }
 
-/// Produce a parseable approximation of a Rust format string.
-///
-/// Escaped braces become JavaScript braces and each replacement field becomes
-/// a unique identifier. Identifiers work as both expressions and bindings, so
-/// this also supports templates that generate function parameters. The Rust
-/// compiler remains responsible for validating the format arguments.
 fn format_scaffold(source: &LitStr) -> Result<String> {
   let value = source.value();
   let mut scaffold = String::with_capacity(value.len());

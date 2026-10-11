@@ -1,7 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Lightweight wrapper around oxc_resolver that provides resolution logic
-//! used by the ModuleLoader. Exposes a minimal API for resolving module
-//! specifiers relative to a base directory.
 
 use oxc_resolver::{Resolver, TsconfigDiscovery, TsconfigOptions, TsconfigReferences};
 use std::path::{Path, PathBuf};

@@ -1,28 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! AST-to-bytecode compiler.
-//!
-//! The compiler transforms parsed TypeScript/JavaScript AST into executable
-//! bytecode for the VM. It performs:
-//! - Variable resolution (locals vs globals)
-//! - Type annotation tracking for metadata and tooling
-//! - Control flow compilation (if/else, while, try/catch, etc.)
-//! - Function compilation with closure support
-//!
-//! # Architecture
-//!
-//! Compilation is single-pass over the AST:
-//! 1. Pre-declare function names for hoisting support
-//! 2. Compile statements sequentially
-//! 3. Emit compiler-owned virtual instructions
-//! 4. Finalize the virtual instructions into bytecode v2 words in a [`Chunk`]
-//! 5. Track local variables and their types for metadata and tooling
-//!
-//! # Future Work
-//!
-//! - JIT compilation with multiple optimization passes
-//! - Loop identification and optimization
-//! - Dead code elimination
-//! - Constant folding
 
 use crate::bytecode::Chunk;
 use crate::parser::ParserSession;
@@ -87,11 +63,6 @@ pub fn compile_session_with_context(
   compile_oxc_with_ctx(session.program(), Some(context), session.source())
 }
 
-/// Compile an oxc AST Program.
-///
-/// # Errors
-///
-/// Returns an error if compilation fails.
 pub(crate) fn compile_oxc(
   program: &oast::Program<'_>,
   source: &str,
@@ -101,11 +72,6 @@ pub(crate) fn compile_oxc(
   c.compile_oxc(program, None)
 }
 
-/// Compile an oxc AST Program with an optional ModuleContext.
-///
-/// # Errors
-///
-/// Returns an error if compilation fails.
 pub(crate) fn compile_oxc_with_ctx(
   program: &oast::Program<'_>,
   ctx: Option<&ModuleContext>,
@@ -116,13 +82,6 @@ pub(crate) fn compile_oxc_with_ctx(
   c.compile_oxc(program, ctx)
 }
 
-/// Compile an oxc AST Program in REPL mode.
-/// In REPL mode, the last expression statement does not emit Pop,
-/// allowing the result to be returned for printing.
-///
-/// # Errors
-///
-/// Returns an error if compilation fails.
 pub(crate) fn compile_oxc_repl(
   program: &oast::Program<'_>,
   source: &str,
@@ -142,10 +101,6 @@ pub fn compile_repl_session(
 }
 
 impl Compiler {
-  /// Compile an `oast::Program` with the direct AST walker.
-  ///
-  /// # Errors
-  /// Returns a `CompilerError` if compilation fails.
   pub(crate) fn compile_oxc(
     &mut self,
     program: &oast::Program<'_>,
@@ -154,12 +109,6 @@ impl Compiler {
     self.compile_oxc_with_mode(program, ctx, false)
   }
 
-  /// Compile with explicit mode control.
-  /// In REPL mode, the last expression statement does not emit Pop,
-  /// allowing the result to be returned.
-  ///
-  /// # Errors
-  /// Returns a `CompilerError` if compilation fails.
   pub(crate) fn compile_oxc_with_mode(
     &mut self,
     program: &oast::Program<'_>,
@@ -251,8 +200,6 @@ impl Compiler {
         .collect();
       self.chunk.root_strict = self.strict_context;
     }
-    // Read the root AST emitter's operations before optimization can remove
-    // unreachable awaits. Nested functions have independent lowering builders.
     self.chunk.has_top_level_await = program.source_type.is_module()
       && self
         .lowering

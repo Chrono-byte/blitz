@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Lower typed semantic regex IR into verified control-flow instructions.
 
 use crate::analysis::{Analysis, captures_written};
 use crate::ast::CharacterClass;

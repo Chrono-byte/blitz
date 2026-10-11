@@ -1,5 +1,3 @@
-// A byte-backed Node 24 Buffer slice. Buffer instances are Uint8Array views so
-// ArrayBuffer aliasing and indexed mutation remain engine-owned semantics.
 const K_MAX_LENGTH = 0x7fffffff;
 const INSPECT_MAX_BYTES = 50;
 const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";

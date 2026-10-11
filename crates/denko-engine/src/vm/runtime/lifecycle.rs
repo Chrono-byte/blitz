@@ -39,11 +39,6 @@ impl Vm {
     Self::new_with_module_loader(globals, module_loader)
   }
 
-  /// Create a VM in an existing module registry.
-  ///
-  /// A nested module evaluation must retain the parent realm's registry and
-  /// its selected public/private graph. Keeping this handle explicit avoids
-  /// making dynamic import depend on reconstructing host policy from globals.
   pub(crate) fn new_with_module_loader(
     globals: Rc<RefCell<ObjectData>>,
     module_loader: Rc<RefCell<ModuleLoader>>,
@@ -152,10 +147,6 @@ impl Vm {
     vm
   }
 
-  /// Fork a new VM for nested execution while preserving the current realm.
-  ///
-  /// This is used for `eval`/`Function`-style dynamic execution that must
-  /// observe the same realm intrinsics and globals as the caller.
   pub(crate) fn fork_execution(&self) -> Self {
     let gc_registration = gc::VmGcRegistration::new();
     let globals = Rc::clone(&self.realm_state.globals);
@@ -218,7 +209,6 @@ impl Vm {
       },
       modules: ModuleState {
         loader: Rc::clone(&self.modules.loader),
-        // Binding cells remain shared so suspended functions observe live exports.
         table: self.modules.table.clone(),
         current_specifier: self.modules.current_specifier.clone(),
       },
@@ -408,13 +398,10 @@ impl Vm {
     self.execution.builtin_this_arg_prepended
   }
 
-  /// Return whether a JavaScript exception is currently unwinding to a handler.
   pub(crate) fn has_pending_exception(&self) -> bool {
     self.exceptions.pending.is_some()
   }
 
-  /// Close an iterator from a host callback without disturbing its pending
-  /// language-level exception.
   pub(crate) fn close_iterator_in_fork(
     &self,
     iterator: &Value,
@@ -445,15 +432,10 @@ impl Vm {
       .or_else(|| self.construction.new_target.clone())
   }
 
-  /// Return the `new.target` pending for a host constructor call.
   pub(crate) fn pending_constructor_new_target(&self) -> Option<Value> {
     self.construction.new_target.clone()
   }
 
-  /// Return the dynamic eval context flags for the currently executing code.
-  ///
-  /// `new.target` is valid inside any function-like execution context.
-  /// `super` is valid only when the current frame has a home object.
   pub(crate) fn current_eval_context_flags(&self) -> (bool, bool, bool) {
     let has_home_object = self.current_method_home_object().is_some();
     let allows_super_call = has_home_object
@@ -585,8 +567,6 @@ impl Vm {
     }
   }
 
-  /// Resolve `Promise.prototype` from the realm's intrinsic table or from
-  /// the current global constructor as a fallback.
   pub(crate) fn promise_prototype_value(&self) -> Value {
     if let Some(proto) = self
       .realm_state
@@ -613,7 +593,6 @@ impl Vm {
     Value::Null
   }
 
-  /// Wrap promise state in an ordinary object using the supplied prototype.
   pub(crate) fn promise_value_with_prototype(
     &self,
     state: Rc<RefCell<PromiseState>>,
@@ -623,7 +602,6 @@ impl Vm {
     Value::Promise(state, properties)
   }
 
-  /// Wrap promise state in an object using this realm's Promise prototype.
   pub(crate) fn promise_value(
     &self,
     state: Rc<RefCell<PromiseState>>,
@@ -640,7 +618,6 @@ impl Vm {
     self.new_array_storage(elems, length)
   }
 
-  /// Allocate an intrinsic array with holes without materializing its elements.
   pub(crate) fn new_array_with_length(
     &mut self,
     length: usize,
@@ -649,7 +626,6 @@ impl Vm {
       return Err(self.throw_range_error("Invalid array length"));
     }
     let array = self.new_array_storage(Vec::new(), length);
-    // Match the retention used by the generic constructor return path.
     self.construction.recent_return_value = Some(array.clone());
     Ok(array)
   }
@@ -1189,10 +1165,6 @@ impl Vm {
     stats
   }
 
-  /// Opportunistically collect garbage during interpreter progress.
-  ///
-  /// This keeps the prototype collector aggressive without collecting on
-  /// every single bytecode step.
   pub(super) fn maybe_collect_garbage_prototype(&mut self) {
     let pressure = gc::allocation_pressure();
     let threshold = gc_allocation_pressure_threshold();

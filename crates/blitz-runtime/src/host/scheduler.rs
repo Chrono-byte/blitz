@@ -35,7 +35,6 @@ impl TimerId {
     self.0
   }
 
-  /// Reconstruct a timer identifier supplied by a host global.
   #[must_use]
   pub(crate) const fn from_value(value: u64) -> Self {
     Self(value)

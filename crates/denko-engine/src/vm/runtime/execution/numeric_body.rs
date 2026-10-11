@@ -34,8 +34,6 @@ impl Vm {
       let Some(cell) = self.execution.active.locals.get(slot) else {
         return Ok(false);
       };
-      // Separate portable slots can share a binding cell in host-created frames.
-      // A numeric local snapshot must not hide writes through such aliases.
       if plan.locals[..index]
         .iter()
         .any(|previous| self.execution.active.locals[*previous].same_storage(cell))

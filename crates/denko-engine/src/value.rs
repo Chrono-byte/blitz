@@ -12,7 +12,6 @@
 //! |---------|-------------|
 //! | `Uninitialized` | Internal temporal-dead-zone sentinel |
 //! | `Number` | IEEE 754 double-precision float |
-//! | `String` | UTF-8 string |
 //! | `Bool` | Boolean value |
 //! | `Undefined` | Undefined value |
 //! | `BigInt` | Arbitrary-precision integer |
@@ -136,14 +135,12 @@ impl SymbolId {
     Self(Arc::new(fastrand::u64(..) & !Self::PRIVATE_BIT))
   }
 
-  /// Generate an engine-private class name that JavaScript cannot create.
   pub(crate) fn new_private() -> Self {
     Self(Arc::new(
       (fastrand::u64(..) & !Self::PRIVATE_BIT) | Self::PRIVATE_BIT,
     ))
   }
 
-  /// Whether this identity denotes an engine-private class name.
   pub(crate) fn is_private(&self) -> bool {
     self.as_u64() & Self::PRIVATE_BIT != 0
   }
@@ -279,10 +276,6 @@ pub enum PropertyDescriptor {
   },
 }
 
-/// Backing store for dense array elements.
-///
-/// This wrapper keeps the storage layout centralized so the runtime can evolve
-/// beyond a plain `Vec<Option<Value>>` without changing every array consumer.
 #[derive(Clone, Debug)]
 enum ArrayStorage {
   Bytes {
@@ -292,8 +285,6 @@ enum ArrayStorage {
   Values(Vec<Option<Value>>),
   Numbers {
     numbers: Vec<f64>,
-    // Compatibility for callers requiring borrowed Values. Numeric reads and GC
-    // do not populate this view. Every mutation discards or takes the view.
     values: OnceCell<Vec<Option<Value>>>,
   },
 }
@@ -421,7 +412,6 @@ impl ArrayData {
     )
   }
 
-  /// Read an element without populating the compatibility view.
   pub(crate) fn element_cloned(
     &self,
     index: usize,
@@ -452,7 +442,6 @@ impl ArrayData {
     }
   }
 
-  /// Whether every dense slot holds a number. Cache the scan until storage changes.
   pub(crate) fn is_dense_numeric(&self) -> bool {
     if let Some(numeric) = self.dense_numeric.get() {
       return numeric;
@@ -577,8 +566,6 @@ impl ArrayData {
     self.reserve(additional);
   }
 
-  /// Append a proven numeric batch, packing existing dense numbers once.
-  /// Mixed or holey storage retains its generic representation.
   pub(crate) fn append_numeric_batch(
     &mut self,
     batch: &[f64],
@@ -598,8 +585,6 @@ impl ArrayData {
     self.dense_numeric.set(known);
   }
 
-  /// Append/overwrite a mapped batch. Empty results adopt packed storage;
-  /// existing generic species results retain their not-yet-written slots.
   pub(crate) fn write_numeric_batch(
     &mut self,
     start: usize,
@@ -1012,7 +997,6 @@ impl PropertyDescriptor {
 pub struct ObjectData {
   /// Stable object identity token used by runtime caches.
   pub identity: u64,
-  /// Mutation generation used by property inline caches.
   pub(crate) mutation_generation: u64,
   /// Property table
   pub properties: IndexMap<PropertyKey, PropertyDescriptor>,
@@ -1020,28 +1004,15 @@ pub struct ObjectData {
   pub strong_prototype: Option<Value>,
   /// Weak mirror of an object prototype, used when a weak reference is useful.
   pub weak_prototype: Option<WeakObject>,
-  /// VM-internal slots that are never exposed through ECMAScript property operations.
   pub(crate) internal_slots: IndexMap<&'static str, Value>,
-  /// Non-owning lookup metadata for private Map/Set storage arrays.
   pub(crate) collection_index: Option<Box<crate::collection_storage::CollectionIndex>>,
-  /// Live export bindings for a module namespace exotic object. The map is
-  /// populated in code-unit sorted export-name order and is deliberately kept
-  /// outside `properties`: namespace exports have specialized internal
-  /// methods rather than ordinary mutable data properties.
   pub(crate) module_namespace_exports: Option<IndexMap<JsString, BindingCell>>,
-  /// Ephemeron entries for objects with a `[[WeakMapData]]` internal slot.
   pub(crate) weak_map_entries: Option<Vec<WeakMapEntry>>,
-  /// Weak keys for objects with a `[[WeakSetData]]` internal slot.
   pub(crate) weak_set_entries: Option<Vec<WeakKey>>,
-  /// Target for objects with a `[[WeakRefTarget]]` internal slot.
   pub(crate) weak_ref_target: Option<WeakValue>,
-  /// Registered cells for objects with a `[[FinalizationRegistryCells]]` internal slot.
   pub(crate) finalization_registry_cells: Option<Vec<FinalizationRegistryCell>>,
-  /// Cleanup callback for a FinalizationRegistry object.
   pub(crate) finalization_cleanup_callback: Option<Value>,
-  /// Whether a cleanup job has been requested for this registry.
   pub(crate) finalization_cleanup_scheduled: bool,
-  /// Compiled matcher for objects with a `[[RegExpMatcher]]` internal slot.
   pub(crate) regexp_matcher: Option<regex_js::Regex>,
   /// Lexical environment captured by function objects, if any.
   pub captured_lexical_env: Option<Rc<RefCell<crate::environment::EnvironmentRecord>>>,
@@ -1066,7 +1037,6 @@ impl ObjectData {
     Self::with_property_capacity(0)
   }
 
-  /// Create an empty object with reserved ordinary-property storage.
   pub(crate) fn with_property_capacity(capacity: usize) -> Self {
     Self {
       identity: Self::next_identity(),
@@ -1285,9 +1255,6 @@ pub type BuiltinFn =
 type WeakBuiltinFn =
   Weak<dyn Fn(&mut crate::vm::Vm, &[Value]) -> Result<Value, crate::errors::RuntimeError>>;
 
-/// A non-marking, lossless weak carrier for a runtime value. It is separate
-/// from `WeakKey`: identity keys deliberately omit the components required to
-/// reconstruct callable, array, and promise values.
 #[derive(Clone)]
 pub(crate) enum WeakValue {
   Primitive(Value),
@@ -1327,7 +1294,6 @@ impl std::fmt::Debug for WeakValue {
   }
 }
 
-/// One registration held by a FinalizationRegistry.
 #[derive(Clone, Debug)]
 pub(crate) struct FinalizationRegistryCell {
   pub(crate) target: WeakValue,
@@ -1388,7 +1354,6 @@ impl WeakValue {
   }
 }
 
-/// A garbage-collector-aware weak reference to any ECMAScript object identity.
 #[derive(Clone)]
 pub(crate) enum WeakKey {
   Object(Weak<RefCell<ObjectData>>),
@@ -1402,7 +1367,6 @@ pub(crate) enum WeakKey {
 }
 
 impl WeakKey {
-  /// Create a weak key for an ECMAScript object value.
   pub(crate) fn new(value: &Value) -> Option<Self> {
     match value {
       Value::Object(value) => Some(Self::Object(Rc::downgrade(value))),
@@ -1417,7 +1381,6 @@ impl WeakKey {
     }
   }
 
-  /// Return whether this weak key has the same identity as `value`.
   pub(crate) fn matches(
     &self,
     value: &Value,
@@ -1439,7 +1402,6 @@ impl WeakKey {
     }
   }
 
-  /// Return whether the allocation still has at least one strong owner.
   pub(crate) fn is_live(&self) -> bool {
     match self {
       Self::Object(value) | Self::Closure(value) | Self::BuiltinObject(value) => {
@@ -1465,7 +1427,6 @@ impl std::fmt::Debug for WeakKey {
   }
 }
 
-/// One `WeakMap` ephemeron: a weak key and its conditionally strong value.
 #[derive(Clone, Debug)]
 pub(crate) struct WeakMapEntry {
   pub(crate) key: WeakKey,
@@ -1806,7 +1767,6 @@ mod tests {
     assert_eq!(data.element_cloned(1), Some(Some(Value::Number(255.0))));
     assert!(!data.write_bytes(3, &[0, 0]));
     assert_eq!(data.packed_bytes(), Some(&[1, 255, 128, 4][..]));
-    // Populate the borrowed Value view, then make a byte-native mutation.
     assert_eq!(data.get(1), Some(&Some(Value::Number(255.0))));
     assert!(data.write_bytes(1, &[8]));
     assert_eq!(data.get(1), Some(&Some(Value::Number(8.0))));
@@ -1835,7 +1795,6 @@ mod tests {
       panic!("packed");
     };
     assert!(values.get().is_none());
-    // Borrowed compatibility reads may materialize; later packed writes discard it.
     assert!(matches!(arr.first(), Some(Some(Value::Number(n))) if n.is_sign_negative()));
     arr.write_numeric_batch(1, &[2.0, 3.0, 4.0]);
     assert_eq!(arr.dense_numbers(), Some(vec![-0.0, 2.0, 3.0, 4.0]));

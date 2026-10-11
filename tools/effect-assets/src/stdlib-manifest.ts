@@ -14,11 +14,6 @@ export type StdlibInput = {
   readonly hostPrimitives: readonly HostPrimitiveInput[];
 };
 
-/**
- * The source-backed Blitz modules currently implemented by blitz-runtime.
- * Keep this list data-only: adding an entry is an explicit stdlib contract
- * change and its source must already exist.
- */
 export const STDLIB_INPUTS = [
   {
     specifier: "blitz:app",

@@ -1,7 +1,3 @@
-// This facade implements the synchronous part of node:async_hooks that can be
-// represented without VM lifecycle callbacks. Promise continuations are not
-// wrapped: a run/enterWith context therefore ends when the current callback
-// returns unless an AsyncResource or bind/snapshot wrapper is used explicitly.
 
 const TOP_LEVEL_ID = 1;
 let nextAsyncId = TOP_LEVEL_ID + 1;
@@ -32,9 +28,6 @@ resourceStates.set(topLevelResource, {
   destroyed: false,
 });
 
-// A context is intentionally an ordinary VM value. Do not use a host-side
-// async-local implementation here: this module must have the same behavior
-// when it is evaluated by Blitz rather than by Node.
 let currentContext = {
   resource: topLevelResource,
   stores: new Map(),
@@ -213,8 +206,6 @@ class AsyncResource {
   }
 
   emitDestroy() {
-    // There is no truthful lifecycle hook to notify. Keep this idempotent,
-    // matching the observable return behavior without claiming destroy events.
     const state = resourceStates.get(this);
     if (state !== undefined) state.destroyed = true;
     return this;

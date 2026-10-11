@@ -33,11 +33,6 @@ fn compare_bigint_number(
   }
 }
 
-/// Convert a runtime value with ECMAScript `ToInt32` semantics.
-///
-/// # Errors
-///
-/// Returns a `RuntimeError` if the value cannot be converted to an `i32`.
 pub(super) fn to_int32_with_vm(
   vm: &mut Vm,
   v: &Value,
@@ -50,11 +45,6 @@ pub(super) fn to_int32_with_vm(
   }
 }
 
-/// Convert a runtime value with ECMAScript `ToUint32` semantics.
-///
-/// # Errors
-///
-/// Returns a `RuntimeError` if the value cannot be converted to a `u32`.
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 pub(super) fn to_uint32_with_vm(
   vm: &mut Vm,
@@ -73,7 +63,6 @@ pub(super) fn to_uint32_with_vm(
   Ok(result)
 }
 
-/// Parse a JavaScript number string into a `f64`.
 pub(super) fn parse_js_number_string(s: &js_string::JsString) -> f64 {
   let s = s.as_str_lossy().trim();
   if s.is_empty() {
@@ -114,7 +103,6 @@ pub(super) fn parse_js_number_string(s: &js_string::JsString) -> f64 {
   sign * body.parse::<f64>().unwrap_or(f64::NAN)
 }
 
-/// Parse a radix number string into a `f64`.
 fn parse_radix_number_string(
   body: &str,
   radix: u32,

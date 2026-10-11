@@ -58,8 +58,6 @@ impl Vm {
     Ok(())
   }
 
-  /// Reverse a validated view without numeric property keys or boxed elements.
-  /// No operation in a batch can call JS; release backing borrows before polling.
   pub(crate) fn try_reverse_typed_view(
     &mut self,
     receiver: &Value,
@@ -89,8 +87,6 @@ impl Vm {
     Ok(true)
   }
 
-  /// Append only when every write is an ordinary new dense element. The preflight
-  /// invokes no JavaScript, so fallback can perform the full observable algorithm.
   pub(crate) fn try_append_dense_array(
     &mut self,
     receiver: &Value,
@@ -135,7 +131,6 @@ impl Vm {
             let mut elements = elements.borrow_mut();
             elements.reserve(items.len());
             for item in items {
-              // ArrayData::push retains packed numeric storage for numbers.
               elements.push(Some(item.clone()));
             }
           }
@@ -173,10 +168,6 @@ impl Vm {
     false
   }
 
-  /// Read an own data property through a per-instruction position hint.
-  ///
-  /// Validate the indexed key and descriptor on every read, allowing different
-  /// objects and mutations to reuse the same position without caching values.
   pub(super) fn get_property_value_cached(
     &mut self,
     instruction_pc: usize,
@@ -232,7 +223,6 @@ impl Vm {
         });
       self.caches.active_property_get = Some(std::rc::Rc::clone(cache));
     }
-    // Retain this site's storage while falling back through reentrant getters.
     let cache = std::rc::Rc::clone(
       self
         .caches
@@ -1049,14 +1039,6 @@ impl Vm {
     Ok(result)
   }
 
-  /// Host hook: set a property with Reflect semantics, returning success/failure as a boolean.
-  ///
-  /// Unlike `set_property_host`, this operation returns `false` on failure instead of throwing
-  /// an error, implementing the semantics of `Reflect.set()`.
-  ///
-  /// # Errors
-  ///
-  /// Returns a [`crate::errors::RuntimeError`] if the operation encounters a runtime error during lookup.
   pub(crate) fn reflect_set_property_host(
     &mut self,
     target: &Value,
@@ -1073,7 +1055,6 @@ impl Vm {
     result
   }
 
-  /// Get the value of a property on an object, following the prototype chain.
   pub(super) fn get_property_value(
     &mut self,
     obj: &Value,
@@ -1210,7 +1191,6 @@ impl Vm {
     Ok(Value::Undefined)
   }
 
-  /// Lookup a property descriptor on an object, following the prototype chain.
   pub(super) fn lookup_property_descriptor(
     &self,
     obj: &Value,
@@ -1364,8 +1344,6 @@ impl Vm {
     Ok(None)
   }
 
-  /// `SetProperty` wrapper that bumps the generation counter so that stale
-  /// IC entries are invalidated on next access.
   pub(super) fn set_property_tracked(
     &mut self,
     obj: &Value,

@@ -1,7 +1,6 @@
 use super::*;
 
 impl ModuleLoader {
-  /// Resolve all indirect and star exports before import bindings are wired.
   fn resolve_all_indirect_exports(
     &mut self,
     module_paths: &[PathBuf],

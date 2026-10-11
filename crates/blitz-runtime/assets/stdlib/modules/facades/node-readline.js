@@ -1,8 +1,5 @@
 import EventEmitter from "node:events";
 
-// readline works with streams supplied by the caller. It does not create or
-// own a terminal: terminal mode, raw mode, and stream lifetime remain the
-// responsibility of the input/output objects.
 const interfaceStates = new WeakMap();
 const keypressStates = new WeakMap();
 const asyncIterator = typeof Symbol === "function" ? Symbol.asyncIterator : undefined;
@@ -180,8 +177,6 @@ const attachInput = state => {
     input.on("error", state.onError);
     return;
   }
-  // An async iterable input has no event surface to subscribe to. Its
-  // lifetime is still observed, but it is never closed or destroyed by us.
   const iterator = input[asyncIterator]();
   const read = () => {
     if (state.closed) return;
@@ -317,9 +312,6 @@ Interface.prototype.question = function(query, options, callback) {
   return this;
 };
 Interface.prototype.write = function(data, key) {
-  // This is intentionally a small, non-terminal editing hook. It is useful
-  // to callers that already own a keypress decoder, without claiming raw TTY
-  // ownership or changing the input stream's mode.
   if (key !== undefined && key.name === "backspace") return this;
   if (typeof data === "string") consumeChunk(interfaceStates.get(this), data);
   return this;
@@ -405,8 +397,6 @@ const promiseWrite = (output, value) => new Promise((resolve, reject) => {
   try {
     const callback = () => resolve(null);
     const result = outputWrite(output, value, callback);
-    // Plain host writers commonly expose only write(value). Do not leave a
-    // promise pending merely because such a writer cannot accept a callback.
     if (output.write.length < 2 || result === undefined) resolve(null);
   } catch (error) {
     reject(error);

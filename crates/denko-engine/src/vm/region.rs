@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! Immutable native-region plans decoded from verified portable bytecode.
-
 pub(super) mod numeric_body;
 pub(in crate::vm) mod typed_view;
 pub(super) use typed_view::TypedViewRegion;
@@ -212,7 +210,6 @@ pub(crate) struct PreparedDenseMaskedReadRegion {
   pub(crate) iterations: u32,
 }
 
-/// Values materialized at a native array-loop boundary.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum ArrayPushValue {
   Index,
@@ -704,8 +701,6 @@ impl DenseArrayPushRegion {
       }
     }
 
-    // Decode the update by its data flow, covering assignment, compound assignment,
-    // and increment without depending on one register allocation or loop binding form.
     let mut clones_index_cell = false;
     let mut increment_temporary_slot = None;
     let mut step = None;
@@ -1821,7 +1816,6 @@ mod array_push_decode_tests {
       .map(|(_, word)| decode_aux16(*word) as usize)
       .expect("step constant");
     changed.constants[step] = crate::bytecode::Constant::Number(2.0);
-    // Increment adds one regardless of its unused source register.
     assert!(DenseArrayPushRegion::decode(&changed, region.entry_pc).is_none());
   }
 }

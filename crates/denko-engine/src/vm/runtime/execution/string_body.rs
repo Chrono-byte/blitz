@@ -22,7 +22,6 @@ impl Symbol {
 }
 
 impl Vm {
-  /// Resolve a namespace/property without invoking accessors or proxy traps.
   fn pure_region_object_property(
     value: &Value,
     key: &js_string::JsString,
@@ -72,13 +71,9 @@ impl Vm {
       }
       environment = current.outer();
     }
-    // The object-environment guard above makes this resolution non-observable.
-    // TDZ/missing bindings decline so the interpreter handles their completion.
     self.resolve_identifier_value(name).ok().flatten()
   }
 
-  // Resolve the intrinsic primitive-string prototype without any path capable
-  // of calling user code.
   fn string_region_property(
     &self,
     text: &js_string::JsString,
@@ -341,7 +336,6 @@ impl Vm {
             if !matches!(arguments[0], Value::String(_)) {
               return Ok(false);
             }
-            // Tagged functions with these primitive arguments cannot call JS or throw.
             let result = function(self, &arguments)?;
             if let Value::Number(n) = result {
               operations.push(N::Constant(0, n));
@@ -408,7 +402,6 @@ impl Vm {
         );
       }
       if frame.completed != 0 {
-        // The final header supersedes the last body's register values.
         registers[comparison.0] = Value::Number(frame.registers[comparison.0]);
         registers[comparison.1] = Value::Number(frame.registers[comparison.1]);
         self.execution.active.pc = region.completed_pc;

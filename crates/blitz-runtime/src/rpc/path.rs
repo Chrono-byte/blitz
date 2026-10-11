@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Validated RPC procedure paths.
 
 use std::fmt;
 

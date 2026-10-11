@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! Private optimizing-compiler worker.
-
 use super::artifact::{ArtifactError, NativeArtifact, emit_numeric_binary};
 use super::ir::{FunctionSnapshot, IrError, SemanticFunction, VerifiedTypedFunction};
 use super::{FunctionId, NumericBinaryOp};
@@ -9,11 +7,6 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::mpsc::{Receiver, Sender, SyncSender, TryRecvError};
 use std::thread::JoinHandle;
 
-/// Bump this whenever `abi.rs` encoding, `ir::FunctionSnapshot` layout, or
-/// `artifact::NATIVE_ARTIFACT_ABI` changes. It invalidates stale
-/// `SnapshotStamp`s so the worker does not reuse an artifact built with an
-/// incompatible ABI/hasher. Current value 2 reflects the ShortBranchCode
-/// rel32 fix (previously rel8, limited to ±127).
 const CAPABILITY_REVISION: CapabilityRevision = CapabilityRevision(2);
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]

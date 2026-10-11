@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Explicit virtual-value builder and bytecode v2 encoder.
 
 use super::emit::LoweringOpcode;
 use crate::bytecode::{
@@ -162,14 +161,12 @@ fn encode_conditional_branch(
   encode_bytecode_cond_jump(bytecode_op(op), rd, offset)
 }
 
-/// Physical home assigned to one explicit virtual value.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AllocatedValue {
   Register(u8),
   SpillSlot(u16),
 }
 
-/// Register/spill assignment for explicit virtual values.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct AllocationPlan {
   pub(crate) locations: Vec<AllocatedValue>,
@@ -224,8 +221,6 @@ struct BranchPatch {
   expanded_compare: bool,
 }
 
-/// Compiler-owned virtual-value builder. Frontend operations use stable value
-/// positions; finalization assigns those values to `r8..r15` and spill slots.
 #[derive(Default)]
 pub(crate) struct Lowering {
   pub(crate) instructions: Vec<VirtualInstruction>,

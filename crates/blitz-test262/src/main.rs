@@ -61,8 +61,6 @@ use denko::value::{
 };
 use denko::{parser::Parser, runtime_utils, typecheck, vm::Vm};
 
-/// Calculates a percentage from two i64 values.
-/// This intentionally loses precision when converting i64 to f64 for display purposes.
 #[inline]
 fn calculate_percentage(
   numerator: i64,
@@ -73,28 +71,21 @@ fn calculate_percentage(
 }
 
 #[derive(Clone, Copy, Default)]
-/// Result statistics for a test bucket (pass/fail/skip counts).
 struct BucketStats {
-  /// Number of tests that passed.
   pass: usize,
-  /// Number of tests that failed.
   fail: usize,
-  /// Number of tests that were skipped.
   skip: usize,
 }
 
 impl BucketStats {
-  /// Returns the total number of tests (pass + fail + skip).
   fn total(self) -> usize {
     self.pass + self.fail + self.skip
   }
 
-  /// Returns the number of tests that were attempted (pass + fail).
   fn attempted(self) -> usize {
     self.pass + self.fail
   }
 
-  /// Returns the percentage of tests that passed.
   fn pass_pct(self) -> f64 {
     let attempted = self.attempted();
     if attempted == 0 {
@@ -105,23 +96,16 @@ impl BucketStats {
   }
 }
 
-/// The result of a test run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 enum TestResult {
-  /// The test passed.
   Pass,
-  /// The test was skipped because the feature is unsupported.
   Skip(String),
-  /// The test failed.
   Fail(String),
-  /// The test encountered a stack overflow.
   StackOverflow,
-  /// The test panicked.
   Panic(String),
 }
 
 impl TestResult {
-  /// Returns a human-readable description of the test result.
   fn description(&self) -> String {
     match self {
       TestResult::Pass => "pass".to_string(),
@@ -144,12 +128,6 @@ fn record_bucket_result(
   }
 }
 
-/// Force a full prototype-GC cycle for the current runner thread.
-///
-/// The Test262 runner creates many short-lived realms and VMs. Most memory
-/// drops naturally with Rust ownership, but cyclic JS heaps tracked by the
-/// prototype collector benefit from an explicit sweep once a test is fully
-/// finished and all test-owned roots have gone out of scope.
 fn force_runner_gc() {
   if env::var_os("TSBLITZ_GC_TRACE").is_some() {
     eprintln!(
@@ -167,7 +145,6 @@ fn force_runner_gc() {
   }
 }
 
-/// Trims the allocator, if the `TSBLITZ_TRIM_ALLOCATOR` environment variable is set.
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 fn maybe_trim_allocator() {
   if env::var_os("TSBLITZ_TRIM_ALLOCATOR").is_none() {
@@ -196,7 +173,6 @@ fn maybe_trim_allocator() {
   }
 }
 
-/// Selects the files to run based on the filter and limit.
 fn path_has_segment(
   path: &Path,
   wanted: &str,
@@ -206,7 +182,6 @@ fn path_has_segment(
     .any(|component| component.as_os_str() == wanted)
 }
 
-/// Prints the first argument of a function call using JS string coercion.
 fn print_args(
   vm: &mut Vm,
   args: &[Value],
@@ -218,7 +193,6 @@ fn print_args(
   }
 }
 
-/// Selects the files to run based on the filter and limit.
 fn select_files_to_run(
   files: Vec<PathBuf>,
   filters: &[String],
@@ -261,7 +235,6 @@ fn select_files_to_run(
   selected
 }
 
-/// Resolves the job count based on the requested count and selected count.
 fn resolve_job_count(
   requested_jobs: Option<usize>,
   selected_count: usize,
@@ -275,26 +248,21 @@ fn resolve_job_count(
     .min(selected_count.max(1))
 }
 
-/// Sorts the test results by their index.
 fn sort_test_results(results: &mut [(usize, PathBuf, TestResult)]) {
   results.sort_by_key(|(idx, _, _)| *idx);
 }
 
-/// Runs the selected tests and returns the results.
 struct PermitReleaser {
-  /// The semaphore permit to be released when the test run is complete.
   permit: Mutex<Option<OwnedSemaphorePermit>>,
 }
 
 impl PermitReleaser {
-  /// Creates a new `PermitReleaser` with the given permit.
   fn new(permit: OwnedSemaphorePermit) -> Self {
     Self {
       permit: Mutex::new(Some(permit)),
     }
   }
 
-  /// Releases the permit, allowing the semaphore to be acquired by other threads.
   fn release(&self) {
     if let Ok(mut guard) = self.permit.lock() {
       guard.take();
@@ -302,7 +270,6 @@ impl PermitReleaser {
   }
 }
 
-/// Runs the selected tests and returns the results.
 fn run_selected_tests(
   files_to_run: Vec<PathBuf>,
   test262_dir: PathBuf,
@@ -356,7 +323,6 @@ fn run_selected_tests(
   })
 }
 
-/// Runs a single test in a separate thread, returning the result.
 fn run_test_in_thread(
   file: PathBuf,
   test262_dir: PathBuf,
@@ -461,7 +427,6 @@ fn run_test_in_thread(
   result
 }
 
-/// Returns the section keys for a test file based on its path relative to the test root.
 fn bucket_keys(
   test_root: &Path,
   file: &Path,
@@ -504,7 +469,6 @@ fn bucket_keys(
   (top, subsection)
 }
 
-/// Prints a summary of the test results for a given label and bucket of tests.
 fn print_bucket_summary(
   label: &str,
   buckets: &HashMap<String, BucketStats>,
@@ -576,42 +540,32 @@ fn print_fyi_edition_summary(additions: &HashMap<String, BucketStats>) {
   }
 }
 
-/// Runner options for the test262 test runner.
 #[derive(ClapParser, Debug, Default)]
 #[command(
   name = "test262",
   about = "Run the local Test262 connector against the blitz VM"
 )]
 struct RunnerOptions {
-  /// Disable subprocess batching and run selected tests directly in-process.
   #[arg(long = "no-subprocess", action)]
   no_subprocess: bool,
-  /// Hidden internal file list used by subprocess batches.
   #[arg(long = "file-list", value_name = "PATH", hide = true)]
   file_list: Option<PathBuf>,
-  /// Hidden internal JSON report path written by subprocess batches.
   #[arg(long = "report-json", value_name = "PATH", hide = true)]
   report_json: Option<PathBuf>,
-  /// Write a stable, reusable manifest of the selected tests and exit.
   #[arg(long = "write-manifest", value_name = "PATH")]
   write_manifest: Option<PathBuf>,
-  /// Run the exact tests listed in a previously generated manifest.
   #[arg(long = "manifest", value_name = "PATH")]
   manifest: Option<PathBuf>,
-  /// Write a categorized machine-readable conformance summary.
   #[arg(long = "summary-json", value_name = "PATH")]
   summary_json: Option<PathBuf>,
-  /// Number of exact-file tests to hand to each subprocess batch.
   #[arg(long = "batch-size", value_name = "N", default_value_t = 1)]
   batch_size: usize,
-  /// Maximum runtime for a subprocess batch before recursively isolating it.
   #[arg(
     long = "subprocess-timeout",
     value_name = "SECONDS",
     default_value_t = 45
   )]
   subprocess_timeout: u64,
-  /// List of test segments to include.
   #[arg(
     long = "segment",
     alias = "include",
@@ -619,19 +573,14 @@ struct RunnerOptions {
     value_delimiter = ','
   )]
   includes: Vec<String>,
-  /// List of test segments to exclude.
   #[arg(long = "exclude", value_name = "SEGMENT", value_delimiter = ',')]
   excludes: Vec<String>,
-  /// Substring filters for test names. Any match includes the test.
   #[arg(long = "filter", value_name = "SUBSTRING", value_delimiter = ',')]
   filters: Vec<String>,
-  /// Exclude tests whose path contains any of these substrings.
   #[arg(long = "anti-filter", value_name = "SUBSTRING", value_delimiter = ',')]
   anti_filters: Vec<String>,
-  /// Exclude tests whose path contains one of these exact path segments.
   #[arg(long = "anti-segment", value_name = "SEGMENT", value_delimiter = ',')]
   anti_segments: Vec<String>,
-  /// Include only tests whose newest Test262 feature edition matches one of these values.
   #[arg(
     long = "es-version",
     alias = "edition",
@@ -639,27 +588,20 @@ struct RunnerOptions {
     value_delimiter = ','
   )]
   es_versions: Vec<String>,
-  /// Optional maximum number of tests to run.
   #[arg(long = "limit", value_name = "N")]
   limit: Option<usize>,
-  /// Number of tests to run in parallel.
   #[arg(long = "workers", short = 'w', value_name = "N")]
   jobs: Option<usize>,
-  /// Run only harness files.
   #[arg(long = "harness-only", alias = "harness", action)]
   harness_only: bool,
-  /// Emit per-test start/finish logs.
   #[arg(long = "log-tests", action)]
   log_tests: bool,
-  /// Suppress individual failure details while retaining aggregate output.
   #[arg(long = "quiet", action)]
   quiet: bool,
-  /// Run a single hard-coded test and dump globals in the error handler style.
   #[arg(long = "dump-scopes", action)]
   dump_scopes: bool,
 }
 
-/// Parses a CSV environment variable into a vector of strings.
 fn parse_csv_env(name: &str) -> Vec<String> {
   env::var(name)
     .ok()
@@ -674,14 +616,12 @@ fn parse_csv_env(name: &str) -> Vec<String> {
     .unwrap_or_default()
 }
 
-/// Parses a usize environment variable.
 fn parse_usize_env(name: &str) -> Option<usize> {
   env::var(name)
     .ok()
     .and_then(|s| s.parse::<usize>().ok())
 }
 
-/// Parses a boolean environment variable.
 fn parse_bool_env(name: &str) -> Option<bool> {
   env::var(name).ok().map(|v| {
     matches!(
@@ -692,13 +632,10 @@ fn parse_bool_env(name: &str) -> Option<bool> {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-/// Represents a report from a subprocess batch run.
 struct SubprocessBatchReport {
-  /// The results of the batch run, including the test index, path, and result.
   results: Vec<(usize, PathBuf, TestResult)>,
 }
 
-/// Loads a file list from the given path and returns a vector of PathBufs.
 fn load_file_list(path: &Path) -> Result<Vec<PathBuf>, String> {
   let contents = fs::read_to_string(path)
     .map_err(|e| format!("Failed to read file list {}: {}", path.display(), e))?;
@@ -712,7 +649,6 @@ fn load_file_list(path: &Path) -> Result<Vec<PathBuf>, String> {
   )
 }
 
-/// Returns a platform-independent path relative to the Test262 test root.
 fn manifest_path(
   test_root: &Path,
   path: &Path,
@@ -733,7 +669,6 @@ fn manifest_path(
   )
 }
 
-/// Writes selected tests in stable lexical order, relative to `test262/test`.
 fn write_manifest(
   path: &Path,
   test_root: &Path,
@@ -760,7 +695,6 @@ fn write_manifest(
   fs::write(path, contents).map_err(|e| format!("Failed to write manifest {}: {e}", path.display()))
 }
 
-/// Loads a stable manifest and resolves every entry beneath `test262/test`.
 fn load_manifest(
   path: &Path,
   test_root: &Path,
@@ -801,7 +735,6 @@ fn load_manifest(
   Ok(files)
 }
 
-/// Returns a unique temporary path for the given prefix and extension.
 fn unique_temp_path(
   prefix: &str,
   ext: &str,
@@ -819,7 +752,6 @@ fn unique_temp_path(
   ))
 }
 
-/// Returns true if subprocess batches should be used for the given options and selected test count.
 fn should_use_subprocess_batches(
   opts: &RunnerOptions,
   selected_count: usize,
@@ -834,7 +766,6 @@ fn should_use_subprocess_batches(
 type IndexedTestBatch = (usize, Vec<PathBuf>);
 type TestBatchQueue = Arc<Mutex<VecDeque<IndexedTestBatch>>>;
 
-/// Splits a crashed subprocess batch while preserving each test's original index.
 fn bisect_subprocess_batch(
   chunk_start: usize,
   mut chunk_files: Vec<PathBuf>,
@@ -848,7 +779,6 @@ fn bisect_subprocess_batch(
   Some(((chunk_start, chunk_files), (chunk_start + midpoint, right)))
 }
 
-/// Converts a single-test subprocess crash into a reportable Test262 result.
 fn subprocess_crash_result(status: &ExitStatus) -> TestResult {
   #[cfg(windows)]
   {
@@ -861,11 +791,8 @@ fn subprocess_crash_result(status: &ExitStatus) -> TestResult {
   TestResult::Panic(format!("subprocess exited with status {status}"))
 }
 
-/// Outcome of waiting for an isolated subprocess batch.
 enum SubprocessOutcome {
-  /// The subprocess exited normally or crashed with the contained status.
   Exited(ExitStatus),
-  /// The subprocess exceeded the parent-enforced deadline and was terminated.
   TimedOut,
 }
 
@@ -889,7 +816,6 @@ impl ChildControl for Child {
   }
 }
 
-/// Waits for a child without allowing a CPU-bound test to hang the parent runner.
 fn wait_for_child(
   child: &mut impl ChildControl,
   timeout: Duration,
@@ -917,7 +843,6 @@ fn wait_for_child(
   }
 }
 
-/// Spawns and waits for a subprocess with a parent-enforced deadline.
 fn wait_for_subprocess(
   command: &mut Command,
   timeout: Duration,
@@ -926,7 +851,6 @@ fn wait_for_subprocess(
   wait_for_child(&mut child, timeout)
 }
 
-/// Runs selected tests via subprocess batches and returns the results.
 #[allow(clippy::too_many_lines)]
 fn run_selected_tests_via_subprocess_batches(
   files_to_run: Vec<PathBuf>,
@@ -1165,7 +1089,6 @@ fn run_selected_tests_via_subprocess_batches(
   Ok(out)
 }
 
-/// Parses the command line arguments
 fn parse_args() -> RunnerOptions {
   let mut opts = RunnerOptions::parse();
 
@@ -1208,26 +1131,18 @@ fn parse_args() -> RunnerOptions {
   opts
 }
 
-/// Minimal subset of metadata we care about.
 #[derive(Debug, Deserialize)]
 struct Negative {
-  /// The phase of the test (e.g., "early", "late", "async").
   phase: String,
-  /// The type of the test (e.g., "realm").
   #[serde(rename = "type")]
   ty: Option<String>,
 }
 
-/// Minimal subset of metadata we care about.
 #[derive(Debug, Deserialize)]
 struct Meta {
-  /// The flags associated with the test.
   flags: Option<Vec<String>>,
-  /// The language features associated with the test.
   features: Option<Vec<String>>,
-  /// The includes associated with the test.
   includes: Option<Vec<String>>,
-  /// The negative metadata of the test.
   negative: Option<Negative>,
 }
 
@@ -1352,7 +1267,6 @@ fn failure_class(result: &TestResult) -> Option<&'static str> {
   }
 }
 
-/// Removes the Test262 path and strictness prefix before diagnostic classification.
 fn failure_diagnostic(message: &str) -> &str {
   if let Some((_, diagnostic)) = message.split_once("): ") {
     return diagnostic;
@@ -1454,19 +1368,14 @@ fn write_conformance_summary(
     .map_err(|e| format!("Failed to write summary {}: {e}", path.display()))
 }
 
-/// A minimal subset of test262 error information.
 #[derive(Clone)]
 struct Test262Error<'a> {
-  /// The path to the test file.
   path: &'a Path,
-  /// The mode of the test (e.g., "early", "late", "async").
   mode: Option<&'a str>,
-  /// The error message.
   message: String,
 }
 
 impl<'a> Test262Error<'a> {
-  /// Create a new error with a mode (used for test-specific errors).
   fn new(
     path: &'a Path,
     mode: &'a str,
@@ -1479,7 +1388,6 @@ impl<'a> Test262Error<'a> {
     }
   }
 
-  /// Create a new error with an optional mode (used for test-specific errors or file-level errors).
   fn for_path(
     path: &'a Path,
     mode: Option<&'a str>,
@@ -1492,7 +1400,6 @@ impl<'a> Test262Error<'a> {
     }
   }
 
-  /// Create a new error without a mode (used for file-level errors).
   fn without_mode(
     path: &'a Path,
     message: String,
@@ -1500,7 +1407,6 @@ impl<'a> Test262Error<'a> {
     Self::for_path(path, None, message)
   }
 
-  /// Convert the error into a string representation.
   fn into_string(self) -> String {
     match self.mode {
       Some(mode) => format!("{} ({}): {}", self.path.display(), mode, self.message),
@@ -1509,7 +1415,6 @@ impl<'a> Test262Error<'a> {
   }
 }
 
-/// Helper to extract the front-matter YAML between /*--- and ---*/
 fn extract_front_matter(src: &str) -> Option<String> {
   let start = src.find("/*---")?;
   let end = src.find("---*/")?;
@@ -1517,7 +1422,6 @@ fn extract_front_matter(src: &str) -> Option<String> {
   Some(fm.trim().to_string())
 }
 
-/// Returns the human-readable label for a given edition number.
 fn edition_label(edition: u8) -> Option<&'static str> {
   match edition {
     5 => Some("ES5"),
@@ -1784,11 +1688,6 @@ fn feature_edition_labels(features: Option<&[String]>) -> Vec<String> {
     .collect()
 }
 
-/// Returns the newest edition required by a Test262 feature list.
-///
-/// A test tagged with both `class` (ES6) and `async-iteration` (ES2018)
-/// requires ES2018. Selecting it for ES6 merely because one of its features
-/// originated in ES6 mixes later syntax and semantics into the ES6 corpus.
 fn required_edition_label(features: Option<&[String]>) -> Option<String> {
   features
     .unwrap_or_default()
@@ -1799,7 +1698,6 @@ fn required_edition_label(features: Option<&[String]>) -> Option<String> {
     .map(str::to_string)
 }
 
-/// Returns the normalized ES version for a given input string.
 fn normalize_es_version(input: &str) -> Option<String> {
   let raw = input.trim();
   if raw.is_empty() {
@@ -1848,7 +1746,6 @@ fn normalize_es_version(input: &str) -> Option<String> {
   Some(label)
 }
 
-/// Normalize a list of ES version labels (e.g. "ES2021", "ESNext") into a list of unique labels.
 fn normalize_es_versions(values: &[String]) -> Result<Vec<String>, String> {
   let mut normalized = Vec::new();
   for value in values {
@@ -1887,7 +1784,6 @@ fn test262_fyi_features(source: &str) -> Vec<String> {
     .unwrap_or_default()
 }
 
-/// Returns the feature-derived edition labels for a test file.
 fn file_edition_labels(file: &Path) -> Vec<String> {
   let Ok(source) = fs::read_to_string(file) else {
     return Vec::new();
@@ -1904,7 +1800,6 @@ fn file_required_edition_label(file: &Path) -> Option<String> {
   required_edition_label(meta.features.as_deref())
 }
 
-/// Parse Test262 metadata YAML into `Meta`
 fn parse_meta(src: &str) -> Option<Meta> {
   let fm = extract_front_matter(src)?;
   match serde_yaml::from_str::<Meta>(&fm) {
@@ -1916,12 +1811,10 @@ fn parse_meta(src: &str) -> Option<Meta> {
   }
 }
 
-/// Read the harness source for a given path.
 fn read_harness_source(path: &Path) -> Result<String, String> {
   fs::read_to_string(path).map_err(|e| format!("Failed to read harness {}: {}", path.display(), e))
 }
 
-/// Parse a source file for a given path.
 fn parse_source_for_path(
   source: &str,
   path: &Path,
@@ -1941,13 +1834,10 @@ fn parse_source_for_path(
   Parser::parse_source_with_type(source, source_type)
 }
 
-/// Return `Some(marker)` if the given string is an async done marker,
-/// otherwise `None`.
 fn is_async_done_marker(s: &str) -> Option<AsyncDoneMarker> {
   test262_support::async_completion_marker(s)
 }
 
-/// Returns a new realm using the engine-owned Test262 host adapter.
 fn make_test_globals() -> Rc<RefCell<ObjectData>> {
   let print: NativeFn = Rc::new(|vm, _this, args| {
     eprintln!("[test262 print] {}", print_args(vm, args));
@@ -1956,8 +1846,6 @@ fn make_test_globals() -> Rc<RefCell<ObjectData>> {
   test262_support::make_test262_globals_with_print(print)
 }
 
-/// Recursively gather `.js` test files under the given directory while skipping
-/// files with `_FIXTURE` in their name.
 fn collect_tests(
   dir: &Path,
   out: &mut Vec<PathBuf>,
@@ -1997,7 +1885,6 @@ fn collect_tests(
   }
 }
 
-/// Decide whether a test is unsupported before execution begins.
 fn unsupported_reason(
   _path: &Path,
   _src: &str,
@@ -2038,12 +1925,6 @@ fn unsupported_reason(
   None
 }
 
-/// Restore globals to the state captured by a snapshot.
-///
-/// This removes properties that were ADDED during the test, and restores
-/// properties that were MODIFIED. This is lighter than a full deep clone:
-/// we only track keys, and we rely on the fact that builtins/closures share
-/// state via `Rc`.
 #[expect(
   clippy::mutable_key_type,
   reason = "PropertyKey's interior mutability is limited to JsString's derived UTF-8 cache"
@@ -2061,7 +1942,6 @@ fn restore_globals(
   }
 }
 
-/// Snapshot global property descriptors (deeper than just keys).
 #[expect(
   clippy::mutable_key_type,
   reason = "PropertyKey's interior mutability is limited to JsString's derived UTF-8 cache"
@@ -2075,12 +1955,6 @@ fn snapshot_globals(globals: &Rc<RefCell<ObjectData>>) -> HashMap<PropertyKey, P
     .collect()
 }
 
-/// Execute a single test file. Returns:
-/// - Ok(())        -> test ran and passed
-/// - Err(String)   -> test failed or is unsupported
-///
-/// Each test mode runs in a fresh realm. The shared globals and baseline
-/// parameters remain for the runner's auxiliary modes but are not used here.
 #[allow(clippy::too_many_lines)]
 #[expect(
   clippy::mutable_key_type,
@@ -2650,7 +2524,6 @@ fn run_test_file(
   Ok(())
 }
 
-/// Resolves a test segment path to a full path within the test root.
 fn resolve_segment(
   test_root: &Path,
   segment: &str,
@@ -2673,7 +2546,6 @@ fn resolve_segment(
   }
 }
 
-/// Prints VM diagnostics including preserved globals and their values.
 fn print_vm_diag(
   vm: &Vm,
   keep_globals: &HashSet<String>,
@@ -2707,9 +2579,6 @@ fn print_vm_diag(
   eprintln!("--- END DIAGNOSTICS ---");
 }
 
-/// Runs the test262 harness-only tests.
-///
-/// Used to verify that the harness itself is able to be parsed correctly.
 #[expect(
   clippy::mutable_key_type,
   reason = "PropertyKey's interior mutability is limited to JsString's derived UTF-8 cache"
@@ -2827,10 +2696,8 @@ fn run_harness_only(
   result
 }
 
-/// Random test from the suite used to ensure that all proper test harness tools are being put into scope correctly.
 const SCOPE_DUMP_TEST: &str = "language/expressions/object/11.1.5-0-1.js";
 
-/// Runs a test to verify that all proper test harness tools are being put into scope correctly.
 #[expect(
   clippy::mutable_key_type,
   reason = "PropertyKey's interior mutability is limited to JsString's derived UTF-8 cache"

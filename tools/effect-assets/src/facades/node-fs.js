@@ -158,13 +158,9 @@ const validateRmOptions = options => {
   return { recursive: options.recursive === true, force: options.force === true };
 };
 
-// This keeps host work and completion on the VM's Promise job boundary. The
-// operation is still a direct host call rather than a worker-pool operation;
-// there is no cancellation handle to pretend to expose.
 const completed = operation => Promise.resolve().then(operation);
 
 const callbackify = (callback, operation) => {
-  // Callbacks are always delivered by a later VM Promise job, never this stack.
   completed(operation).then(
     value => callback(null, value),
     error => callback(error),

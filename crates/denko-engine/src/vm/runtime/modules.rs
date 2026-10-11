@@ -209,12 +209,10 @@ impl Vm {
       .register_virtual_modules(registry)
   }
 
-  /// Return the canonical specifier of the module currently being evaluated.
   pub(crate) fn current_module_specifier(&self) -> Option<&str> {
     self.modules.current_specifier.as_deref()
   }
 
-  /// Set the canonical specifier of the module currently being evaluated.
   pub(crate) fn set_current_module_specifier(
     &mut self,
     specifier: Option<String>,
@@ -246,12 +244,6 @@ impl Vm {
     self.modules.table[module_index] = exports;
   }
 
-  /// Install exports only when this VM has not seen the module yet.
-  ///
-  /// Dynamic imports evaluate in a child execution context, but the namespace
-  /// returned to source code belongs to the caller's realm. Preserving an
-  /// existing table entry keeps static and dynamic access paths on one
-  /// namespace object.
   pub(crate) fn ensure_module_exports(
     &mut self,
     module_index: usize,
@@ -281,12 +273,6 @@ impl Vm {
   }
 }
 
-/// Build a module namespace object from exported bindings.
-///
-/// Creates an object with a dedicated live export map, excluding the "*"
-/// wildcard export. Namespace export properties are materialized by the
-/// module-namespace exotic internal methods rather than stored as ordinary
-/// descriptors.
 pub(crate) fn build_module_namespace_object(exports: &HashMap<String, BindingCell>) -> Value {
   let namespace = gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
   let mut names: Vec<JsString> = exports

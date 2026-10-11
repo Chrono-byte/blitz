@@ -597,7 +597,6 @@ fn encode_constant(
     Constant::Symbol(id, description) => {
       writer.u8(6);
       let wire_id = if id.is_private() {
-        // Assign IDs in traversal order, independent of compilation-time randomness.
         let next = (1_u64 << 63)
           | u64::try_from(writer.private_names.len())
             .map_err(|_| invalid("too many private names"))?;

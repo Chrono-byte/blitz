@@ -7,10 +7,8 @@ use crate::{binding::BindingCell, closure_environment::ClosureEnvironment};
 use std::cell::RefCell;
 use std::rc::Rc;
 
-/// VM-owned roots and host-visible handles.
 pub(crate) struct VmMemory {
   pub(crate) temporary: Vec<Value>,
-  /// Objects returned from WeakRef.prototype.deref until the current job ends.
   pub(crate) kept_alive: Vec<Value>,
   host: Rc<RefCell<GenerationArena<Value>>>,
   empty_closure_environment: Option<crate::closure_environment::WeakClosureEnvironment>,

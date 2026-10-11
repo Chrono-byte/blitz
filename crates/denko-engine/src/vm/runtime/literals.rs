@@ -80,7 +80,6 @@ impl Vm {
     Ok(object)
   }
 
-  /// Creates a closure without coupling the result to compiler emission state.
   #[allow(clippy::too_many_lines)]
   pub(super) fn make_closure_value(
     &mut self,
@@ -263,8 +262,6 @@ impl Vm {
       );
     }
 
-    // Clone prehashed metadata tables; only their primitive values are shared.
-    // HomeObject, when present, retains its existing insertion order.
     if props.borrow().properties.is_empty() {
       props.borrow_mut().properties = metadata_properties;
     } else {

@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Recomputed semantic facts used by lowering and search selection.
 
 use crate::ir::{CaptureId, IrAssertion, IrNode};
 

@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Typed semantic regular-expression IR.
 
 use crate::ast::{Assertion, CharacterClass, Node};
 

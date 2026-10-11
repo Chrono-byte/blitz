@@ -151,9 +151,6 @@ const validateRmOptions = options => {
   return { recursive: options.recursive === true, force: options.force === true };
 };
 
-// The host operation is direct, but both its start and completion cross the
-// VM Promise job boundary. No cancellation is claimed without worker/event
-// integration.
 const later = operation => Promise.resolve().then(operation);
 
 class Stats {

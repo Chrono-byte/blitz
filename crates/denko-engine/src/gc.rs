@@ -1,14 +1,9 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Garbage collection support.
-//!
-//! This module provides a mark/sweep collector that can reclaim
-//! cyclic garbage by tracking heap allocations in weak registries.
 
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::rc::{Rc, Weak};
 
-// Collector sets contain VM-assigned identities, never JavaScript property keys.
 use rustc_hash::FxHashSet;
 
 use crate::binding::BindingCell;
@@ -109,7 +104,6 @@ thread_local! {
     static PENDING_FINALIZATION_CLEANUPS: RefCell<Vec<Weak<RefCell<ObjectData>>>> = const { RefCell::new(Vec::new()) };
 }
 
-/// Take registries that acquired unreachable targets during the preceding collection.
 pub(crate) fn take_pending_finalization_cleanups() -> Vec<Rc<RefCell<ObjectData>>> {
   PENDING_FINALIZATION_CLEANUPS.with(|pending| {
     let mut seen = FxHashSet::default();
@@ -122,10 +116,6 @@ pub(crate) fn take_pending_finalization_cleanups() -> Vec<Rc<RefCell<ObjectData>
   })
 }
 
-/// Registers a VM that can own roots in the thread-local prototype heap.
-///
-/// The collector can only enumerate one VM's roots at a time, so collection
-/// is conservatively deferred while more than one VM is alive on the thread.
 pub(crate) struct VmGcRegistration;
 
 impl VmGcRegistration {
@@ -216,7 +206,6 @@ pub fn track_proxy(proxy: Rc<RefCell<ProxyData>>) -> Rc<RefCell<ProxyData>> {
   proxy
 }
 
-/// Register a VM-owned closure environment with the collector.
 pub(crate) fn register_closure_environment(env: &crate::closure_environment::ClosureEnvironment) {
   HEAP.with(|heap| {
     let mut heap = heap.borrow_mut();
@@ -465,7 +454,6 @@ pub fn collect_with_env_roots(
   }
 }
 
-/// Marks a value for the garbage collector.
 #[allow(clippy::too_many_lines)]
 fn mark_value(
   value: &Value,

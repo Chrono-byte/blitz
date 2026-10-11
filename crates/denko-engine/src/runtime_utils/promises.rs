@@ -16,7 +16,6 @@ pub(crate) fn realm_kernel(globals: &Rc<RefCell<ObjectData>>) -> Option<RealmKer
   REALM_KERNELS.with(|cache| cache.borrow().get(&identity).cloned())
 }
 
-/// Checks if a promise's constructor matches the given constructor value.
 pub(crate) fn promise_constructor_matches(
   vm: &mut Vm,
   promise: &Value,
@@ -29,7 +28,6 @@ pub(crate) fn promise_constructor_matches(
   Ok(strict_equal(&promise_constructor, constructor))
 }
 
-/// Get a method from an object, treating nullish values as absent.
 pub(crate) fn get_method(
   vm: &mut Vm,
   object: &Value,
@@ -45,7 +43,6 @@ pub(crate) fn get_method(
   Ok(Some(method))
 }
 
-/// Get an iterator and its cached `next` method from an iterator method.
 pub(crate) fn get_iterator_record(
   vm: &mut Vm,
   object: &Value,
@@ -59,7 +56,6 @@ pub(crate) fn get_iterator_record(
   Ok((iterator, next))
 }
 
-/// Advance an iterator, validating each iterator result object.
 pub(crate) fn iterator_step(
   vm: &mut Vm,
   iterator: &Value,
@@ -87,7 +83,6 @@ pub(crate) fn iterator_close(
   vm.close_iterator_in_fork(iterator)
 }
 
-/// Collects values from an iterable into a vector.
 pub(crate) fn collect_iterable_values(
   vm: &mut Vm,
   iterable: &Value,
@@ -131,7 +126,6 @@ pub(crate) fn collect_iterable_values(
   }
 }
 
-/// Resolves a promise with a value, ensuring the promise is not already resolved.
 fn resolve_promise_with_value_inner(
   vm: &mut Vm,
   result_promise: &Rc<RefCell<PromiseState>>,
@@ -247,7 +241,6 @@ fn resolve_promise_with_value_inner(
   Ok(())
 }
 
-/// Resolves a promise with a value, ensuring the promise is not already resolved.
 pub(crate) fn resolve_promise_with_value(
   vm: &mut Vm,
   result_promise: &Rc<RefCell<PromiseState>>,
@@ -256,7 +249,6 @@ pub(crate) fn resolve_promise_with_value(
   resolve_promise_with_value_inner(vm, result_promise, value, Rc::new(RefCell::new(false)))
 }
 
-/// Create a builtin object wrapper for a native function with a prototype.
 pub(crate) fn builtin_object(
   f: BuiltinFn,
   function_proto: &Rc<RefCell<ObjectData>>,
@@ -282,7 +274,6 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) ->
   intrinsics
 }
 
-/// Fulfills a pending promise with a given value, invoking all pending callbacks.
 pub(crate) fn fulfill_pending_promise(
   vm: &mut Vm,
   promise: &Rc<RefCell<PromiseState>>,
@@ -315,7 +306,6 @@ pub(crate) fn fulfill_pending_promise(
   }
 }
 
-/// Rejects a pending promise with a reason, ensuring the promise is not already resolved.
 pub(crate) fn reject_pending_promise(
   vm: &mut Vm,
   promise: &Rc<RefCell<PromiseState>>,
@@ -371,7 +361,6 @@ pub(crate) fn reject_pending_promise(
   }
 }
 
-/// Evaluates code in a ShadowRealm and returns the result.
 pub(crate) fn shadowrealm_evaluate(
   vm: &mut Vm,
   args: &[Value],
@@ -421,7 +410,6 @@ pub(crate) fn shadowrealm_evaluate(
     .map_err(|s| vm.throw_type_error(&s))
 }
 
-/// Imports a value from a module in a ShadowRealm and returns it.
 pub(crate) fn shadowrealm_import_value(
   vm: &mut Vm,
   args: &[Value],
@@ -594,7 +582,6 @@ pub(crate) fn shadowrealm_import_value(
   Ok(promise_value)
 }
 
-/// Dynamically imports a module and returns a promise resolving to the module namespace.
 pub(crate) fn dynamic_import_value(
   vm: &mut Vm,
   args: &[Value],

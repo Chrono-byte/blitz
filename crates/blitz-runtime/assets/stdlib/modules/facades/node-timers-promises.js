@@ -28,9 +28,6 @@ const validateOptions = options => {
   if (options.ref !== undefined && typeof options.ref !== "boolean") {
     throw new TypeError("The \"ref\" option must be a boolean");
   }
-  // The host scheduler currently registers every timer as referenced. Failing
-  // explicitly is safer than claiming that ref:false can allow the runtime to
-  // exit while this timer is pending.
   if (options.ref === false) {
     throw new Error("timers/promises ref:false is not supported by Blitz's scheduler");
   }

@@ -54,17 +54,12 @@ tokio = { version = "1.53.1", features = ["fs", "macros", "net", "rt-multi-threa
 url = "2.5.8"
 
 [workspace.lints.clippy]
-# Keep Clippy's maintained default set while leaving the noisier pedantic,
-# nursery, restriction, and cargo groups opt-in.
 all = { level = "warn", priority = -2 }
 
-# Semantic defects should never enter the workspace. Suspicious constructs and
-# avoidable runtime costs stay visible without blocking incremental cleanup.
 correctness = { level = "deny", priority = -1 }
 suspicious = { level = "warn", priority = -1 }
 perf = { level = "warn", priority = -1 }
 
-# Small, actionable hygiene rules that are useful across every Blitz crate.
 dbg_macro = "deny"
 todo = "deny"
 unimplemented = "deny"
@@ -76,7 +71,5 @@ needless_collect = "warn"
 unused_async = "warn"
 
 [workspace.lints.rust]
-# These protect observable behavior and unsafe invariants rather than enforcing
-# subjective formatting or documentation policy.
 unsafe_op_in_unsafe_fn = "deny"
 unused_must_use = "deny"

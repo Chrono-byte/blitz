@@ -6,19 +6,12 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-/// Exception handler record.
 pub(crate) struct HandlerRecord {
-  /// The code containing the handler code.
   pub(crate) chunk: Arc<Chunk>,
-  /// The instruction pointer where the handler jumps to.
   pub(crate) handler_pc: InstructionIndex,
-  /// The saved locals length for unwinding.
   pub(crate) saved_locals_len: usize,
-  /// The saved frame count for unwinding.
   pub(crate) frame_count: usize,
-  /// The saved lexical environment for unwinding.
   pub(crate) saved_lexical_env: Rc<RefCell<EnvironmentRecord>>,
-  /// Finalizer control data when this protected region has a `finally` clause.
   pub(crate) finally: Option<FinallyHandlerRecord>,
 }
 
@@ -28,7 +21,6 @@ pub(crate) struct FinallyHandlerRecord {
   pub(crate) did_return_slot: usize,
 }
 
-/// Register and spill state that survives a suspended execution.
 pub(crate) struct RegisterState {
   pub(crate) registers: [Value; Register::COUNT],
   pub(crate) spill_slots: Vec<Value>,
@@ -118,7 +110,6 @@ impl RegisterState {
   }
 }
 
-/// Boundary reached while executing a persistent state.
 pub(crate) enum RunOutcome {
   Initialized,
   Return(Value),

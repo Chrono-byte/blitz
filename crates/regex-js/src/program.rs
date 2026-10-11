@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Immutable control-flow program produced from semantic regex IR.
 
 use crate::analysis::Analysis;
 use crate::ast::CharacterClass;

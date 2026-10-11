@@ -1,8 +1,5 @@
 import { host } from "blitz-internal:host";
 
-// Version-one private host adapter for the initial node:crypto random slice.
-// The public facade owns Node overloads and coded exceptions; this module only
-// exposes the versioned host primitive to the bundled graph.
 const unavailable = () => {
   const error = new Error("Blitz node:crypto random host primitive is unavailable");
   error.code = "ERR_CRYPTO_HOST_UNAVAILABLE";

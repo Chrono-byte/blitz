@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Async generators serialize protocol requests while their activation awaits.
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;

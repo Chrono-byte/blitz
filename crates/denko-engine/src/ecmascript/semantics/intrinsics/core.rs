@@ -2,10 +2,6 @@
 use super::*;
 use crate::gc;
 
-/// Installs standard built-in properties on one intrinsic object.
-///
-/// Keeping descriptor attributes and function metadata here makes family
-/// installers describe the intrinsic graph instead of repeating its plumbing.
 pub(crate) struct IntrinsicInstaller<'a> {
   target: &'a Rc<RefCell<ObjectData>>,
   function_prototype: &'a Rc<RefCell<ObjectData>>,
@@ -64,7 +60,6 @@ impl<'a> IntrinsicInstaller<'a> {
   }
 }
 
-/// Creates a builtin object value with the given function and prototype chain.
 pub(crate) fn builtin_object(
   f: BuiltinFn,
   function_proto: &Rc<RefCell<ObjectData>>,
@@ -76,7 +71,6 @@ pub(crate) fn builtin_object(
   Value::BuiltinObject(f, props)
 }
 
-/// Sets the `length` property on a builtin function object.
 pub(crate) fn set_builtin_length(
   target: &Value,
   length: f64,
@@ -96,7 +90,6 @@ pub(crate) fn set_builtin_length(
   }
 }
 
-/// Sets the `name` property on a builtin function object.
 pub(crate) fn set_builtin_name(
   target: &Value,
   name: &str,

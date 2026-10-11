@@ -61,7 +61,6 @@ fn mark_realm_callables(
   }
 }
 
-/// Builds the ECMAScript intrinsics and installs the available global bindings.
 pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) -> Intrinsics {
   globals.borrow_mut().properties.reserve(64);
   let foundation = create_foundation();

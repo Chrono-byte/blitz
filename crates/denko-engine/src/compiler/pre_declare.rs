@@ -1,16 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Pre-declaration phase for hoisting support.
-//!
-//! This module handles the pre-declaration phase of compilation, which:
-//! - Reserves local slots for function declarations (function hoisting)
-//! - Pre-declares variable bindings with proper temporal dead zone (TDZ) tracking
-//! - Emits the actual hoisted function closures into the compiler's virtual
-//!   instruction stream
-//! - Detects "use strict" directives for strict mode context
-//!
-//! The pre-declaration phase runs before the main statement compilation to ensure
-//! that function declarations and variable bindings are visible throughout their
-//! scope, matching JavaScript's hoisting semantics.
 
 use super::emit::LoweringOpcode;
 use crate::Compiler;
@@ -19,8 +7,6 @@ use oxc_ast::ast as oast;
 const LINE: u32 = 1;
 
 impl Compiler {
-  /// Scan an oxc Program and reserve local slots for top-level function
-  /// declarations to preserve hoisting semantics.
   pub(crate) fn pre_declare_functions_oast(
     &mut self,
     program: &oast::Program<'_>,
@@ -61,7 +47,6 @@ impl Compiler {
     }
   }
 
-  /// Pre-declare variables from a program's top-level statements.
   pub(crate) fn pre_declare_variables_oast(
     &mut self,
     program: &oast::Program<'_>,
@@ -69,9 +54,6 @@ impl Compiler {
     self.pre_declare_variables_oast_stmts(&program.body);
   }
 
-  /// Pre-declare variables from an arbitrary statement list, handling both
-  /// var declarations (which hoist to function scope) and lexical declarations
-  /// (which create block-scoped bindings with temporal dead zone).
   pub(crate) fn pre_declare_variables_oast_stmts(
     &mut self,
     stmts: &[oast::Statement],
@@ -161,8 +143,6 @@ impl Compiler {
     }
   }
 
-  /// Pre-declare function declarations from a statement list, reserving local
-  /// slots for all function declarations encountered.
   pub(crate) fn pre_declare_functions_oast_stmts(
     &mut self,
     stmts: &[oast::Statement],
@@ -227,11 +207,6 @@ impl Compiler {
     Ok(slot)
   }
 
-  /// Emit the actual function closures for hoisted function declarations.
-  ///
-  /// This compiles each function declaration statement into a closure object
-  /// and assigns it to the previously reserved local slot, making it available
-  /// throughout its scope.
   pub(crate) fn emit_hoisted_function_decls_oast_stmts(
     &mut self,
     stmts: &[oast::Statement],
@@ -290,11 +265,6 @@ impl Compiler {
     Ok(())
   }
 
-  /// Check whether a function body contains a "use strict" directive prologue.
-  ///
-  /// Per ECMAScript, directive prologue consists of leading string-literal
-  /// expression statements appearing before any other statements. This checks
-  /// the parser-recognized directives collection.
   pub(crate) fn has_use_strict_directive(body: &oast::FunctionBody<'_>) -> bool {
     body
       .directives

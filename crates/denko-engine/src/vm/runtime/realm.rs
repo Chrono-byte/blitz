@@ -12,7 +12,6 @@ use std::collections::HashSet;
 use std::rc::Rc;
 
 impl Vm {
-  /// Store the kernel-provided intrinsic table on the Realm record.
   pub(super) fn populate_realm_intrinsics(
     &mut self,
     intrinsics: Intrinsics,
@@ -58,12 +57,10 @@ impl Vm {
     self.execution.active.strict
   }
 
-  /// Returns whether the current execution context is in strict mode.
   pub(crate) fn active_strict_mode(&self) -> bool {
     self.execution.active.strict
   }
 
-  /// Sets the current strict mode flag.
   pub(crate) fn set_current_strict_mode(
     &mut self,
     strict: bool,

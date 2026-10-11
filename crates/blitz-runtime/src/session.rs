@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Persistent hosted execution sessions for embedders and the Blitz CLI.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};

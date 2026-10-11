@@ -73,11 +73,6 @@ impl Vm {
     Ok(desc)
   }
 
-  /// Define a property on an object, replacing any existing descriptor.
-  ///
-  /// # Errors
-  ///
-  /// Returns a [`crate::errors::RuntimeError`] if the operation fails.
   #[allow(clippy::too_many_lines)]
   pub(in crate::vm::runtime) fn define_own_property(
     &mut self,

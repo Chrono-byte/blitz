@@ -1,9 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! CLI entry point for the full Blitz JavaScript runtime.
-//!
-//! This executable installs OS-facing host APIs such as `console` and
-//! `process` before evaluating user code. Use `denko-engine` when testing the
-//! host-neutral ECMAScript engine directly.
 
 mod analysis;
 mod args;

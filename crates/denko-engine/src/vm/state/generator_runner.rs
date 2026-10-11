@@ -9,11 +9,8 @@ pub(crate) enum GeneratorStatus {
   Completed,
 }
 
-/// Manages the execution state of a generator function.
 pub(crate) struct GeneratorRunner {
-  /// The VM executing the generator.
   pub(crate) vm: Vm,
-  /// Persistent register file and spill_slots for the suspended function.
   pub(crate) register_state: RegisterState,
   pub(crate) status: GeneratorStatus,
 }

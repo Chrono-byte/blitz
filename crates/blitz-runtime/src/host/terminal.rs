@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Buffered terminal input and prompt-safe output for interactive applications.
 
 use std::cell::RefCell;
 use std::io::{self, BufRead, Write};
@@ -15,7 +14,6 @@ use tokio::sync::mpsc;
 
 use super::host_function;
 
-/// Owned input emitted by the dedicated line-editor thread.
 pub(super) enum TerminalEvent {
   Line(String),
   Eof,
@@ -31,7 +29,6 @@ struct TerminalInner {
   events: mpsc::Sender<TerminalEvent>,
 }
 
-/// VM-thread terminal callback and line-editor state.
 #[derive(Clone)]
 pub(super) struct TerminalState(Rc<RefCell<TerminalInner>>);
 

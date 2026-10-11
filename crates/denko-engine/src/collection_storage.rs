@@ -49,7 +49,6 @@ fn canonicalize(value: Value) -> Value {
   }
 }
 
-/// Hash precisely the identities used by SameValueZero, without coercion.
 fn hash_key(
   value: &Value,
   hashes: &RandomState,
@@ -110,7 +109,6 @@ impl CollectionState {
     Self::from_value(array_from_values(Vec::new()), kind)
   }
 
-  /// Called only after validating the receiver's private collection slot.
   pub(crate) fn from_value(
     value: Value,
     kind: CollectionKind,
@@ -135,8 +133,6 @@ impl CollectionState {
   ) -> T {
     let mut elements = self.elements.borrow_mut();
     let mut properties = self.properties.borrow_mut();
-    // Structured clone copies the authoritative slots into fresh ObjectData.
-    // Build from those cloned identities rather than copying pointer hashes.
     if properties
       .collection_index
       .as_ref()

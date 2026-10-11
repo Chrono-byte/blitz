@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Ordered Array prototype installation phases.
 
 use super::*;
 

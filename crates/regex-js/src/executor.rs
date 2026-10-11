@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Explicit-stack executor for verified regex programs.
 
 use std::ops::Range;
 

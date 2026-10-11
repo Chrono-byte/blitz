@@ -1,8 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Compiler-owned source analysis for editor integrations.
-//!
-//! This module deliberately exposes a small, stable, serializable model rather
-//! than leaking OXC AST types into language servers and editor extensions.
 
 mod model;
 mod project;

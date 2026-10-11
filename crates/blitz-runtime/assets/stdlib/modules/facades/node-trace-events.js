@@ -1,5 +1,3 @@
-// Blitz has no trace-event sink. Keep the object and category shape useful to
-// feature detection, while never claiming that tracing became active.
 const invalidArgument = (name, expected, value) => {
   const received = value === undefined ? "undefined" : value === null ? "null" : typeof value;
   const error = new TypeError(`The "${name}" property must be ${expected}. Received ${received}`);

@@ -1,13 +1,8 @@
 target/
-# test262/ is now managed as a git submodule. Keep a local backup if needed.
-# test262/
 test262-mini/
 
-# Package-manager state is reproducible from committed pnpm lockfiles.
 node_modules/
 .pnpm-store/
 
-# Interrupted Effect asset generation may leave atomic-swap directories.
-# The finalized versioned assets remain intentionally tracked.
 crates/blitz-runtime/assets/effect/*.tmp-*/
 crates/blitz-runtime/assets/effect/*.old-*/

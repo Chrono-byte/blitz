@@ -146,9 +146,7 @@ impl fmt::Display for Token {
 
 /// Lexical analyzer that tokenizes source code
 pub struct Lexer {
-  /// Source code as characters
   source: Vec<char>,
-  /// Current position in source
   pos: usize,
 }
 

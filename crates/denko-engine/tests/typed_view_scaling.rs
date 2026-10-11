@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Measures checked native fill/read loops with input allocation outside timing.
 
 use denko::{
   Vm, compiler,

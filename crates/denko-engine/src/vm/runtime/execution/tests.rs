@@ -43,6 +43,41 @@ mod test {
   use super::*;
 
   #[test]
+  fn array_push_preserves_loop_carried_character_codes() {
+    let source = crate::js!(
+      r#"
+      const decode = string => {
+        const output = []; let counter = 0; const length = string.length;
+        let value = string.charCodeAt(counter);
+        while (counter < length) {
+          counter += 1;
+          output.push(value);
+          value = string.charCodeAt(counter);
+        }
+        return output;
+      }
+      globalThis.characterCodesOk = decode('abc').join(',') === '97,98,99';
+    "#
+    );
+    for optimized in [false, true] {
+      for native in [false, true] {
+        let session = Parser::parse_source(source).expect("parse");
+        let globals = test_globals();
+        let mut vm = Vm::new(globals);
+        vm.caches.optimized_execution_enabled = optimized;
+        vm.caches.native_regions_enabled = native;
+        vm.run(compiler::compile_session(&session).expect("compile"))
+          .expect("run");
+        assert_eq!(
+          vm.get_global("characterCodesOk"),
+          Some(Value::Bool(true)),
+          "optimized={optimized}, native={native}"
+        );
+      }
+    }
+  }
+
+  #[test]
   fn numeric_map_results_survive_generic_consumers_and_mutations() {
     let source = crate::js!(
       r#"

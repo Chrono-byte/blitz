@@ -1,17 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Async/microtask helpers and background runtime utilities.
-//!
-//! This module provides utilities the VM uses to schedule and run
-//! microtasks, interact with the background Tokio runtime, and bridge
-//! synchronous VM execution with asynchronous operations (promises,
-//! async functions, etc.).
-//!
-//! Microtask / job queue semantics
-//! - Microtasks are stored as closures and drained in FIFO order. Job errors
-//!   are recorded on the VM, reported through the unhandled-rejection hook when
-//!   installed, and do not stop the remaining queue from being drained.
-//! - Promise reactions and thenable-resolution work are queued as microtasks,
-//!   preserving their observable job ordering.
 use crate::bytecode::Function;
 use crate::runtime_utils::{reject_pending_promise, resolve_promise_with_value};
 use crate::value::{ObjectData, PromiseState, Value};
@@ -37,7 +24,6 @@ enum AsyncResume {
 }
 
 impl Vm {
-  /// Keep a weakly referenced object alive until the current job completes.
   pub(crate) fn keep_alive(
     &mut self,
     value: Value,
@@ -45,7 +31,6 @@ impl Vm {
     self.memory.kept_alive.push(value);
   }
 
-  /// Schedule cleanup for a FinalizationRegistry whose target became unreachable.
   pub(crate) fn queue_finalization_cleanup(
     &mut self,
     registry: Rc<RefCell<ObjectData>>,
@@ -83,7 +68,6 @@ impl Vm {
     });
   }
 
-  /// Queue a microtask to be executed after the current call stack completes.
   pub(crate) fn queue_microtask<F>(
     &mut self,
     job: F,
@@ -93,7 +77,6 @@ impl Vm {
     self.jobs.microtasks.push_back(Box::new(job));
   }
 
-  /// Return a suspended child execution's jobs to the host queue.
   pub(crate) fn take_jobs_from(
     &mut self,
     child: &mut Vm,
@@ -108,7 +91,6 @@ impl Vm {
       .append(&mut child.jobs.dynamic_imports);
   }
 
-  /// Queue a dynamic import job to be executed by the host job loop.
   pub(crate) fn queue_dynamic_import_job<F>(
     &mut self,
     job: F,
@@ -183,7 +165,6 @@ impl Vm {
     Ok(())
   }
 
-  /// Invoke the installed unhandled rejection hook, if present.
   pub(crate) fn call_unhandled_rejection(
     &mut self,
     promise: Value,
@@ -200,10 +181,6 @@ impl Vm {
     }
   }
 
-  /// Drain all pending dynamic import jobs in FIFO order.
-  ///
-  /// Job failures are recorded on the VM and reported through the host hook;
-  /// they do not stop the remaining jobs from being drained.
   pub(crate) fn drain_dynamic_import_jobs(&mut self) -> Result<(), crate::errors::RuntimeError> {
     while let Some(mut job) = self.jobs.dynamic_imports.pop_front() {
       let caller_handlers = std::mem::take(&mut self.exceptions.handlers);
@@ -232,13 +209,6 @@ impl Vm {
     Ok(())
   }
 
-  /// Drain all pending microtasks, executing them in FIFO order and continuing on errors.
-  ///
-  /// Microtask callbacks are executed to completion. If a microtask returns
-  /// an error, the VM records it on `last_uncaught_exception` and continues
-  /// draining the remaining microtasks. This mirrors the common host policy
-  /// of running microtasks to completion while surfacing exceptions via a
-  /// host hook instead of aborting the queue on first error.
   pub(crate) fn drain_microtasks(&mut self) -> Result<(), crate::errors::RuntimeError> {
     while let Some(mut job) = self.jobs.microtasks.pop_front() {
       let caller_handlers = std::mem::take(&mut self.exceptions.handlers);
@@ -267,12 +237,6 @@ impl Vm {
     Ok(())
   }
 
-  /// Run all pending microtasks and dynamic import jobs until the queues are empty.
-  ///
-  /// Prioritizes microtasks over dynamic import jobs, processing them in rounds.
-  ///
-  /// Job failures are recorded on the VM and reported through the host hook;
-  /// they do not stop the remaining jobs from being drained.
   pub(crate) fn run_microtasks_if_needed(&mut self) -> Result<(), crate::errors::RuntimeError> {
     while !self.jobs.microtasks.is_empty() || !self.jobs.dynamic_imports.is_empty() {
       if !self.jobs.microtasks.is_empty() {
@@ -330,8 +294,6 @@ impl Vm {
     }
   }
 
-  /// Await a value from bytecode semantics and turn promise rejection into a
-  /// language-level throw that can be handled by the active exception region.
   pub(super) fn await_value_or_throw(
     &mut self,
     value: Value,
@@ -356,10 +318,6 @@ impl Vm {
     self.run_microtasks_if_needed()
   }
 
-  /// Invoke an async closure, queuing its microtasks for execution after the current call stack completes.
-  ///
-  /// Execution failures reject the returned promise. Failures from queued
-  /// microtasks are recorded on the VM and reported through the host hook.
   pub(super) fn invoke_async_closure(
     &mut self,
     proto: &Rc<Function>,
@@ -411,7 +369,6 @@ impl Vm {
     Ok(self.promise_value(promise))
   }
 
-  /// Begin a module body without running a host job checkpoint between dependencies.
   pub(crate) fn start_async_module(
     &mut self,
     chunk: std::sync::Arc<crate::bytecode::Chunk>,

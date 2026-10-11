@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Cyclic Module Record evaluation and asynchronous dependency scheduling.
 use super::*;
 use crate::errors::RuntimeError;
 use crate::runtime_utils::{fulfill_pending_promise, reject_pending_promise};
@@ -319,7 +318,6 @@ fn reject_record(
 ) {
   let (promise, parents) = {
     let mut record = record.borrow_mut();
-    // A DFS failure may have cached the error before its entry promise is rejected.
     if record.state == ModuleState::Evaluated && record.evaluation.error.is_none() {
       return;
     }
@@ -342,7 +340,6 @@ fn reject_record(
   }
 }
 
-/// Attach internal reactions without consulting an observable `.then` property.
 pub(crate) fn observe(
   vm: &mut Vm,
   promise: &Value,
@@ -402,7 +399,6 @@ pub(super) fn finish_host_evaluation(
 }
 
 impl ModuleLoader {
-  /// Retain evaluation promises and original thrown values with their module records.
   pub(crate) fn append_evaluation_roots(
     &self,
     roots: &mut Vec<Value>,

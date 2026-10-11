@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Date constructor and prototype methods.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -20,7 +19,6 @@ const MS_PER_DAY: i64 = 24 * MS_PER_HOUR;
 const MAX_TIME: f64 = 8_640_000_000_000_000.0;
 const DATE_SLOT: &str = "[[PrimitiveValue]]";
 
-/// The Date constructor and its prototype object.
 pub(crate) struct DateIntrinsics {
   pub(crate) constructor: Value,
   pub(crate) prototype: Value,
@@ -447,7 +445,6 @@ fn replace_parts(
   set_date_number(vm, &receiver, value)
 }
 
-/// Creates the Date constructor, static methods, and prototype methods.
 pub(crate) fn create_date_intrinsics(
   object_prototype: &Rc<RefCell<ObjectData>>,
   function_prototype: &Rc<RefCell<ObjectData>>,

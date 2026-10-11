@@ -8,89 +8,48 @@ pub(crate) struct PrimitiveIntrinsics {
   pub(crate) numeric: builtins::primitives::NumericIntrinsics,
 }
 
-/// Contains references to global intrinsic values.
 pub(crate) struct GlobalIntrinsicValues<'a> {
-  /// The Reflect object.
   pub reflect_obj: &'a Rc<RefCell<ObjectData>>,
-  /// The Object constructor value.
   pub object_ctor_val: &'a Value,
-  /// The Function constructor value.
   pub function_ctor_val: &'a Value,
-  /// The Array constructor value.
   pub array_ctor_val: &'a Value,
-  /// The RegExp constructor value.
   pub regexp_ctor_val: &'a Value,
-  /// The Promise constructor value.
   pub promise_ctor_val: &'a Value,
-  /// The Date constructor value.
   pub date_ctor_val: &'a Value,
-  /// The Error constructor value.
   pub error_ctor_val: &'a Value,
-  /// The AggregateError constructor value.
   pub aggregate_error_ctor_val: &'a Value,
-  /// The Map constructor value.
   pub map_ctor_val: &'a Value,
-  /// The WeakMap constructor value.
   pub weak_map_ctor_val: &'a Value,
-  /// The WeakSet constructor value.
   pub weak_set_ctor_val: &'a Value,
-  /// The WeakRef constructor value.
   pub weak_ref_ctor_val: &'a Value,
-  /// The FinalizationRegistry constructor value.
   pub finalization_registry_ctor_val: &'a Value,
-  /// The Set constructor value.
   pub set_ctor_val: &'a Value,
-  /// The ArrayBuffer constructor value.
   pub arraybuffer_ctor_val: &'a Value,
-  /// The SharedArrayBuffer constructor value.
   pub sharedarraybuffer_ctor_val: &'a Value,
-  /// The DataView constructor value.
   pub dataview_ctor_val: &'a Value,
-  /// The Uint8Array constructor value.
   pub uint8array_ctor_val: &'a Value,
-  /// The Int8Array constructor value.
   pub int8array_ctor_val: &'a Value,
-  /// The Uint16Array constructor value.
   pub uint16array_ctor_val: &'a Value,
-  /// The Int16Array constructor value.
   pub int16array_ctor_val: &'a Value,
-  /// The Uint32Array constructor value.
   pub uint32array_ctor_val: &'a Value,
-  /// The Int32Array constructor value.
   pub int32array_ctor_val: &'a Value,
-  /// The Float32Array constructor value.
   pub float32array_ctor_val: &'a Value,
-  /// The Float64Array constructor value.
   pub float64array_ctor_val: &'a Value,
-  /// The Uint8ClampedArray constructor value.
   pub uint8clampedarray_ctor_val: &'a Value,
-  /// The BigInt64Array constructor value.
   pub bigint64array_ctor_val: &'a Value,
-  /// The BigUint64Array constructor value.
   pub biguint64array_ctor_val: &'a Value,
-  /// The EvalError constructor value.
   pub eval_error_ctor_val: &'a Value,
-  /// The RangeError constructor value.
   pub range_error_ctor_val: &'a Value,
-  /// The ReferenceError constructor value.
   pub reference_error_ctor_val: &'a Value,
-  /// The SyntaxError constructor value.
   pub syntax_error_ctor_val: &'a Value,
-  /// The TypeError constructor value.
   pub type_error_ctor_val: &'a Value,
-  /// The URIError constructor value.
   pub uri_error_ctor_val: &'a Value,
-  /// The Math object.
   pub math: &'a Rc<RefCell<ObjectData>>,
-  /// The JSON object.
   pub json_obj: &'a Rc<RefCell<ObjectData>>,
-  /// The Atomics object.
   pub atomics_obj: &'a Value,
-  /// The ShadowRealm constructor value.
   pub shadowrealm_ctor_val: &'a Value,
 }
 
-/// Installs global ECMAScript bindings and intrinsic objects.
 pub(crate) fn install_global_bindings(
   globals: &Rc<RefCell<ObjectData>>,
   object_proto_map: &Rc<RefCell<ObjectData>>,

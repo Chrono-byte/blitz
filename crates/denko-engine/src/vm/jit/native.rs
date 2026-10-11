@@ -1,9 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Minimal executable-code proof for the baseline JIT boundary.
-//!
-//! This intentionally supports only a host function returning a u64 constant.
-//! It is not connected to JavaScript execution yet; the boundary is validated
-//! before VM frames and Value ABI are exposed to generated code.
 
 use crate::value::Value;
 use std::ptr::NonNull;
@@ -18,10 +13,8 @@ pub(crate) struct JitFrame {
   pub(crate) registers: *mut Value,
   pub(crate) register_count: usize,
   pub(crate) result: *mut Value,
-  /// Prepared call arguments. Direct entry uses these before VM local cells exist.
   pub(crate) arguments: *const Value,
   pub(crate) argument_count: usize,
-  /// VM-owned binding cells available to generated local-load helpers.
   pub(crate) locals: *mut crate::binding::BindingCell,
   pub(crate) local_count: usize,
 }
@@ -38,7 +31,6 @@ const _: () = {
   assert!(std::mem::size_of::<JitFrame>() == 80);
 };
 
-/// CallFrame for leaf calls that cannot resume in the interpreter.
 #[repr(C)]
 pub(crate) struct DirectCallFrame {
   pub(crate) result: *mut Value,
@@ -46,7 +38,6 @@ pub(crate) struct DirectCallFrame {
   pub(crate) argument_count: usize,
 }
 
-/// Compact direct-call frame used by typed numeric code.
 #[repr(C)]
 pub(crate) struct CompactDirectCallFrame {
   pub(crate) result_bits: u64,
@@ -145,8 +136,6 @@ pub(crate) unsafe extern "C" fn denko_jit_set_number_result(
   frame: *mut JitFrame,
   value: f64,
 ) {
-  // SAFETY: generated code receives a frame whose result points to VM-owned
-  // Value storage for the duration of the call.
   unsafe { *(*frame).result = Value::Number(value) };
 }
 
@@ -180,7 +169,6 @@ pub(crate) unsafe extern "C" fn denko_jit_materialize_number_register(
   register: u32,
   value: f64,
 ) {
-  // SAFETY: generated code passes a valid frame and a checked register index.
   unsafe {
     if register as usize >= (*frame).register_count {
       return;
@@ -194,7 +182,6 @@ pub(crate) unsafe extern "C" fn denko_jit_set_resume_pc(
   frame: *mut JitFrame,
   resume_pc: u32,
 ) -> JitExitCode {
-  // SAFETY: generated code passes a valid frame for the duration of the call.
   unsafe { (*frame).resume_pc = resume_pc as usize };
   JIT_EXIT_INTERPRETER
 }
@@ -925,7 +912,6 @@ impl NativeCode {
   #[cfg(all(unix, target_arch = "x86_64"))]
   #[cfg(test)]
   pub(crate) unsafe fn call_u64(&self) -> u64 {
-    // SAFETY: callers must only invoke code produced by return_u64.
     let entry: unsafe extern "C" fn() -> u64 = unsafe { std::mem::transmute(self.ptr.as_ptr()) };
     unsafe { entry() }
   }
@@ -957,7 +943,6 @@ mod tests {
     source
       .patch_jump(site, target.entry_address())
       .expect("link blocks");
-    // SAFETY: source is linked to a live target with the same function ABI.
     assert_eq!(unsafe { source.call_u64() }, 42);
   }
 
@@ -1027,8 +1012,6 @@ mod tests {
       locals: std::ptr::null_mut(),
       local_count: 0,
     };
-    // SAFETY: the frame points to live Rust-owned result storage and the code
-    // was emitted by return_number for this exact ABI.
     assert_eq!(unsafe { code.call_frame(&mut frame) }, JIT_EXIT_RETURN);
     assert!(matches!(result, Value::Number(value) if value == 42.0));
   }

@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Language-semantic operations and intrinsic bootstrapping.
 use js_string::{JsString, JsStringBuilder};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -10,21 +9,13 @@ use crate::runtime_utils::{static_builtin_arg_offset, syntax_error, to_length};
 use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
 use crate::{Parser, RuntimeError, Vm, compiler};
 
-/// Atomics operations for shared array buffers.
 pub mod atomics;
-/// Internal backing and branding for byte-oriented ArrayBuffer views.
 pub(crate) mod byte_views;
-/// ECMAScript intrinsic objects and global bindings.
 pub mod intrinsics;
-/// Numeric parsing and coercion operations.
 pub mod numbers;
-/// Property descriptor and enumeration helpers.
 pub mod properties;
-/// ShadowRealm implementation.
 pub mod shadowrealm;
-/// Stable ordering of captured values with abrupt comparator completion.
 pub(crate) mod sorting;
-/// URI encoding/decoding functions.
 pub mod uri;
 
 pub(crate) use byte_views::*;
@@ -34,11 +25,6 @@ pub(crate) use intrinsics::{
 pub(crate) use numbers::*;
 pub(crate) use properties::*;
 
-/// Creates the argument list for an operation that accepts an array-like object.
-///
-/// This follows `CreateListFromArrayLike`: the length is read once with ordinary
-/// property access and each indexed value is read in order, so holes, accessors,
-/// proxies, and abrupt completions retain their ECMAScript behavior.
 pub(crate) fn create_list_from_array_like(
   vm: &mut Vm,
   receiver: &Value,

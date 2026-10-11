@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Reflect namespace objects.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -49,13 +48,10 @@ fn install(
     .insert(key(name), PropertyDescriptor::builtin_data(function));
 }
 
-/// The ordinary global Reflect object.
 pub(crate) struct ReflectIntrinsics {
   pub(crate) object: Rc<RefCell<ObjectData>>,
 }
 
-/// Creates the global Reflect object. Its property insertion order matches the
-/// bootstrap implementation because own-property enumeration is observable.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn create_reflect_intrinsics(
   object_prototype: &Rc<RefCell<ObjectData>>,

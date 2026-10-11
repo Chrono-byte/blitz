@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Object constructor, static methods, and Object.prototype methods.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -14,15 +13,10 @@ use crate::runtime_utils::{
 use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value};
 use crate::{RuntimeError, Vm};
 
-/// The preallocated Object constructor and prototype intrinsic values.
 pub(crate) struct ObjectIntrinsics {
   pub(crate) constructor: Value,
 }
 
-/// Installs Object constructor behavior, static methods, and Object.prototype methods.
-///
-/// The foundation installer allocates the cyclic Object/Function graph first; this
-/// function only populates those preallocated objects.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn install_object_intrinsics(
   constructor_properties: &Rc<RefCell<ObjectData>>,

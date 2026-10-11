@@ -120,11 +120,6 @@ fn virtual_module_path(specifier: &str) -> PathBuf {
   PathBuf::from(format!("{VIRTUAL_PATH_PREFIX}{specifier}"))
 }
 
-/// Encode a filesystem path as the URL used by a module record.
-///
-/// This deliberately lives in the engine: it only describes a module's
-/// canonical identity and does not consult any host services. Virtual module
-/// identities already have URL-like specifiers and are returned unchanged.
 fn module_url(
   path: &Path,
   specifier: &str,
@@ -157,10 +152,6 @@ fn module_url(
   format!("file://{encoded}")
 }
 
-/// Resolve a relative module specifier in the namespace of a virtual module.
-///
-/// Virtual specifiers are URL-like names, not filesystem paths. In particular,
-/// the part before `:` is a namespace and must remain part of the identity.
 fn resolve_virtual_relative(
   importer: &str,
   requested: &str,
@@ -591,7 +582,6 @@ pub struct ModuleRecord {
   pub specifier: String,
   /// URL derived from this record's canonical identity.
   pub url: String,
-  /// Lazily-created `import.meta` object for this module record.
   import_meta: Option<Value>,
   /// Explicit source-backed or prelinked record payload.
   pub payload: ModuleRecordPayload,
@@ -601,7 +591,6 @@ pub struct ModuleRecord {
   pub declaration_source: Option<String>,
   /// Stable content hash supplied by the virtual module asset.
   pub content_hash: Option<u64>,
-  /// Current loader lifecycle state for this module.
   state: ModuleState,
   evaluation: async_evaluation::Evaluation,
   /// Assigned numeric module index used by the VM module table. Set during instantiation.
@@ -620,7 +609,6 @@ pub struct ModuleRecord {
   pub namespace_exports: HashMap<String, usize>,
   /// Star export sources.
   pub star_exports: Vec<String>,
-  /// Whether this prelinked module is initialized entirely by its embedder.
   host_initialized: bool,
 }
 
@@ -780,20 +768,12 @@ pub struct ModuleLoader {
   pub map: HashMap<PathBuf, Rc<RefCell<ModuleRecord>>>,
   /// Embedder-provided modules checked before filesystem resolution.
   pub virtual_modules: VirtualModuleRegistry,
-  /// Canonical graph identity index. Virtual modules are keyed only by their
-  /// specifier here, never by a synthetic filesystem path.
   records_by_specifier: HashMap<String, Rc<RefCell<ModuleRecord>>>,
-  /// Validated prelinked graphs registered for this realm.
   prelinked_graphs: Vec<RegisteredPrelinkedGraph>,
-  /// Canonical prelinked module identity index, including private modules.
   prelinked_by_specifier: HashMap<String, PrelinkedModuleLocation>,
-  /// Prelinked modules that source-facing resolution is allowed to reach.
   prelinked_public_by_specifier: HashMap<String, PrelinkedModuleLocation>,
-  /// Reserved prelinked module-index lookup, including unconstructed modules.
   prelinked_by_index: HashMap<usize, PrelinkedModuleLocation>,
-  /// Additional package export conditions selected by the embedder.
   condition_names: Vec<String>,
-  /// Per-loader source pipeline counters shared with parallel compile workers.
   pipeline_counters: Arc<ModuleLoaderPipelineCounters>,
 }
 

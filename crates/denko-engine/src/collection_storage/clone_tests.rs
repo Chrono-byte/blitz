@@ -25,7 +25,6 @@ fn indexed_collection_clone_rebuilds_identity_hashes_and_preserves_cycles() {
   source_map.set(Value::Object(Rc::clone(&map)), key.clone());
   source_set.add(key.clone());
   source_set.add(Value::Object(Rc::clone(&map)));
-  // Ensure both source indexes exist before cloning their cyclic graph.
   assert!(source_map.has(&key));
   assert!(source_set.has(&key));
   let cloned = clone_value_across_realms(&mut vm, &Value::Object(Rc::clone(&map)), None)

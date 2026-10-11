@@ -1,9 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Host-owned AbortController and AbortSignal compatibility.
-//!
-//! These objects are deliberately installed by the runtime host rather than
-//! the engine's raw realm.  They are web-platform capabilities used by Effect
-//! and are not ECMAScript intrinsics.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -21,7 +16,6 @@ const SIGNAL: &str = "signal";
 const ON_ABORT: &str = "onabort";
 const LISTENERS_SLOT: &str = "[[AbortListeners]]";
 
-/// Install the host's AbortController and AbortSignal constructors.
 pub fn install(vm: &mut Vm) {
   let object_prototype = vm.realm().object_prototype();
   let signal_prototype = object(object_prototype.clone());

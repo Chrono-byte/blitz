@@ -91,7 +91,6 @@ fn typed_reverse_preserves_widths_aliases_and_special_numbers() {
   assert_eq!(vm.get_global("ok"), Some(Value::Bool(true)));
   let view = vm.get_global("special").expect("special");
   let details = crate::ecmascript::semantics::byte_views::byte_view_details(&view).expect("view");
-  // Generic host mutation demotes the backing and must keep the semantic fallback.
   details.data.borrow_mut()[0] = Some(Value::Number(0.0));
   assert!(
     !vm

@@ -1,14 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Declaration phase compilation.
-//!
-//! This module handles the compilation of declarations including:
-//! - Function declarations
-//! - Class declarations
-//! - Statement compilation (which includes declarations)
-//! - Function and arrow function compilation with closure support
-//!
-//! The declaration phase compiles all declaration-type statements into bytecode,
-//! managing function closures, parameter initialization, and class instantiation.
 
 use super::emit::LoweringOpcode;
 use crate::Compiler;
@@ -164,10 +154,6 @@ impl Compiler {
     Ok(())
   }
 
-  /// Compile a function declaration statement into bytecode.
-  ///
-  /// Creates a closure from the function and assigns it to a local slot,
-  /// optionally mirroring to a global if at module root level.
   fn compile_function_declaration_oast(
     &mut self,
     f: &oast::Function<'_>,
@@ -218,11 +204,6 @@ impl Compiler {
     Ok(())
   }
 
-  /// Compile an oxc AST statement into bytecode.
-  ///
-  /// Wrapper that delegates to `compile_statement_oast_with_mode` with `skip_pop` = false,
-  /// meaning expression values will be discarded from the compiler's virtual
-  /// value stack.
   pub(super) fn compile_statement_oast(
     &mut self,
     stmt: &oast::Statement,
@@ -230,21 +211,6 @@ impl Compiler {
     self.compile_statement_oast_with_mode(stmt, false, None)
   }
 
-  /// Compile an oxc AST statement into bytecode with optional result preservation.
-  ///
-  /// # Arguments
-  ///
-  /// * `stmt` - The statement to compile
-  /// * `skip_pop` - If true, the result of expression statements is preserved
-  ///   on the compiler's virtual value stack
-  ///
-  /// This handles all statement types including:
-  /// - Import/export declarations
-  /// - Variable, function, and class declarations
-  /// - Expression statements
-  /// - Control flow (if/else, switch, loops)
-  /// - Try/catch/finally blocks
-  /// - Labeled statements
   pub(super) fn compile_statement_oast_with_mode(
     &mut self,
     stmt: &oast::Statement,

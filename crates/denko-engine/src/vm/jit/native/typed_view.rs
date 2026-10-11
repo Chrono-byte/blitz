@@ -90,9 +90,6 @@ impl NativeCode {
         touched[changed] = true;
       }
     }
-    // Failed guards restore the start of the iteration. Only cells that the
-    // decoded operations can overwrite need snapshots; view/key markers do not
-    // write the numeric frame at all.
     let backup_offsets: Vec<_> = touched
       .iter()
       .enumerate()

@@ -3,7 +3,6 @@
 use denko::parser::Parser as JsParser;
 use std::path::{Path, PathBuf};
 
-/// Resolves explicit files or discovers sources beneath a project root.
 pub(crate) fn paths(
   paths: &[PathBuf],
   project: Option<&Path>,
@@ -31,7 +30,6 @@ pub(crate) fn paths(
   Ok(files)
 }
 
-/// Parses and checks source files using Blitz's in-process OXC checker.
 pub(crate) fn run(
   paths: &[PathBuf],
   strict: bool,

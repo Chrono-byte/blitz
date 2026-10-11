@@ -2,20 +2,10 @@
 
 use super::*;
 
-/// Converts an OAST `TSTypeAnnotation` into a `Type` value.
-///
-/// # Errors
-///
-/// Returns a `TypeCheckerError` if the type cannot be converted.
 pub(super) fn convert_type_ann(ty: &oast::TSTypeAnnotation<'_>) -> Result<Type, TypeCheckerError> {
   convert_ts_type(&ty.type_annotation)
 }
 
-/// Converts an OAST `TSType` into a `Type` value.
-///
-/// # Errors
-///
-/// Returns a `TypeCheckerError` if the type cannot be converted.
 pub(super) fn convert_ts_type(ty: &oast::TSType<'_>) -> Result<Type, TypeCheckerError> {
   use oast::TSType::*;
 

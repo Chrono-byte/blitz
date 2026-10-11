@@ -1,9 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Bounded, runtime-facing WebSocket server built on FastWebSockets.
-//!
-//! The server owns all socket tasks. It exchanges only owned byte buffers and
-//! numeric connection identifiers with the runtime, so VM values never cross
-//! an I/O task boundary.
 
 use std::convert::Infallible;
 use std::io;
@@ -433,7 +428,6 @@ async fn run_connection<S>(
   }
 }
 
-/// Complete an HTTP upgrade and run the resulting WebSocket connection.
 pub(crate) async fn run_upgrade(
   connection_id: u64,
   upgrade: fastwebsockets::upgrade::UpgradeFut,
@@ -447,7 +441,6 @@ pub(crate) async fn run_upgrade(
   }
 }
 
-/// Connect a client WebSocket and feed it into the shared runtime event path.
 pub(crate) async fn connect_client(
   connection_id: u64,
   url: String,

@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Node-compatible process metadata exposed by the Blitz host.
 
 use std::cell::RefCell;
 use std::rc::Rc;

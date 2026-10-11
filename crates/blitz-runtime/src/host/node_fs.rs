@@ -1,9 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Direct host primitives for the initial Node filesystem compatibility slice.
-//!
-//! This module intentionally does not depend on the Effect filesystem service.
-//! The public `node:fs` facades translate the small result records below into
-//! Node-shaped exceptions, while this boundary owns the actual OS calls.
 
 use std::cell::RefCell;
 use std::fs::{self, File, Metadata, OpenOptions};
@@ -25,7 +20,6 @@ const VALUE: &str = "value";
 const MAX_FILE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_DIRECTORY_ENTRIES: usize = 100_000;
 
-/// Install the private Node filesystem primitive object.
 #[allow(clippy::too_many_lines)]
 pub(super) fn install(
   vm: &Vm,

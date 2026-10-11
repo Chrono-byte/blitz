@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Project-aware application entry classification.
 
 use std::path::{Path, PathBuf};
 

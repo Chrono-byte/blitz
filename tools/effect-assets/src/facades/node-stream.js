@@ -1,8 +1,5 @@
 import EventEmitter from "node:events";
 
-// The engine does not expose Buffer, so this facade deliberately stores the
-// chunks supplied by callers. Strings and Uint8Array values are accepted in
-// byte mode; object mode accepts any non-null value.
 const streamStates = new WeakMap();
 const defaultHighWaterMarks = { objectMode: 16, bytes: 16384 };
 const asyncIterator = typeof Symbol === "function" ? Symbol.asyncIterator : undefined;
@@ -114,8 +111,6 @@ const emitError = (stream, error) => {
   const state = stateOrUndefined(stream);
   if (state === undefined || state.errorEmitted) return;
   state.errorEmitted = true;
-  // destroy completion is already deferred; preserve EventEmitter's unhandled
-  // error behavior instead of silently swallowing a stream failure.
   stream.emit("error", error);
 };
 

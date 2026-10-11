@@ -1,13 +1,10 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! Private value representation at the native numeric JIT boundary.
-
 use crate::value::Value;
 
 const CANONICAL_NUMBER_NAN: u64 = 0x7FF8_0000_0000_0000;
 const NON_NUMBER_SENTINEL: u64 = 0x7FF9_0000_0000_0000;
 
-/// First high word reserved for non-number values after ignoring the sign bit.
 pub(super) const FIRST_NON_NUMBER_HIGH_WORD: u16 = 0x7FF9;
 
 pub(super) struct NumericArguments {

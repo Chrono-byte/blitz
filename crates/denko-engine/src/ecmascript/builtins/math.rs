@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Math object and its numeric operations.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -85,7 +84,6 @@ fn math_hypot(values: &[f64]) -> f64 {
       .sqrt()
 }
 
-/// Creates the Math namespace object in the specified property order.
 pub(crate) fn create_math_object(
   object_prototype: &Rc<RefCell<ObjectData>>,
   function_prototype: &Rc<RefCell<ObjectData>>,

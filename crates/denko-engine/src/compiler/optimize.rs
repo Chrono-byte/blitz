@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Optimization passes for the Lowering.
 
 use super::bytecode::{Lowering, VirtualInputs, VirtualInstruction, VirtualValue};
 use super::emit::LoweringOpcode;

@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Global builtin functions and prototype methods
 
 use std::rc::Rc;
 
@@ -80,11 +79,6 @@ fn is_js_line_terminator(c: char) -> bool {
   matches!(c, '\u{000A}' | '\u{000D}' | '\u{2028}' | '\u{2029}')
 }
 
-/// Returns `true` when the source contains only whitespace and comments.
-///
-/// This is a cheap pre-scan for `eval` inputs that lets us skip parsing and
-/// compilation entirely for comment-only scripts. That matters for Test262
-/// comment conformance cases that call `eval` tens of thousands of times.
 fn source_is_whitespace_and_comments_only(src: &str) -> bool {
   let mut chars = src.chars().peekable();
 
@@ -129,7 +123,6 @@ fn source_is_whitespace_and_comments_only(src: &str) -> bool {
   }
 }
 
-/// Installs global function builtins such as eval, parseInt, parseFloat, etc.
 pub(crate) fn install_global_function_builtins(
   g: &mut ObjectData,
   function_proto: &Rc<std::cell::RefCell<ObjectData>>,

@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Complete hosted application execution behind one operation.
 
 use std::cell::RefCell;
 use std::path::PathBuf;

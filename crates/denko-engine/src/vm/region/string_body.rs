@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 use super::*;
 
-/// Straight-line counted loops containing primitive string operations.
-/// Runtime preparation proves invariance and callable identity before folding.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(in crate::vm) struct StringBodyRegion {
   pub(in crate::vm) entry_pc: usize,

@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Host capabilities and application primitives for the Blitz runtime.
 
 pub mod app;
-/// Private host-side transport primitives used by the `blitz:app` adapter.
 pub(crate) mod app_transport;
 pub mod application;
 pub mod effect_assets;
