@@ -1,9 +1,4 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Hash lookup over the append-only slots used by Map and Set iterators.
-//!
-//! Slots own every key/value and remain visible to the ordinary GC graph. The
-//! index contains only hashes and positions: deleting a slot releases its key.
-//! All mutations of indexed collection slots must go through this module.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, hash_map::RandomState};
@@ -28,7 +23,6 @@ pub(crate) struct CollectionIndex {
   len: usize,
 }
 
-// ObjectData cloning must not copy a derived index onto different array slots.
 impl Clone for CollectionIndex {
   fn clone(&self) -> Self {
     Self {
@@ -41,7 +35,6 @@ impl Clone for CollectionIndex {
   }
 }
 
-/// A borrowed collection handle; no RefCell borrow survives an operation.
 #[derive(Clone)]
 pub(crate) struct CollectionState {
   elements: Rc<RefCell<ArrayData>>,
