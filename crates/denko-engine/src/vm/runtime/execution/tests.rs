@@ -43,6 +43,43 @@ mod test {
   use super::*;
 
   #[test]
+  fn pending_promise_reactions_retain_captured_bindings_across_gc() {
+    for reject in [false, true] {
+      let (mut vm, _) = run_script(crate::js!(
+        r#"
+        globalThis.pending = new Promise((resolve, reject) => {
+          globalThis.resolvePending = resolve;
+          globalThis.rejectPending = reject;
+        });
+        function attach() {
+          const captured = 41;
+          globalThis.child = pending.then(
+            value => { globalThis.reactionResult = captured + value; },
+            reason => { globalThis.reactionResult = captured + reason; }
+          );
+        }
+        attach();
+      "#
+      ));
+      vm.collect_garbage_prototype();
+      let retained = vm.memory_snapshot().live_closure_environments;
+      let settle = vm
+        .get_global(if reject {
+          "rejectPending"
+        } else {
+          "resolvePending"
+        })
+        .expect("settler");
+      vm.call_with_this(&settle, &Value::Undefined, &[Value::Number(1.0)])
+        .expect("settle");
+      vm.flush_microtasks().expect("reaction");
+      assert_eq!(vm.get_global("reactionResult"), Some(Value::Number(42.0)));
+      vm.collect_garbage_prototype();
+      assert!(vm.memory_snapshot().live_closure_environments < retained);
+    }
+  }
+
+  #[test]
   fn array_push_preserves_loop_carried_character_codes() {
     let source = crate::js!(
       r#"

@@ -21,6 +21,23 @@ struct PromiseCapability {
   reject: Value,
 }
 
+fn promise_reaction(
+  function: BuiltinFn,
+  handler: Value,
+  capability: &PromiseCapability,
+  function_prototype: &Rc<RefCell<ObjectData>>,
+) -> Value {
+  let reaction = builtin_object(function, function_prototype);
+  if let Value::BuiltinObject(_, properties) = &reaction {
+    let mut properties = properties.borrow_mut();
+    properties.set_internal_slot("[[PromiseReactionHandler]]", handler);
+    properties.set_internal_slot("[[PromiseReactionPromise]]", capability.promise.clone());
+    properties.set_internal_slot("[[PromiseReactionResolve]]", capability.resolve.clone());
+    properties.set_internal_slot("[[PromiseReactionReject]]", capability.reject.clone());
+  }
+  reaction
+}
+
 fn new_promise_capability(
   vm: &mut Vm,
   constructor: &Value,
@@ -558,59 +575,69 @@ pub(crate) fn create_promise_intrinsics(
               on_fulfilled: existing_fulfilled,
               on_rejected: existing_rejected,
             } => {
-              let user_on_fulfilled = on_fulfilled;
+              let user_on_fulfilled = on_fulfilled.clone();
               let resolve = capability.resolve.clone();
               let reject = capability.reject.clone();
-              let on_fulfilled_fn = Value::Builtin(Rc::new(move |vm, args| {
-                let off = if args.len() > 1 { 1 } else { 0 };
-                let value = args.get(off).cloned().unwrap_or(Value::Undefined);
-                if matches!(user_on_fulfilled, Value::Undefined) {
-                  vm.call_value_with_this(&resolve, &Value::Undefined, &[value])?;
-                  return Ok(Value::Undefined);
-                }
-                vm.exceptions.last_uncaught = None;
-                match vm.call_value_with_this(&user_on_fulfilled, &Value::Undefined, &[value]) {
-                  Ok(out) => {
-                    vm.call_value_with_this(&resolve, &Value::Undefined, &[out])?;
+              let on_fulfilled_fn = promise_reaction(
+                Rc::new(move |vm, args| {
+                  let off = if args.len() > 1 { 1 } else { 0 };
+                  let value = args.get(off).cloned().unwrap_or(Value::Undefined);
+                  if matches!(user_on_fulfilled, Value::Undefined) {
+                    vm.call_value_with_this(&resolve, &Value::Undefined, &[value])?;
+                    return Ok(Value::Undefined);
                   }
-                  Err(err) => {
-                    let reason = vm
-                      .exceptions
-                      .last_uncaught
-                      .take()
-                      .unwrap_or(Value::String(format!("{}", err).into()));
-                    vm.call_value_with_this(&reject, &Value::Undefined, &[reason])?;
+                  vm.exceptions.last_uncaught = None;
+                  match vm.call_value_with_this(&user_on_fulfilled, &Value::Undefined, &[value]) {
+                    Ok(out) => {
+                      vm.call_value_with_this(&resolve, &Value::Undefined, &[out])?;
+                    }
+                    Err(err) => {
+                      let reason = vm
+                        .exceptions
+                        .last_uncaught
+                        .take()
+                        .unwrap_or(Value::String(format!("{}", err).into()));
+                      vm.call_value_with_this(&reject, &Value::Undefined, &[reason])?;
+                    }
                   }
-                }
-                Ok(Value::Undefined)
-              }));
+                  Ok(Value::Undefined)
+                }),
+                on_fulfilled,
+                &capability,
+                &promise_then_function_proto,
+              );
 
-              let user_on_rejected = on_rejected;
+              let user_on_rejected = on_rejected.clone();
               let reject = capability.reject.clone();
               let resolve = capability.resolve.clone();
-              let on_rejected_fn = Value::Builtin(Rc::new(move |vm, args| {
-                let off = if args.len() > 1 { 1 } else { 0 };
-                let reason = args.get(off).cloned().unwrap_or(Value::Undefined);
-                if matches!(user_on_rejected, Value::Undefined) {
-                  vm.call_value_with_this(&reject, &Value::Undefined, &[reason])?;
-                  return Ok(Value::Undefined);
-                }
-                vm.exceptions.last_uncaught = None;
-                match vm.call_value_with_this(&user_on_rejected, &Value::Undefined, &[reason]) {
-                  Ok(out) => {
-                    vm.call_value_with_this(&resolve, &Value::Undefined, &[out])?;
+              let on_rejected_fn = promise_reaction(
+                Rc::new(move |vm, args| {
+                  let off = if args.len() > 1 { 1 } else { 0 };
+                  let reason = args.get(off).cloned().unwrap_or(Value::Undefined);
+                  if matches!(user_on_rejected, Value::Undefined) {
+                    vm.call_value_with_this(&reject, &Value::Undefined, &[reason])?;
+                    return Ok(Value::Undefined);
                   }
-                  Err(err) => {
-                    let reject_reason = vm
-                      .exceptions
-                      .last_uncaught
-                      .take()
-                      .unwrap_or(Value::String(format!("{}", err).into()));
-                    vm.call_value_with_this(&reject, &Value::Undefined, &[reject_reason])?;
+                  vm.exceptions.last_uncaught = None;
+                  match vm.call_value_with_this(&user_on_rejected, &Value::Undefined, &[reason]) {
+                    Ok(out) => {
+                      vm.call_value_with_this(&resolve, &Value::Undefined, &[out])?;
+                    }
+                    Err(err) => {
+                      let reject_reason = vm
+                        .exceptions
+                        .last_uncaught
+                        .take()
+                        .unwrap_or(Value::String(format!("{}", err).into()));
+                      vm.call_value_with_this(&reject, &Value::Undefined, &[reject_reason])?;
+                    }
                   }
-                }
-                Ok(Value::Undefined)
-              }));
+                  Ok(Value::Undefined)
+                }),
+                on_rejected,
+                &capability,
+                &promise_then_function_proto,
+              );
 
               existing_fulfilled.push(on_fulfilled_fn);
               existing_rejected.push(on_rejected_fn);
