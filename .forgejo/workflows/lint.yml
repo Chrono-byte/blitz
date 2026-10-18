@@ -43,6 +43,9 @@ jobs:
       - name: Check out repository
         uses: https://data.forgejo.org/actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
 
+      - name: Install native build dependencies
+        run: dnf install -y --setopt=install_weak_deps=False gcc gcc-c++ make pkgconf-pkg-config openssl-devel
+
       - name: Install Rust toolchain
         uses: https://github.com/dtolnay/rust-toolchain@1.97.0
         with:

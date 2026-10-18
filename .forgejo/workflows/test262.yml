@@ -19,6 +19,9 @@ jobs:
         with:
           submodules: true
 
+      - name: Install native build dependencies
+        run: dnf install -y --setopt=install_weak_deps=False gcc gcc-c++ make pkgconf-pkg-config openssl-devel
+
       - name: Install Rust toolchain
         uses: https://github.com/dtolnay/rust-toolchain@1.97.0
 
