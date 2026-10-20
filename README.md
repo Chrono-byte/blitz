@@ -105,33 +105,6 @@ contracts and runtime boundaries. New portable service work is moving to
 Effect's first-party APIs with Blitz supplying the live platform Layer; see the
 [first-party Effect API migration](docs/FIRST_PARTY_EFFECT_API_MIGRATION.md).
 
-## Node.js compatibility
-
-Node.js support is a separate compatibility layer. The CLI provides `off`,
-`core`, `tooling`, and `full` compatibility profiles:
-
-```sh
-cargo run -p blitz-cli -- --node-compat tooling run path/to/app.ts
-```
-
-A profile only enables compatibility work that has been implemented. It does
-not imply complete Node.js support. The current module-by-module status lives
-in the [compatibility table](crates/blitz-runtime/compat/README.md).
-
-## Examples
-
-- [Helpdesk API](examples/helpdesk-api/README.md) — a TypeScript and Effect HTTP
-  API with a small React frontend
-- [Collaborative docs](examples/collaborative-docs/README.md) — a realtime rich-text
-  and Markdown editor with a Blitz sync server
-- [IRC chat](examples/irc-chat-v2/README.md) — a WebSocket server with terminal
-  clients
-- [Runtime examples](crates/blitz-runtime/examples/README.md) — small JavaScript
-  and TypeScript programs
-
-The examples use public modules bundled with Blitz. The runtime examples do not
-need an npm install or a separate TypeScript build step.
-
 ## Project layout
 
 - `crates/denko-engine` — the Denko parser, compiler, VM, garbage collector, and builtins
@@ -165,39 +138,6 @@ cargo run -p blitz-test262 --bin test262
 Run it with `--help` to see filtering, edition, worker, manifest, and report
 options. More details are available in the
 [Test262 notes](docs/test262/README.md).
-
-## Editor support
-
-The [language server](language-server/README.md) uses `blitz analyze` for
-compiler-owned diagnostics, symbols, completions, hover information, inlay
-hints, and go-to-definition. A local extension for Zed is available under
-[`editors/zed`](editors/zed).
-
-## Roadmap and documentation
-
-Blitz keeps detailed design work outside the main README:
-
-- [Runtime roadmap](docs/RUNTIME_ROADMAP.md)
-- [TypeScript support](docs/TYPESCRIPT.md)
-- [Effect runtime design](docs/EFFECT_STDLIB_DESIGN.md)
-- [Node.js compatibility plan](docs/NODE_COMPATIBILITY_PLAN.md)
-- [RISC v2 bytecode specification](docs/RISC_V2_SPEC.md)
-
-These documents describe direction as well as completed work. Plans should not
-be read as promises that every listed feature is already available.
-
-## Development
-
-Useful checks before submitting a change:
-
-```sh
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets
-cargo test --workspace
-```
-
-The language server is a separate Bun workspace. Its development commands are
-listed in [language-server/README.md](language-server/README.md).
 
 ## License
 
